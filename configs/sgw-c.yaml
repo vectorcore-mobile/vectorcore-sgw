@@ -1,0 +1,37 @@
+sgwc:
+  node_id: "sgw-c-1"
+  plmn:
+    mcc: "311"
+    mnc: "435"
+
+s11:
+  listen: "10.90.250.186:2123"
+  t3_response_seconds: 3
+  n3_requests: 5
+
+s5c:
+  local_addr: "10.90.250.186:2123"
+  # PGW S5/S8-C address comes from the MME's CSReq F-TEID IE (instance 1)
+  # per TS 23.401 §5.3.2.1 and TS 29.274 Table 7.2.1-1.
+
+pfcp:
+  local_addr: "10.90.250.186:8805"
+  heartbeat_interval_seconds: 10
+  heartbeat_timeout_seconds: 30
+  sgwu:
+    - name: "sgw-u-1"
+      node_id: "sgw-u-1"
+      addr: "10.90.250.186:8805"
+
+logging:
+  level: info
+  file: /var/log/vectorcore/sgw/sgw-c.log
+
+api:
+  listen: "0.0.0.0:8080"
+
+metrics:
+  listen: "0.0.0.0:9090"
+
+shutdown:
+  timeout_seconds: 5

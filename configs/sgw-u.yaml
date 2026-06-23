@@ -1,0 +1,35 @@
+sgwu:
+  node_id: "sgw-u-1"
+
+pfcp:
+  listen: "10.90.250.11:8805"
+  allowed_sgwc:
+    - "10.90.250.10"
+
+gtpu:
+  access:
+    ifname: "ens1f0"
+    local_addr: "10.90.251.11"
+  core:
+    ifname: "ens1f1"
+    local_addr: "10.90.252.11"
+
+dataplane:
+  mode: "tc-bpf"
+  unknown_teid: "punt"
+  attach_on_start: true
+  cleanup_on_exit: true
+  bpf_map_max_entries: 65536
+
+logging:
+  level: info
+  file: /var/log/vectorcore/sgw/sgw-u.log
+
+api:
+  listen: "0.0.0.0:8081"
+
+metrics:
+  listen: "0.0.0.0:9091"
+
+shutdown:
+  timeout_seconds: 5
