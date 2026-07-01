@@ -114,7 +114,7 @@ func TestValidateRejectsUnsupportedDriverMode(t *testing.T) {
 	}
 	cfg.GTPU.S1U = GTPULogical{Bind: "alpha"}
 	cfg.GTPU.S5U = GTPULogical{Bind: "alpha"}
-	cfg.Dataplane.DriverMode = "tc"
+	cfg.Dataplane.DriverMode = "unsupported"
 
 	if err := cfg.Validate(); err == nil {
 		t.Fatal("Validate succeeded with unsupported driver_mode")

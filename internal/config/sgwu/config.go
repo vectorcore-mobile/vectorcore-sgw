@@ -55,9 +55,9 @@ type DataplaneConfig struct {
 	DriverMode string `yaml:"driver_mode"`
 	// UnknownTEID controls unknown-TEID behavior: "punt" or "drop". Default "punt".
 	UnknownTEID string `yaml:"unknown_teid"`
-	// AttachOnStart programs TC hooks at startup when true. Default true.
+	// AttachOnStart programs XDP hooks at startup when true. Default true.
 	AttachOnStart bool `yaml:"attach_on_start"`
-	// CleanupOnExit removes TC hooks on shutdown when true. Default true.
+	// CleanupOnExit removes XDP hooks on shutdown when true. Default true.
 	CleanupOnExit bool `yaml:"cleanup_on_exit"`
 	// MapMaxEntries is the operator-facing eBPF map capacity setting.
 	MapMaxEntries int `yaml:"map_max_entries"`

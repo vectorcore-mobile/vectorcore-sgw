@@ -3,4 +3,4 @@
 // regenerate the Go bindings (requires clang and libbpf-dev).
 package bpf
 
-//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -target bpfel -output-dir . TcSgwGtpu ../../../ebpf/tc_sgw_gtpu.c -- -I../../../ebpf/headers -I/usr/include -I/usr/include/x86_64-linux-gnu -O2 -Wall
+//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -target bpfel -output-dir . XdpSgwGtpu ../../../ebpf/xdp_sgw_gtpu.c -- -I../../../ebpf/headers -I/usr/include -I/usr/include/x86_64-linux-gnu -O2 -Wall

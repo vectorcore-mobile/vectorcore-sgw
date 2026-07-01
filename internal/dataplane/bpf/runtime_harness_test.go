@@ -4,7 +4,7 @@ package bpf
 
 // Runtime test harness: creates an isolated network namespace with two veth
 // pairs simulating the S1-U and S5/S8-U links, attaches the real compiled
-// tc_sgw_gtpu BPF object to the SGW-U-facing end of each, and provides raw
+// xdp_sgw_gtpu BPF object to the SGW-U-facing end of each, and provides raw
 // AF_PACKET injection/capture helpers so tests can drive actual kernel BPF
 // execution instead of only exercising the Go-side rule compiler.
 //

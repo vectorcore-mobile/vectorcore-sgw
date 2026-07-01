@@ -2,7 +2,7 @@ SGWC_APP    = sgw-c
 SGWU_APP    = sgw-u
 SGWCTL_APP  = sgwctl
 BIN_DIR     = bin
-BPF_OBJ     = internal/dataplane/bpf/tcsgwgtpu_bpfel.o
+BPF_OBJ     = internal/dataplane/bpf/xdpsgwgtpu_bpfel.o
 PREFIX     ?= /opt/vectorcore
 SYSCONFDIR ?= /etc
 SYSTEMD_DIR ?= $(SYSCONFDIR)/systemd/system
@@ -11,7 +11,7 @@ GOCACHE    ?= /tmp/vectorcore-sgw-gocache
 GOMODCACHE ?= /tmp/vectorcore-sgw-gomodcache
 GOENV       = GOCACHE=$(GOCACHE) GOMODCACHE=$(GOMODCACHE)
 
-VERSION    ?= 0.1.5
+VERSION    ?= 0.1.5d
 BUILD_DATE ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
 LDFLAGS     = -X main.version=$(VERSION) -X main.buildDate=$(BUILD_DATE)
 

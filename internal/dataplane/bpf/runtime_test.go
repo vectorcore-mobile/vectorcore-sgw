@@ -11,7 +11,7 @@ package bpf
 //   - downlink traffic forwarded by BPF
 //   - counters increment per rule
 // plus the ACTION_DROP and unknown-TEID-punt paths, which the BPF program
-// supports per ebpf/tc_sgw_gtpu.c but had no runtime coverage at all.
+// supports per ebpf/xdp_sgw_gtpu.c but had no runtime coverage at all.
 
 import (
 	"net"
@@ -49,7 +49,7 @@ func TestBPFAttachDetach(t *testing.T) {
 
 // TestBPFAttachDetachSingleInterface verifies single-NIC deployments where
 // S1-U and S5/S8-U are logical roles on the same Linux interface. Rework
-// Phase 2 requires one TC attach for the shared ifindex, not a duplicate attach
+// Phase 2 requires one XDP attach for the shared ifindex, not a duplicate attach
 // attempt that can fail at startup.
 func TestBPFAttachDetachSingleInterface(t *testing.T) {
 	h := newHarness(t)
@@ -90,8 +90,8 @@ func TestBPFForwardUplink(t *testing.T) {
 		newTEID   = 0x2000
 		counterID = 7
 	)
-	key := TcSgwGtpuSgwRuleKey{Teid: localTEID, Ifindex: dp.S1UIfindex()}
-	val := TcSgwGtpuSgwRuleValue{
+	key := XdpSgwGtpuSgwRuleKey{Teid: localTEID, Ifindex: dp.S1UIfindex()}
+	val := XdpSgwGtpuSgwRuleValue{
 		Action:        actionForward,
 		EgressIfindex: dp.S5UIfindex(),
 		NewTeid:       newTEID,
@@ -161,8 +161,8 @@ func TestBPFForwardDownlink(t *testing.T) {
 		newTEID   = 0x4000
 		counterID = 9
 	)
-	key := TcSgwGtpuSgwRuleKey{Teid: localTEID, Ifindex: dp.S5UIfindex()}
-	val := TcSgwGtpuSgwRuleValue{
+	key := XdpSgwGtpuSgwRuleKey{Teid: localTEID, Ifindex: dp.S5UIfindex()}
+	val := XdpSgwGtpuSgwRuleValue{
 		Action:        actionForward,
 		EgressIfindex: dp.S1UIfindex(),
 		NewTeid:       newTEID,
@@ -203,7 +203,7 @@ func TestBPFForwardDownlink(t *testing.T) {
 }
 
 // TestBPFActionDrop installs an ACTION_DROP rule and verifies the matching
-// packet does not emerge on any egress link (TC_ACT_SHOT). The BPF program
+// packet does not emerge on any egress link (XDP_DROP). The BPF program
 // supports three action codes (ACTION_FORWARD/DROP/PUNT);
 // only FORWARD had any runtime coverage before this phase.
 func TestBPFActionDrop(t *testing.T) {
@@ -215,8 +215,8 @@ func TestBPFActionDrop(t *testing.T) {
 	t.Cleanup(func() { dp.Close() })
 
 	const localTEID = 0x5000
-	key := TcSgwGtpuSgwRuleKey{Teid: localTEID, Ifindex: dp.S1UIfindex()}
-	val := TcSgwGtpuSgwRuleValue{Action: actionDrop}
+	key := XdpSgwGtpuSgwRuleKey{Teid: localTEID, Ifindex: dp.S1UIfindex()}
+	val := XdpSgwGtpuSgwRuleValue{Action: actionDrop}
 	if err := dp.InstallRule(key, val); err != nil {
 		t.Fatalf("InstallRule: %v", err)
 	}
@@ -225,7 +225,7 @@ func TestBPFActionDrop(t *testing.T) {
 
 	// Capture window is short and noise-tolerant (captureGPDU discards
 	// anything that doesn't parse as our G-PDU, e.g. background IPv6 NDP on
-	// the link); finding none within the window confirms TC_ACT_SHOT, not
+	// the link); finding none within the window confirms XDP_DROP, not
 	// just that the very first captured frame happened to be unrelated.
 	captureFd := openRawSocket(t, h.s5uPeer.ifindex, unix.ETH_P_ALL, 500*time.Millisecond)
 	injectFd := openRawSocket(t, h.s1uPeer.ifindex, unix.ETH_P_ALL, 0)
@@ -239,7 +239,7 @@ func TestBPFActionDrop(t *testing.T) {
 }
 
 // TestBPFPuntUnknownTEID verifies that a G-PDU with no matching forwarding
-// rule is punted to the normal kernel stack (TC_ACT_OK) rather than dropped
+// rule is punted to the normal kernel stack (XDP_PASS) rather than dropped
 // or redirected, matching the project's "punt unsupported packets to
 // userspace" design (docs/vectorcore-sgw-project.md Phase 7 step 9). A real
 // UDP listener bound on the S1-U device's own address stands in for the
@@ -253,7 +253,7 @@ func TestBPFPuntUnknownTEID(t *testing.T) {
 	}
 	t.Cleanup(func() { dp.Close() })
 	// No rule installed for this TEID — the BPF map lookup misses and the
-	// program must return TC_ACT_OK (punt), not drop or redirect.
+	// program must return XDP_PASS (punt), not drop or redirect.
 
 	listener, err := net.ListenUDP("udp4", &net.UDPAddr{IP: h.s1u.ip, Port: sgwugtpu.Port})
 	if err != nil {
@@ -295,8 +295,8 @@ func TestBPFMapCapacityAndRuleChurn(t *testing.T) {
 	t.Cleanup(func() { dp.Close() })
 
 	for i := 0; i < 8; i++ {
-		key := TcSgwGtpuSgwRuleKey{Teid: uint32(0xA000 + i), Ifindex: dp.S1UIfindex()}
-		val := TcSgwGtpuSgwRuleValue{Action: actionDrop, CounterId: uint32(0xA000 + i)}
+		key := XdpSgwGtpuSgwRuleKey{Teid: uint32(0xA000 + i), Ifindex: dp.S1UIfindex()}
+		val := XdpSgwGtpuSgwRuleValue{Action: actionDrop, CounterId: uint32(0xA000 + i)}
 		if err := dp.InstallRule(key, val); err != nil {
 			t.Fatalf("InstallRule #%d: %v", i, err)
 		}
@@ -309,13 +309,13 @@ func TestBPFMapCapacityAndRuleChurn(t *testing.T) {
 		t.Fatalf("RuleCount after fill = %d; want 8", count)
 	}
 
-	overflowKey := TcSgwGtpuSgwRuleKey{Teid: 0xA999, Ifindex: dp.S1UIfindex()}
-	if err := dp.InstallRule(overflowKey, TcSgwGtpuSgwRuleValue{Action: actionDrop}); err == nil {
+	overflowKey := XdpSgwGtpuSgwRuleKey{Teid: 0xA999, Ifindex: dp.S1UIfindex()}
+	if err := dp.InstallRule(overflowKey, XdpSgwGtpuSgwRuleValue{Action: actionDrop}); err == nil {
 		t.Fatal("InstallRule succeeded after map reached max entries")
 	}
 
 	for i := 0; i < 8; i++ {
-		key := TcSgwGtpuSgwRuleKey{Teid: uint32(0xA000 + i), Ifindex: dp.S1UIfindex()}
+		key := XdpSgwGtpuSgwRuleKey{Teid: uint32(0xA000 + i), Ifindex: dp.S1UIfindex()}
 		if err := dp.RemoveRule(key); err != nil {
 			t.Fatalf("RemoveRule #%d: %v", i, err)
 		}
@@ -347,8 +347,8 @@ func TestBPFForwardCounterReconciliation(t *testing.T) {
 		counterID = 0xBEEF
 		packets   = 32
 	)
-	key := TcSgwGtpuSgwRuleKey{Teid: localTEID, Ifindex: dp.S1UIfindex()}
-	val := TcSgwGtpuSgwRuleValue{
+	key := XdpSgwGtpuSgwRuleKey{Teid: localTEID, Ifindex: dp.S1UIfindex()}
+	val := XdpSgwGtpuSgwRuleValue{
 		Action:        actionForward,
 		EgressIfindex: dp.S5UIfindex(),
 		NewTeid:       newTEID,

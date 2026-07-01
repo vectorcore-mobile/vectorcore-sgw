@@ -127,8 +127,8 @@ func TestSGWURoutesListPFCPAssociations(t *testing.T) {
 func TestSGWURoutesListBPFRulesAndUnattachedDataplane(t *testing.T) {
 	store := sgwusession.NewStore()
 	rule := bpf.RuleEntry{
-		Key: bpf.TcSgwGtpuSgwRuleKey{Teid: 0x1000, Ifindex: 1},
-		Value: bpf.TcSgwGtpuSgwRuleValue{
+		Key: bpf.XdpSgwGtpuSgwRuleKey{Teid: 0x1000, Ifindex: 1},
+		Value: bpf.XdpSgwGtpuSgwRuleValue{
 			Action:        1,
 			EgressIfindex: 2,
 			NewTeid:       0x2000,

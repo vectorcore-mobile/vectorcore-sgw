@@ -40,8 +40,8 @@ func BenchmarkBPFForward(b *testing.B) {
 		newTEID   = 0x7000
 		counterID = 11
 	)
-	key := TcSgwGtpuSgwRuleKey{Teid: localTEID, Ifindex: dp.S1UIfindex()}
-	val := TcSgwGtpuSgwRuleValue{
+	key := XdpSgwGtpuSgwRuleKey{Teid: localTEID, Ifindex: dp.S1UIfindex()}
+	val := XdpSgwGtpuSgwRuleValue{
 		Action:        actionForward,
 		EgressIfindex: dp.S5UIfindex(),
 		NewTeid:       newTEID,

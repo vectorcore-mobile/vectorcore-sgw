@@ -35,7 +35,7 @@ func (h *captureHandler) WithGroup(string) slog.Handler      { return h }
 // PFCP Source Interface=Access (0) per TS 29.244 Table 8.2.2-1: "Access | 0".
 func TestBuildKeyUplinkAccess(t *testing.T) {
 	c := &Compiler{
-		dp: &TCDataplane{s1uIfindex: 10, s5uIfindex: 20},
+		dp: &XDPDataplane{s1uIfindex: 10, s5uIfindex: 20},
 	}
 	pdr := &session.PDR{
 		ID:              1,
@@ -60,7 +60,7 @@ func TestBuildKeyUplinkAccess(t *testing.T) {
 // PFCP Source Interface=Core (1) per TS 29.244 Table 8.2.2-1: "Core | 1".
 func TestBuildKeyDownlinkCore(t *testing.T) {
 	c := &Compiler{
-		dp: &TCDataplane{s1uIfindex: 10, s5uIfindex: 20},
+		dp: &XDPDataplane{s1uIfindex: 10, s5uIfindex: 20},
 	}
 	pdr := &session.PDR{
 		ID:              2,
@@ -91,7 +91,7 @@ func TestBuildKeyDownlinkCore(t *testing.T) {
 func TestBuildValueFORWUplink(t *testing.T) {
 	s5uLocalIP := netip.MustParseAddr("10.0.1.2")
 	c := &Compiler{
-		dp:         &TCDataplane{s1uIfindex: 10, s5uIfindex: 20},
+		dp:         &XDPDataplane{s1uIfindex: 10, s5uIfindex: 20},
 		s1uLocalIP: netip.MustParseAddr("10.0.0.1"),
 		s5uLocalIP: s5uLocalIP,
 	}
@@ -147,7 +147,7 @@ func TestBuildValueFORWUplink(t *testing.T) {
 func TestBuildValueFORWDownlink(t *testing.T) {
 	s1uLocalIP := netip.MustParseAddr("10.0.0.1")
 	c := &Compiler{
-		dp:         &TCDataplane{s1uIfindex: 10, s5uIfindex: 20},
+		dp:         &XDPDataplane{s1uIfindex: 10, s5uIfindex: 20},
 		s1uLocalIP: s1uLocalIP,
 		s5uLocalIP: netip.MustParseAddr("10.0.1.2"),
 	}
@@ -196,7 +196,7 @@ func TestBuildValueFORWDownlink(t *testing.T) {
 // Apply Action DROP (0x01) per TS 29.244 Figure 8.2.26-1: "Bit 1 DROP=0x01".
 func TestBuildValueDROP(t *testing.T) {
 	c := &Compiler{
-		dp: &TCDataplane{s1uIfindex: 10, s5uIfindex: 20},
+		dp: &XDPDataplane{s1uIfindex: 10, s5uIfindex: 20},
 	}
 	pdr := &session.PDR{ID: 1, LocalTEID: 1, SourceInterface: pfcpie.SourceInterfaceAccess}
 	far := &session.FAR{
@@ -217,7 +217,7 @@ func TestBuildValueDROP(t *testing.T) {
 // This prevents the BPF program from forwarding to the zero address.
 func TestBuildValueFORWNoIP(t *testing.T) {
 	c := &Compiler{
-		dp:         &TCDataplane{s1uIfindex: 10, s5uIfindex: 20},
+		dp:         &XDPDataplane{s1uIfindex: 10, s5uIfindex: 20},
 		s1uLocalIP: netip.MustParseAddr("10.0.0.1"),
 		s5uLocalIP: netip.MustParseAddr("10.0.1.2"),
 	}
@@ -239,7 +239,7 @@ func TestBuildValueFORWNoIP(t *testing.T) {
 // TestSyncRulesSkipsZeroTEID verifies that PDRs without an allocated TEID
 // (LocalTEID=0) are skipped by syncRules. TEIDs start at 1 per session store.
 func TestSyncRulesSkipsZeroTEID(t *testing.T) {
-	dp := &TCDataplane{s1uIfindex: 10, s5uIfindex: 20}
+	dp := &XDPDataplane{s1uIfindex: 10, s5uIfindex: 20}
 	// Replace maps with nil to catch any accidental Put calls
 	c := &Compiler{dp: dp, log: newTestLogger(t)}
 	sess := &session.Session{
@@ -262,10 +262,10 @@ func TestSyncRulesSkipsZeroTEID(t *testing.T) {
 func TestSyncRulesReportsUnchangedRulesWithoutReinstallNoise(t *testing.T) {
 	h := &captureHandler{}
 	c := &Compiler{
-		dp: &TCDataplane{
+		dp: &XDPDataplane{
 			s1uIfindex: 10,
 			s5uIfindex: 20,
-			testRules:  make(map[TcSgwGtpuSgwRuleKey]TcSgwGtpuSgwRuleValue),
+			testRules:  make(map[XdpSgwGtpuSgwRuleKey]XdpSgwGtpuSgwRuleValue),
 		},
 		log: slog.New(h),
 	}

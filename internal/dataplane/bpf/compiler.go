@@ -22,15 +22,15 @@ import (
 //   - Access (0, Table 8.2.2-1 of TS 29.244): uplink — key uses S1-U ifindex
 //   - Core (1, Table 8.2.2-1 of TS 29.244):   downlink — key uses S5/S8-U ifindex
 type Compiler struct {
-	dp         *TCDataplane
+	dp         *XDPDataplane
 	s1uLocalIP netip.Addr // SGW-U S1-U local GTP-U IP (used as outer_src_ip for downlink)
 	s5uLocalIP netip.Addr // SGW-U S5/S8-U local GTP-U IP (used as outer_src_ip for uplink)
 	log        *slog.Logger
 }
 
-// NewCompiler creates a rule compiler for the given TCDataplane.
+// NewCompiler creates a rule compiler for the given XDPDataplane.
 // s1uLocalIP and s5uLocalIP are the SGW-U's own GTP-U addresses on each side.
-func NewCompiler(dp *TCDataplane, s1uLocalIP, s5uLocalIP netip.Addr, log *slog.Logger) *Compiler {
+func NewCompiler(dp *XDPDataplane, s1uLocalIP, s5uLocalIP netip.Addr, log *slog.Logger) *Compiler {
 	return &Compiler{
 		dp:         dp,
 		s1uLocalIP: s1uLocalIP,
@@ -119,7 +119,7 @@ func (c *Compiler) syncRules(sess *session.Session, remove bool) error {
 		if !ok {
 			c.log.Warn("BPF compiler: PDR references unknown FAR — installing DROP rule",
 				"cp_seid", sess.CPSEID, "pdr_id", pdr.ID, "far_id", pdr.FARID)
-			val := TcSgwGtpuSgwRuleValue{Action: actionDrop, CounterId: pdr.LocalTEID}
+			val := XdpSgwGtpuSgwRuleValue{Action: actionDrop, CounterId: pdr.LocalTEID}
 			ruleAdded, ruleUpdated, ruleUnchanged, err := c.installRuleIfChanged(sess, pdr, key, val)
 			added += ruleAdded
 			updated += ruleUpdated
@@ -140,7 +140,7 @@ func (c *Compiler) syncRules(sess *session.Session, remove bool) error {
 			continue
 		}
 
-		// Only the ACTION_FORWARD path in ebpf/tc_sgw_gtpu.c reads/increments
+		// Only the ACTION_FORWARD path in ebpf/xdp_sgw_gtpu.c reads/increments
 		// sgw_rule_stats; the map entry must exist before traffic arrives
 		// (PERCPU_HASH lookup does not auto-create — see InitStats). A stats
 		// map failure (e.g. a full sgw_rule_stats map) must not block the
@@ -177,7 +177,7 @@ func (c *Compiler) syncRules(sess *session.Session, remove bool) error {
 	return firstErr
 }
 
-func (c *Compiler) installRuleIfChanged(sess *session.Session, pdr *session.PDR, key TcSgwGtpuSgwRuleKey, val TcSgwGtpuSgwRuleValue) (added, updated, unchanged int, err error) {
+func (c *Compiler) installRuleIfChanged(sess *session.Session, pdr *session.PDR, key XdpSgwGtpuSgwRuleKey, val XdpSgwGtpuSgwRuleValue) (added, updated, unchanged int, err error) {
 	current, exists, err := c.dp.LookupRule(key)
 	if err != nil {
 		c.log.Warn("BPF compiler: rule lookup failed",
@@ -209,7 +209,7 @@ func (c *Compiler) installRuleIfChanged(sess *session.Session, pdr *session.PDR,
 // The ingress ifindex is determined by the PDR's Source Interface:
 //   - Access (0) per TS 29.244 Table 8.2.2-1 → packet enters on S1-U
 //   - Core (1)   per TS 29.244 Table 8.2.2-1 → packet enters on S5/S8-U
-func (c *Compiler) buildKey(pdr *session.PDR) (TcSgwGtpuSgwRuleKey, error) {
+func (c *Compiler) buildKey(pdr *session.PDR) (XdpSgwGtpuSgwRuleKey, error) {
 	var ifindex uint32
 	switch pdr.SourceInterface {
 	case pfcpie.SourceInterfaceAccess: // 0 = Access per TS 29.244 Table 8.2.2-1
@@ -217,9 +217,9 @@ func (c *Compiler) buildKey(pdr *session.PDR) (TcSgwGtpuSgwRuleKey, error) {
 	case pfcpie.SourceInterfaceCore: // 1 = Core per TS 29.244 Table 8.2.2-1
 		ifindex = c.dp.S5UIfindex()
 	default:
-		return TcSgwGtpuSgwRuleKey{}, fmt.Errorf("unsupported source interface %d", pdr.SourceInterface)
+		return XdpSgwGtpuSgwRuleKey{}, fmt.Errorf("unsupported source interface %d", pdr.SourceInterface)
 	}
-	return TcSgwGtpuSgwRuleKey{
+	return XdpSgwGtpuSgwRuleKey{
 		Teid:    pdr.LocalTEID,
 		Ifindex: ifindex,
 	}, nil
@@ -228,10 +228,10 @@ func (c *Compiler) buildKey(pdr *session.PDR) (TcSgwGtpuSgwRuleKey, error) {
 // buildValue constructs the BPF map value for a PDR/FAR pair.
 // Apply Action mapping per TS 29.244 Figure 8.2.26-1:
 //   - FORW (bit 2 = 0x02) → ACTION_FORWARD with outer IP/TEID rewrite
-//   - DROP (bit 1 = 0x01) → ACTION_DROP (TC_ACT_SHOT)
-//   - other              → ACTION_PUNT (TC_ACT_OK to userspace)
-func (c *Compiler) buildValue(pdr *session.PDR, far *session.FAR) (TcSgwGtpuSgwRuleValue, error) {
-	val := TcSgwGtpuSgwRuleValue{
+//   - DROP (bit 1 = 0x01) → ACTION_DROP (XDP_DROP)
+//   - other              → ACTION_PUNT (XDP_PASS to userspace)
+func (c *Compiler) buildValue(pdr *session.PDR, far *session.FAR) (XdpSgwGtpuSgwRuleValue, error) {
+	val := XdpSgwGtpuSgwRuleValue{
 		CounterId: pdr.LocalTEID, // use local TEID as counter index
 	}
 
@@ -279,7 +279,7 @@ func (c *Compiler) buildValue(pdr *session.PDR, far *session.FAR) (TcSgwGtpuSgwR
 }
 
 // BPF action code constants (project-internal, from project §6.3).
-// Must match ACTION_* defines in ebpf/tc_sgw_gtpu.c.
+// Must match ACTION_* defines in ebpf/xdp_sgw_gtpu.c.
 const (
 	actionForward uint8 = 1
 	actionDrop    uint8 = 2

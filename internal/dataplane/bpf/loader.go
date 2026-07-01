@@ -1,5 +1,5 @@
 // Package bpf provides the XDP GTP-U fast-path dataplane for SGW-U.
-// The BPF program (ebpf/tc_sgw_gtpu.c) attaches to S1-U and S5/S8-U ingress
+// The BPF program (ebpf/xdp_sgw_gtpu.c) attaches to S1-U and S5/S8-U ingress
 // and performs in-place outer IP/TEID rewrite for G-PDU packets.
 package bpf
 
@@ -17,17 +17,14 @@ import (
 // interfaces resolve to the same Linux ifindex, it attaches once.
 // Zero value is not valid; use New.
 type XDPDataplane struct {
-	objs        TcSgwGtpuObjects
+	objs        XdpSgwGtpuObjects
 	accessLink  link.Link // XDP hook on S1-U ingress
 	coreLink    link.Link // XDP hook on S5/S8-U ingress
 	s1uIfindex  uint32
 	s5uIfindex  uint32
 	sharedIface bool
-	testRules   map[TcSgwGtpuSgwRuleKey]TcSgwGtpuSgwRuleValue
+	testRules   map[XdpSgwGtpuSgwRuleKey]XdpSgwGtpuSgwRuleValue
 }
-
-// TCDataplane is kept as a source-compatible alias for older tests/callers.
-type TCDataplane = XDPDataplane
 
 // New loads the XDP GTP-U program in xdp-generic mode. maxEntries controls
 // the BPF map capacity.
@@ -48,7 +45,7 @@ func NewWithMode(s1uIfname, s5uIfname string, maxEntries int, driverMode string)
 		return nil, fmt.Errorf("bpf: S5/S8-U interface %q not found: %w", s5uIfname, err)
 	}
 
-	spec, err := LoadTcSgwGtpu()
+	spec, err := LoadXdpSgwGtpu()
 	if err != nil {
 		return nil, fmt.Errorf("bpf: load BPF spec: %w", err)
 	}
@@ -128,7 +125,7 @@ func (d *XDPDataplane) S5UIfindex() uint32 { return d.s5uIfindex }
 func (d *XDPDataplane) SharedInterface() bool { return d.sharedIface }
 
 // InstallRule inserts or updates a forwarding rule in sgw_fwd_map.
-func (d *XDPDataplane) InstallRule(key TcSgwGtpuSgwRuleKey, val TcSgwGtpuSgwRuleValue) error {
+func (d *XDPDataplane) InstallRule(key XdpSgwGtpuSgwRuleKey, val XdpSgwGtpuSgwRuleValue) error {
 	if d.objs.SgwFwdMap == nil && d.testRules != nil {
 		d.testRules[key] = val
 		return nil
@@ -140,17 +137,17 @@ func (d *XDPDataplane) InstallRule(key TcSgwGtpuSgwRuleKey, val TcSgwGtpuSgwRule
 }
 
 // LookupRule returns one forwarding rule from sgw_fwd_map.
-func (d *XDPDataplane) LookupRule(key TcSgwGtpuSgwRuleKey) (TcSgwGtpuSgwRuleValue, bool, error) {
+func (d *XDPDataplane) LookupRule(key XdpSgwGtpuSgwRuleKey) (XdpSgwGtpuSgwRuleValue, bool, error) {
 	if d.objs.SgwFwdMap == nil && d.testRules != nil {
 		val, ok := d.testRules[key]
 		return val, ok, nil
 	}
-	var val TcSgwGtpuSgwRuleValue
+	var val XdpSgwGtpuSgwRuleValue
 	if err := d.objs.SgwFwdMap.Lookup(key, &val); err != nil {
 		if errors.Is(err, ebpf.ErrKeyNotExist) {
-			return TcSgwGtpuSgwRuleValue{}, false, nil
+			return XdpSgwGtpuSgwRuleValue{}, false, nil
 		}
-		return TcSgwGtpuSgwRuleValue{}, false, fmt.Errorf("bpf: sgw_fwd_map lookup TEID=%d ifindex=%d: %w", key.Teid, key.Ifindex, err)
+		return XdpSgwGtpuSgwRuleValue{}, false, fmt.Errorf("bpf: sgw_fwd_map lookup TEID=%d ifindex=%d: %w", key.Teid, key.Ifindex, err)
 	}
 	return val, true, nil
 }
@@ -158,7 +155,7 @@ func (d *XDPDataplane) LookupRule(key TcSgwGtpuSgwRuleKey) (TcSgwGtpuSgwRuleValu
 // InitStats creates a zeroed per-CPU entry in sgw_rule_stats for counterID.
 //
 // sgw_rule_stats is BPF_MAP_TYPE_PERCPU_HASH; bpf_map_lookup_elem in
-// ebpf/tc_sgw_gtpu.c returns NULL for a key that was never inserted — a
+// ebpf/xdp_sgw_gtpu.c returns NULL for a key that was never inserted — a
 // PERCPU_HASH lookup does not auto-create entries the way an array map
 // would. Without calling this before traffic arrives, the kernel program's
 // "if (stats) stats->packets++" guard is always false and counters never
@@ -172,7 +169,7 @@ func (d *XDPDataplane) InitStats(counterID uint32) error {
 	if err != nil {
 		return fmt.Errorf("bpf: possible CPU count: %w", err)
 	}
-	zero := make([]TcSgwGtpuSgwRuleStats, n)
+	zero := make([]XdpSgwGtpuSgwRuleStats, n)
 	if err := d.objs.SgwRuleStats.Update(counterID, zero, ebpf.UpdateNoExist); err != nil && !errors.Is(err, ebpf.ErrKeyExist) {
 		return fmt.Errorf("bpf: sgw_rule_stats init counter_id=%d: %w", counterID, err)
 	}
@@ -181,7 +178,7 @@ func (d *XDPDataplane) InitStats(counterID uint32) error {
 
 // RemoveRule deletes a forwarding rule from sgw_fwd_map.
 // Returns nil if the key was not present.
-func (d *XDPDataplane) RemoveRule(key TcSgwGtpuSgwRuleKey) error {
+func (d *XDPDataplane) RemoveRule(key XdpSgwGtpuSgwRuleKey) error {
 	if d.objs.SgwFwdMap == nil && d.testRules != nil {
 		delete(d.testRules, key)
 		return nil
@@ -196,7 +193,7 @@ func (d *XDPDataplane) RemoveRule(key TcSgwGtpuSgwRuleKey) error {
 // ReadStats reads the per-CPU packet/byte counters for counterID and returns
 // aggregated totals. ok is false when no entry exists for that counter ID.
 func (d *XDPDataplane) ReadStats(counterID uint32) (packets, bytes uint64, ok bool) {
-	var perCPU []TcSgwGtpuSgwRuleStats
+	var perCPU []XdpSgwGtpuSgwRuleStats
 	if err := d.objs.SgwRuleStats.Lookup(counterID, &perCPU); err != nil {
 		return 0, 0, false
 	}
@@ -222,8 +219,8 @@ func (d *XDPDataplane) RemoveStats(counterID uint32) error {
 // RuleCount returns the number of entries currently in sgw_fwd_map.
 func (d *XDPDataplane) RuleCount() (int, error) {
 	var count int
-	var key TcSgwGtpuSgwRuleKey
-	var val TcSgwGtpuSgwRuleValue
+	var key XdpSgwGtpuSgwRuleKey
+	var val XdpSgwGtpuSgwRuleValue
 	iter := d.objs.SgwFwdMap.Iterate()
 	for iter.Next(&key, &val) {
 		count++
@@ -234,8 +231,8 @@ func (d *XDPDataplane) RuleCount() (int, error) {
 // RuleEntry is one forwarding rule from sgw_fwd_map joined with its
 // sgw_rule_stats counters, for debug/inspection APIs.
 type RuleEntry struct {
-	Key           TcSgwGtpuSgwRuleKey
-	Value         TcSgwGtpuSgwRuleValue
+	Key           XdpSgwGtpuSgwRuleKey
+	Value         XdpSgwGtpuSgwRuleValue
 	Packets       uint64
 	Bytes         uint64
 	StatsRecorded bool // false if no sgw_rule_stats entry exists for this rule's CounterId
@@ -246,8 +243,8 @@ type RuleEntry struct {
 // present (see InitStats — a rule with Action != ACTION_FORWARD, or one
 // whose stats entry failed to initialize, will have StatsRecorded=false).
 func (d *XDPDataplane) Rules() ([]RuleEntry, error) {
-	var key TcSgwGtpuSgwRuleKey
-	var val TcSgwGtpuSgwRuleValue
+	var key XdpSgwGtpuSgwRuleKey
+	var val XdpSgwGtpuSgwRuleValue
 	var entries []RuleEntry
 	iter := d.objs.SgwFwdMap.Iterate()
 	for iter.Next(&key, &val) {
