@@ -1,6 +1,7 @@
 package gtpu
 
 import (
+	"encoding/binary"
 	"io"
 	"log/slog"
 	"net"
@@ -149,9 +150,10 @@ func TestForwarderEchoRequestReply(t *testing.T) {
 // Per §7.3.1: Error Indication must contain TEID Data I and GTP-U Peer Address IEs.
 func TestForwarderGPDUUnknownTEIDSendsErrorIndication(t *testing.T) {
 	store := sgwusession.NewStore()
-	localIP := netip.MustParseAddr("127.0.0.1")
+	fallbackIP := netip.MustParseAddr("127.0.0.10")
+	packetDstIP := netip.MustParseAddr("127.0.0.1")
 
-	fwd, err := New("127.0.0.1:0", localIP, store, discardSlog())
+	fwd, err := New("127.0.0.1:0", fallbackIP, store, discardSlog())
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -173,12 +175,17 @@ func TestForwarderGPDUUnknownTEIDSendsErrorIndication(t *testing.T) {
 	}
 
 	buf := make([]byte, 65535)
-	n, _, err := fwd.conn.ReadFromUDP(buf)
+	oob := make([]byte, 256)
+	n, oobn, _, _, err := fwd.conn.ReadMsgUDP(buf, oob)
 	if err != nil {
-		t.Fatalf("ReadFromUDP: %v", err)
+		t.Fatalf("ReadMsgUDP: %v", err)
+	}
+	gotLocalIP := packetDstAddr(oob[:oobn])
+	if gotLocalIP != packetDstIP {
+		t.Fatalf("packet destination IP = %v; want %v", gotLocalIP, packetDstIP)
 	}
 	clientAddr := clientConn.LocalAddr().(*net.UDPAddr)
-	fwd.handle(buf[:n], clientAddr)
+	fwd.handleWithLocalIP(buf[:n], clientAddr, gotLocalIP)
 
 	if fwd.unknownTEID.Load() != 1 {
 		t.Errorf("unknownTEID counter = %d, want 1", fwd.unknownTEID.Load())
@@ -216,9 +223,65 @@ func TestForwarderGPDUUnknownTEIDSendsErrorIndication(t *testing.T) {
 			t.Errorf("TEID Data I = %d, want 999 (§7.3.1: TEID from the triggering G-PDU)", teid)
 		}
 	}
-	if _, hasPeer := ies[IETypeGTPUPeerAddress]; !hasPeer {
+	peerVal, hasPeer := ies[IETypeGTPUPeerAddress]
+	if !hasPeer {
 		t.Error("Error Indication missing GTP-U Peer Address IE (Table 7.3.1-1: Mandatory)")
+	} else if len(peerVal) != 4 {
+		t.Errorf("GTP-U Peer Address IE length = %d; want 4 for IPv4", len(peerVal))
+	} else {
+		gotPeer := addrFrom4Bytes(peerVal)
+		if gotPeer != packetDstIP {
+			t.Errorf("GTP-U Peer Address IE = %v; want triggering packet destination %v (§7.3.1)", gotPeer, packetDstIP)
+		}
 	}
+}
+
+func TestForwarderGPDUUnknownTEIDFallsBackToConfiguredLocalIP(t *testing.T) {
+	store := sgwusession.NewStore()
+	fallbackIP := netip.MustParseAddr("127.0.0.10")
+
+	fwd, err := New("127.0.0.1:0", fallbackIP, store, discardSlog())
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer fwd.conn.Close()
+
+	clientConn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 0})
+	if err != nil {
+		t.Fatalf("client ListenUDP: %v", err)
+	}
+	defer clientConn.Close()
+
+	clientAddr := clientConn.LocalAddr().(*net.UDPAddr)
+	gpduHdr := Header{Version: 1, PT: true, MsgType: MsgTypeGPDU, TEID: 12345}
+	fwd.handleWithLocalIP(Marshal(gpduHdr, 0), clientAddr, netip.Addr{})
+
+	resp := make([]byte, 65535)
+	m, _, err := clientConn.ReadFromUDP(resp)
+	if err != nil {
+		t.Fatalf("ReadFromUDP (Error Indication): %v", err)
+	}
+	_, consumed, err := Parse(resp[:m])
+	if err != nil {
+		t.Fatalf("Parse Error Indication: %v", err)
+	}
+	ies := ParseIEs(resp[consumed:m])
+	peerVal := ies[IETypeGTPUPeerAddress]
+	if len(peerVal) != 4 {
+		t.Fatalf("GTP-U Peer Address IE length = %d; want 4", len(peerVal))
+	}
+	gotPeer := addrFrom4Bytes(peerVal)
+	if gotPeer != fallbackIP {
+		t.Errorf("GTP-U Peer Address fallback = %v; want %v", gotPeer, fallbackIP)
+	}
+	teidVal := ies[IETypeTEIDDataI]
+	if gotTEID := binary.BigEndian.Uint32(teidVal); gotTEID != 12345 {
+		t.Errorf("TEID Data I = %d; want 12345", gotTEID)
+	}
+}
+
+func addrFrom4Bytes(b []byte) netip.Addr {
+	return netip.AddrFrom4([4]byte{b[0], b[1], b[2], b[3]})
 }
 
 // TestForwarderEndMarkerUnknownTEIDIgnored verifies §7.3.2 behaviour:
@@ -280,4 +343,3 @@ func TestForwarderDropAction(t *testing.T) {
 		t.Errorf("txPackets = %d, want 0 for DROP FAR", fwd.txPackets.Load())
 	}
 }
-

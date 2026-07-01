@@ -188,8 +188,8 @@ func (c *Conn) deliverResponse(addr *net.UDPAddr, seq uint32, raw []byte) bool {
 	if !ok {
 		return false
 	}
-	pr.cancel()
 	pr.result <- pendingResult{raw: raw}
+	pr.cancel()
 	return true
 }
 

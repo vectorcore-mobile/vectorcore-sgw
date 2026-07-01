@@ -8,6 +8,8 @@ import (
 	"net/netip"
 	"sync/atomic"
 
+	"golang.org/x/sys/unix"
+
 	sgwusession "vectorcore-sgw/internal/sgwu/session"
 )
 
@@ -45,6 +47,10 @@ func New(listenAddr string, localIP netip.Addr, store *sgwusession.Store, log *s
 	if err != nil {
 		return nil, fmt.Errorf("gtpu: listen %s: %w", listenAddr, err)
 	}
+	if err := enablePacketInfo(conn); err != nil {
+		_ = conn.Close()
+		return nil, fmt.Errorf("gtpu: enable packet info: %w", err)
+	}
 	return &Forwarder{
 		conn:    conn,
 		store:   store,
@@ -58,24 +64,26 @@ func New(listenAddr string, localIP netip.Addr, store *sgwusession.Store, log *s
 func (f *Forwarder) Serve(ctx context.Context) error {
 	f.log.Info("GTP-U forwarder listening", "addr", f.conn.LocalAddr())
 	buf := make([]byte, 65535)
+	oob := make([]byte, 256)
 	go func() {
 		<-ctx.Done()
 		f.conn.Close()
 	}()
 	for {
-		n, src, err := f.conn.ReadFromUDP(buf)
+		n, oobn, _, src, err := f.conn.ReadMsgUDP(buf, oob)
 		if err != nil {
 			if ctx.Err() != nil {
 				return nil
 			}
 			return fmt.Errorf("gtpu: read: %w", err)
 		}
+		localIP := packetDstAddr(oob[:oobn])
 		f.rxPackets.Add(1)
 		f.rxBytes.Add(uint64(n))
 
 		pkt := make([]byte, n)
 		copy(pkt, buf[:n])
-		f.handle(pkt, src)
+		f.handleWithLocalIP(pkt, src, localIP)
 	}
 }
 
@@ -120,6 +128,10 @@ func (f *Forwarder) Counters() Counters {
 }
 
 func (f *Forwarder) handle(pkt []byte, src *net.UDPAddr) {
+	f.handleWithLocalIP(pkt, src, netip.Addr{})
+}
+
+func (f *Forwarder) handleWithLocalIP(pkt []byte, src *net.UDPAddr, localIP netip.Addr) {
 	hdr, hdrLen, err := Parse(pkt)
 	if err != nil {
 		f.log.Warn("GTP-U: header parse error", "from", src, "error", err)
@@ -133,7 +145,7 @@ func (f *Forwarder) handle(pkt []byte, src *net.UDPAddr) {
 
 	switch hdr.MsgType {
 	case MsgTypeGPDU:
-		f.handleGPDU(hdr, pkt[hdrLen:end], src)
+		f.handleGPDU(hdr, pkt[hdrLen:end], src, localIP)
 	case MsgTypeEchoRequest:
 		f.handleEchoRequest(hdr, src)
 	case MsgTypeEchoResponse:
@@ -149,9 +161,13 @@ func (f *Forwarder) handle(pkt []byte, src *net.UDPAddr) {
 
 // handleGPDU processes an incoming G-PDU per TS 29.281 §7.1.
 // Looks up the local TEID in the PDR/FAR store; sends Error Indication for unknown TEIDs.
-// Per §7.3.1: "When a GTP-U node receives a G-PDU for which no EPS Bearer context...
-// can be found, it shall send an Error Indication to the originator of the G-PDU."
-func (f *Forwarder) handleGPDU(hdr Header, tpdu []byte, src *net.UDPAddr) {
+// Per §7.3.1 (corrected quote — the previous comment here spliced a paraphrase onto a
+// "..." elision and presented it as one verbatim quote, which it was not):
+// "When a GTP-U node receives a G-PDU for which no EPS Bearer context, PDP context,
+// PDU Session, MBMS Bearer context, or RAB exists, the GTP-U node shall discard the
+// G-PDU. If the TEID of the incoming G-PDU is different from the value 'all zeros'
+// the GTP-U node shall also return a GTP error indication to the originating node."
+func (f *Forwarder) handleGPDU(hdr Header, tpdu []byte, src *net.UDPAddr, localIP netip.Addr) {
 	sess, pdr, found := f.store.FindByLocalTEID(hdr.TEID)
 	if !found {
 		f.unknownTEID.Add(1)
@@ -160,7 +176,10 @@ func (f *Forwarder) handleGPDU(hdr Header, tpdu []byte, src *net.UDPAddr) {
 		if hdr.TEID != 0 {
 			f.log.Debug("GTP-U: G-PDU for unknown TEID — sending Error Indication",
 				"teid", hdr.TEID, "from", src)
-			f.sendErrorIndication(hdr.TEID, src)
+			if !localIP.IsValid() {
+				localIP = f.localIP
+			}
+			f.sendErrorIndication(hdr.TEID, src, localIP)
 		} else {
 			f.log.Debug("GTP-U: G-PDU with TEID=0 for unknown context — discarded per §7.3.1", "from", src)
 		}
@@ -207,9 +226,10 @@ func (f *Forwarder) forwardGPDU(inHdr Header, far *sgwusession.FAR, tpdu []byte)
 		return
 	}
 
-	// Relay S/SeqNum, PN/NPDUNum, E/ExtHeaders from inbound header per §4.3.1:
-	// "the sending GTP-U entity should set the S bit and the Sequence Number to
-	// the same values as received."
+	// Relay S/SeqNum, PN/NPDUNum, E/ExtHeaders from inbound header per §4.3.1
+	// (corrected quote — the previous comment here fabricated a quote that does not
+	// appear anywhere in the spec): "if GTP-U protocol entities in these nodes are
+	// relaying G-PDUs to other nodes, then they shall relay the sequence numbers as well."
 	outHdr := Header{
 		Version:    1,
 		PT:         true,
@@ -247,7 +267,7 @@ func (f *Forwarder) handleEchoRequest(req Header, src *net.UDPAddr) {
 		Version: 1,
 		PT:      true,
 		S:       true,                // §5.1: S=1 required for Echo Response
-		MsgType: MsgTypeEchoResponse, // Table 13: "2 | Echo Response"
+		MsgType: MsgTypeEchoResponse, // Table 6.1-1: "2 | Echo Response"
 		TEID:    0,                   // §5.1: TEID=0 for Echo
 		SeqNum:  req.SeqNum,          // §7.2.2: echo the sender's sequence number
 	}
@@ -266,7 +286,9 @@ func (f *Forwarder) handleEchoRequest(req Header, src *net.UDPAddr) {
 
 // handleEchoResponse processes an Echo Response per TS 29.281 §7.2.2.
 // Notifies the PathProber (if set) so it can mark the path as alive.
-// Per §5.1: "The Sequence Number in a signalling response message shall be copied
+// Per §4.3.1 (corrected citation — this verbatim quote was previously misattributed
+// to §5.1; it actually appears under §4.3.1 "Handling of Sequence Numbers"):
+// "The Sequence Number in a signalling response message shall be copied
 // from the signalling request message that the GTP-U entity is replying to."
 func (f *Forwarder) handleEchoResponse(hdr Header, src *net.UDPAddr) {
 	f.log.Debug("GTP-U: Echo Response received", "from", src, "seq", hdr.SeqNum)
@@ -341,16 +363,16 @@ func (f *Forwarder) sendEndMarker(teid uint32, dstIP netip.Addr) {
 // fetched from the G-PDU that triggered this procedure."
 // Per §7.3.1: "The information element GTP-U Peer Address shall be the destination address."
 // Per §5.1: "TEID shall be set to all zeros" and "S flag shall be set to '1'" for Error Indication.
-func (f *Forwarder) sendErrorIndication(unknownTEID uint32, dst *net.UDPAddr) {
+func (f *Forwarder) sendErrorIndication(unknownTEID uint32, dst *net.UDPAddr, peerAddr netip.Addr) {
 	hdr := Header{
 		Version: 1,
 		PT:      true,
 		S:       true,                   // §5.1: S=1 required for Error Indication
-		MsgType: MsgTypeErrorIndication, // Table 13: "26 | Error Indication"
+		MsgType: MsgTypeErrorIndication, // Table 6.1-1: "26 | Error Indication"
 		TEID:    0,                      // §5.1: TEID=0 for Error Indication
 	}
 	teidIE := BuildTEIDDataI(unknownTEID)
-	peerIE, err := BuildGTPUPeerAddressIPv4(f.localIP)
+	peerIE, err := BuildGTPUPeerAddressIPv4(peerAddr)
 	if err != nil {
 		f.log.Warn("GTP-U: cannot build Error Indication peer address IE", "error", err)
 		return
@@ -365,4 +387,42 @@ func (f *Forwarder) sendErrorIndication(unknownTEID uint32, dst *net.UDPAddr) {
 	}
 	f.txPackets.Add(1)
 	f.txBytes.Add(uint64(len(pkt)))
+}
+
+func enablePacketInfo(conn *net.UDPConn) error {
+	raw, err := conn.SyscallConn()
+	if err != nil {
+		return err
+	}
+	var controlErr error
+	if err := raw.Control(func(fd uintptr) {
+		controlErr = unix.SetsockoptInt(int(fd), unix.IPPROTO_IP, unix.IP_PKTINFO, 1)
+	}); err != nil {
+		return err
+	}
+	return controlErr
+}
+
+// packetDstAddr extracts the IPv4 destination address of the received packet
+// from IP_PKTINFO control data. TS 29.281 Rel-15 §4.4.2.4 and §7.3.1 require
+// Error Indication to use the destination address of the triggering GTP-U
+// message as the response source / GTP-U Peer Address.
+func packetDstAddr(oob []byte) netip.Addr {
+	msgs, err := unix.ParseSocketControlMessage(oob)
+	if err != nil {
+		return netip.Addr{}
+	}
+	for _, msg := range msgs {
+		if msg.Header.Level != unix.IPPROTO_IP || msg.Header.Type != unix.IP_PKTINFO {
+			continue
+		}
+		// Linux in_pktinfo layout is: int ifindex, struct in_addr spec_dst,
+		// struct in_addr addr. Spec_dst is the local destination address selected
+		// for replies and starts at byte offset 4.
+		if len(msg.Data) < 8 {
+			continue
+		}
+		return netip.AddrFrom4([4]byte{msg.Data[4], msg.Data[5], msg.Data[6], msg.Data[7]}).Unmap()
+	}
+	return netip.Addr{}
 }

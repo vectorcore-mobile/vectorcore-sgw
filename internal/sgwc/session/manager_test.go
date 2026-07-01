@@ -62,6 +62,101 @@ func TestFindByS11TEID(t *testing.T) {
 	}
 }
 
+func TestCreateReusesExistingSGWS11FTEIDForAdditionalPDN(t *testing.T) {
+	m := session.NewManager()
+	defaultSess, _, err := m.Create(defaultParams())
+	if err != nil {
+		t.Fatalf("Create default session: %v", err)
+	}
+
+	params := defaultParams()
+	params.APN = "ims"
+	params.DefaultEBI = 6
+	params.QCI = 5
+	params.ReuseSGWS11FTEID = defaultSess.SGWS11FTEID
+
+	imsSess, evicted, err := m.Create(params)
+	if err != nil {
+		t.Fatalf("Create IMS session: %v", err)
+	}
+	if evicted != nil {
+		t.Fatalf("evicted = %v; want nil for different default EBI", evicted.SessionID)
+	}
+	if imsSess.SGWS11FTEID != defaultSess.SGWS11FTEID {
+		t.Fatalf("IMS SGW S11 F-TEID = %+v; want reused %+v", imsSess.SGWS11FTEID, defaultSess.SGWS11FTEID)
+	}
+	if got := m.FindByS11TEID(defaultSess.SGWS11FTEID.TEID); got != imsSess {
+		t.Fatalf("FindByS11TEID returned %+v; want newest IMS PDN session for legacy lookup", got)
+	}
+	if got := m.FindByS11TEIDAndBearer(defaultSess.SGWS11FTEID.TEID, 5); got != defaultSess {
+		t.Fatalf("FindByS11TEIDAndBearer EBI 5 returned %+v; want default PDN session", got)
+	}
+	if got := m.FindByS11TEIDAndBearer(defaultSess.SGWS11FTEID.TEID, 6); got != imsSess {
+		t.Fatalf("FindByS11TEIDAndBearer EBI 6 returned %+v; want IMS PDN session", got)
+	}
+	if got := m.FindByS11TEIDAndDefaultBearer(defaultSess.SGWS11FTEID.TEID, 5); got != defaultSess {
+		t.Fatalf("FindByS11TEIDAndDefaultBearer EBI 5 returned %+v; want default PDN session", got)
+	}
+	if got := m.FindByS11TEIDAndDefaultBearer(defaultSess.SGWS11FTEID.TEID, 6); got != imsSess {
+		t.Fatalf("FindByS11TEIDAndDefaultBearer EBI 6 returned %+v; want IMS PDN session", got)
+	}
+	if got := m.FindAllByS11TEID(defaultSess.SGWS11FTEID.TEID); len(got) != 2 {
+		t.Fatalf("FindAllByS11TEID returned %d sessions; want 2", len(got))
+	}
+	if got := m.Count(); got != 2 {
+		t.Fatalf("Count = %d; want both PDN sessions", got)
+	}
+}
+
+func TestDeleteSharedS11TEIDKeepsOtherPDNIndexed(t *testing.T) {
+	m := session.NewManager()
+	defaultSess, _, err := m.Create(defaultParams())
+	if err != nil {
+		t.Fatalf("Create default session: %v", err)
+	}
+
+	params := defaultParams()
+	params.APN = "ims"
+	params.DefaultEBI = 6
+	params.ReuseSGWS11FTEID = defaultSess.SGWS11FTEID
+	imsSess, _, err := m.Create(params)
+	if err != nil {
+		t.Fatalf("Create IMS session: %v", err)
+	}
+
+	m.Delete(imsSess.SessionID)
+
+	if got := m.FindByS11TEID(defaultSess.SGWS11FTEID.TEID); got != defaultSess {
+		t.Fatalf("FindByS11TEID after deleting IMS = %+v; want default session", got)
+	}
+	if got := m.FindByS11TEIDAndBearer(defaultSess.SGWS11FTEID.TEID, 5); got != defaultSess {
+		t.Fatalf("FindByS11TEIDAndBearer EBI 5 after deleting IMS = %+v; want default session", got)
+	}
+	if got := m.FindByS11TEIDAndBearer(defaultSess.SGWS11FTEID.TEID, 6); got != nil {
+		t.Fatalf("FindByS11TEIDAndBearer EBI 6 after deleting IMS = %+v; want nil", got)
+	}
+}
+
+func TestRegisterS5CTEIDFindsPendingSession(t *testing.T) {
+	m := session.NewManager()
+	sess, _, err := m.Create(defaultParams())
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if sess.GetState() != session.StatePending {
+		t.Fatalf("state = %q; want pending", sess.GetState())
+	}
+
+	const sgwS5CTEID uint32 = 0x0BE02E49
+	sess.SGWS5CFTEID = session.FTEID{TEID: sgwS5CTEID, IPv4: netip.MustParseAddr("10.90.250.59")}
+	m.RegisterS5CTEID(sess.SessionID, sgwS5CTEID)
+
+	got := m.FindByS5CTEID(sgwS5CTEID)
+	if got != sess {
+		t.Fatalf("FindByS5CTEID returned %p; want pending session %p", got, sess)
+	}
+}
+
 func TestFindByIMSI(t *testing.T) {
 	m := session.NewManager()
 	sess, _, _ := m.Create(defaultParams())
@@ -148,6 +243,96 @@ func TestBearerSetAndGet(t *testing.T) {
 	updated := sess.GetBearer(5)
 	if updated.ENBS1UFTEID.TEID != 0x12345678 {
 		t.Errorf("eNodeB TEID not updated: got 0x%08X", updated.ENBS1UFTEID.TEID)
+	}
+}
+
+func TestInvalidatePFCPBindingsClearsStaleSGWUState(t *testing.T) {
+	m := session.NewManager()
+	sess, _, err := m.Create(defaultParams())
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	sess.PFCP = session.PFCPSessionBinding{
+		LocalFSEID:  session.FSEID{SEID: 10, IPv4: netip.MustParseAddr("192.0.2.10")},
+		SGWUFSEID:   session.FSEID{SEID: 20, IPv4: netip.MustParseAddr("192.0.2.20")},
+		SGWUName:    "sgwu-a",
+		SGWUAddr:    "192.0.2.20:8805",
+		Established: true,
+	}
+	b := sess.GetBearer(5)
+	b.SGWS1UFTEID = bearer.FTEID{TEID: 0x11111111, IPv4: netip.MustParseAddr("10.0.0.1")}
+	b.SGWS5UFTEID = bearer.FTEID{TEID: 0x22222222, IPv4: netip.MustParseAddr("10.0.0.2")}
+	b.ENBS1UFTEID = bearer.FTEID{TEID: 0x33333333, IPv4: netip.MustParseAddr("10.0.0.3")}
+	b.PGWS5UFTEID = bearer.FTEID{TEID: 0x44444444, IPv4: netip.MustParseAddr("10.0.0.4")}
+	sess.SetBearer(b)
+
+	if got := m.InvalidatePFCPBindings(); got != 1 {
+		t.Fatalf("InvalidatePFCPBindings = %d; want 1", got)
+	}
+	if sess.PFCP.Established || sess.PFCP.LocalFSEID.SEID != 0 || sess.PFCP.SGWUFSEID.SEID != 0 {
+		t.Fatalf("PFCP binding still present after invalidation: %+v", sess.PFCP)
+	}
+	if got := sess.GetState(); got != session.StateRecovering {
+		t.Fatalf("session state after invalidation = %q; want %q", got, session.StateRecovering)
+	}
+	gotBearer := sess.GetBearer(5)
+	if gotBearer.SGWS1UFTEID.TEID != 0 || gotBearer.SGWS5UFTEID.TEID != 0 {
+		t.Fatalf("SGW-U F-TEIDs still present after invalidation: %+v", gotBearer)
+	}
+	if gotBearer.ENBS1UFTEID.TEID != 0x33333333 {
+		t.Fatalf("eNodeB F-TEID was cleared unexpectedly: %+v", gotBearer.ENBS1UFTEID)
+	}
+	if gotBearer.PGWS5UFTEID.TEID != 0x44444444 {
+		t.Fatalf("PGW F-TEID was cleared unexpectedly: %+v", gotBearer.PGWS5UFTEID)
+	}
+	if got := m.InvalidatePFCPBindings(); got != 0 {
+		t.Fatalf("second InvalidatePFCPBindings = %d; want 0", got)
+	}
+}
+
+func TestInvalidatePFCPBindingsForPeerOnlyClearsAffectedSGWU(t *testing.T) {
+	m := session.NewManager()
+	sessA, _, err := m.Create(defaultParams())
+	if err != nil {
+		t.Fatalf("Create A: %v", err)
+	}
+	paramsB := defaultParams()
+	paramsB.IMSI = "311430000000002"
+	sessB, _, err := m.Create(paramsB)
+	if err != nil {
+		t.Fatalf("Create B: %v", err)
+	}
+
+	sessA.PFCP = session.PFCPSessionBinding{
+		LocalFSEID:  session.FSEID{SEID: 10, IPv4: netip.MustParseAddr("192.0.2.1")},
+		SGWUFSEID:   session.FSEID{SEID: 20, IPv4: netip.MustParseAddr("192.0.2.10")},
+		SGWUName:    "sgwu-a",
+		SGWUAddr:    "192.0.2.10:8805",
+		Established: true,
+	}
+	sessB.PFCP = session.PFCPSessionBinding{
+		LocalFSEID:  session.FSEID{SEID: 11, IPv4: netip.MustParseAddr("192.0.2.1")},
+		SGWUFSEID:   session.FSEID{SEID: 21, IPv4: netip.MustParseAddr("192.0.2.11")},
+		SGWUName:    "sgwu-b",
+		SGWUAddr:    "192.0.2.11:8805",
+		Established: true,
+	}
+
+	if got := m.InvalidatePFCPBindingsForPeer("sgwu-a", "192.0.2.10:8805"); got != 1 {
+		t.Fatalf("InvalidatePFCPBindingsForPeer = %d; want 1", got)
+	}
+	if sessA.PFCP.Established || sessA.PFCP.SGWUFSEID.SEID != 0 {
+		t.Fatalf("affected PFCP binding still present: %+v", sessA.PFCP)
+	}
+	if got := sessA.GetState(); got != session.StateRecovering {
+		t.Fatalf("affected session state = %q; want %q", got, session.StateRecovering)
+	}
+	if !sessB.PFCP.Established || sessB.PFCP.SGWUFSEID.SEID != 21 {
+		t.Fatalf("unaffected PFCP binding was changed: %+v", sessB.PFCP)
+	}
+	if got := sessB.GetState(); got != session.StatePending {
+		t.Fatalf("unaffected session state = %q; want %q", got, session.StatePending)
 	}
 }
 

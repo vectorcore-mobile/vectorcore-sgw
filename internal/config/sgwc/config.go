@@ -10,14 +10,15 @@ import (
 const DefaultPath = "/etc/vectorcore/sgw/sgw-c.yaml"
 
 type Config struct {
-	SGWC    SGWCConfig    `yaml:"sgwc"`
-	S11     S11Config     `yaml:"s11"`
-	S5C     S5CConfig     `yaml:"s5c"`
-	PFCP    PFCPConfig    `yaml:"pfcp"`
-	Logging LoggingConfig `yaml:"logging"`
-	API     APIConfig     `yaml:"api"`
-	Metrics MetricsConfig `yaml:"metrics"`
-	Shutdown ShutdownConfig `yaml:"shutdown"`
+	SGWC       SGWCConfig      `yaml:"sgwc"`
+	Interfaces InterfaceConfig `yaml:"interfaces"`
+	GTPC       GTPCConfig      `yaml:"gtpc"`
+	S11        S11Config       `yaml:"s11"`
+	PFCP       PFCPConfig      `yaml:"pfcp"`
+	Logging    LoggingConfig   `yaml:"logging"`
+	API        APIConfig       `yaml:"api"`
+	Metrics    MetricsConfig   `yaml:"metrics"`
+	Shutdown   ShutdownConfig  `yaml:"shutdown"`
 }
 
 type SGWCConfig struct {
@@ -37,16 +38,29 @@ type PLMNConfig struct {
 	MNC string `yaml:"mnc"`
 }
 
-type S11Config struct {
-	Listen string `yaml:"listen"`
-	// T3ResponseSeconds is the retransmit timeout per TS 29.274 §7.6. Default 3.
-	T3ResponseSeconds int `yaml:"t3_response_seconds"`
-	// N3Requests is the max retransmit count per TS 29.274 §7.6. Default 5.
-	N3Requests int `yaml:"n3_requests"`
+type InterfaceConfig struct {
+	Control map[string]ControlInterfaceConfig `yaml:"control"`
 }
 
-type S5CConfig struct {
-	LocalAddr string `yaml:"local_addr"`
+type ControlInterfaceConfig struct {
+	Listen string `yaml:"listen"`
+}
+
+type GTPCConfig struct {
+	S11                    GTPCLogical                  `yaml:"s11"`
+	S5C                    GTPCLogical                  `yaml:"s5c"`
+	CreateBearerRetryGuard CreateBearerRetryGuardConfig `yaml:"create_bearer_retry_guard"`
+}
+
+type GTPCLogical struct {
+	Bind string `yaml:"bind"`
+}
+
+type CreateBearerRetryGuardConfig struct {
+	Enabled bool `yaml:"enabled"`
+}
+
+type S11Config struct {
 	// T3ResponseSeconds is the retransmit timeout per TS 29.274 §7.6. Default 3.
 	T3ResponseSeconds int `yaml:"t3_response_seconds"`
 	// N3Requests is the max retransmit count per TS 29.274 §7.6. Default 5.
@@ -54,8 +68,8 @@ type S5CConfig struct {
 }
 
 type PFCPConfig struct {
-	LocalAddr string      `yaml:"local_addr"`
-	SGWU      []SGWUPeer  `yaml:"sgwu"`
+	LocalAddr string     `yaml:"local_addr"`
+	SGWU      []SGWUPeer `yaml:"sgwu"`
 	// HeartbeatIntervalSeconds controls Sxa heartbeat cadence. Default 10.
 	HeartbeatIntervalSeconds int `yaml:"heartbeat_interval_seconds"`
 	// HeartbeatTimeoutSeconds before marking a peer unavailable. Default 30.
@@ -91,19 +105,20 @@ func Default() *Config {
 			T3ResponseSeconds: 3,
 			N3Requests:        5,
 		},
-		S5C: S5CConfig{
-			T3ResponseSeconds: 3,
-			N3Requests:        5,
-		},
 		PFCP: PFCPConfig{
 			HeartbeatIntervalSeconds: 10,
 			HeartbeatTimeoutSeconds:  30,
 		},
+		GTPC: GTPCConfig{
+			CreateBearerRetryGuard: CreateBearerRetryGuardConfig{
+				Enabled: true,
+			},
+		},
 		Logging: LoggingConfig{Level: "info"},
 		// AUD-06: default to loopback so management interfaces are not exposed
 		// on all interfaces without explicit operator configuration.
-		API:     APIConfig{Listen: "127.0.0.1:8080"},
-		Metrics: MetricsConfig{Listen: "127.0.0.1:9090"},
+		API:      APIConfig{Listen: "127.0.0.1:8080"},
+		Metrics:  MetricsConfig{Listen: "127.0.0.1:9090"},
 		Shutdown: ShutdownConfig{TimeoutSeconds: 5},
 	}
 }
@@ -128,4 +143,12 @@ func Load(path string) (*Config, error) {
 		return nil, fmt.Errorf("invalid config: %w", err)
 	}
 	return cfg, nil
+}
+
+func (c *Config) S11Listen() string {
+	return c.Interfaces.Control[c.GTPC.S11.Bind].Listen
+}
+
+func (c *Config) S5CListen() string {
+	return c.Interfaces.Control[c.GTPC.S5C.Bind].Listen
 }

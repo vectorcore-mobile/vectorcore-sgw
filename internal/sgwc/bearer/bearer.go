@@ -20,7 +20,12 @@ type FTEID struct {
 	IPv4 netip.Addr
 }
 
-// ARP is the Allocation/Retention Priority per TS 23.401 Section 4.7.2.
+// ARP is the Allocation/Retention Priority per TS 23.401 Rel-15 §4.7.3
+// (corrected citation — was previously misattributed to §4.7.2, which is
+// "The EPS bearer" general-concept clause, not the QoS parameters clause).
+// §4.7.3: "The ARP shall contain information about the priority level
+// (scalar), the pre-emption capability (flag) and the pre-emption
+// vulnerability (flag)."
 type ARP struct {
 	PriorityLevel        uint8 // 1-15; 1 is highest
 	PreemptionCapability bool  // may this bearer preempt others?
@@ -35,6 +40,18 @@ type TFT struct {
 // Bearer is the per-EPS-bearer state held in SGW-C per 3GPP TS 23.401.
 type Bearer struct {
 	EBI uint8
+	// QCI (QoS Class Identifier) is a bearer-level QoS parameter per
+	// TS 23.401 Rel-15 §4.7.3: "Each EPS bearer (GBR and Non-GBR) is
+	// associated with the following bearer level QoS parameters:
+	// - QoS Class Identifier (QCI); - Allocation and Retention Priority (ARP)."
+	// §4.7.3 also states the QCI-to-standardized-characteristics mapping
+	// table itself is in TS 23.203 (not present in docs/specs/ — per
+	// CLAUDE.md's QoS spec table, TS 23.203 is required for "QCI table"
+	// work). Not needed here: this field is stored and relayed verbatim
+	// (from MME, to PGW, to SGW-U PFCP rules) and never interpreted against
+	// the value table by this codebase. [TRAINING-MEMORY — unverified] would
+	// apply only if/when QCI value semantics are interpreted; flagging this
+	// gap now rather than waiting for that to happen silently.
 	QCI uint8
 	ARP ARP
 

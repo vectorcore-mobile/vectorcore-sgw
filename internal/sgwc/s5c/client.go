@@ -32,23 +32,28 @@ type Client struct {
 
 // CreateSessionResult holds the outcome of a successful PGW Create Session exchange.
 type CreateSessionResult struct {
-	Cause           uint8
-	SGWS5CTEID      uint32        // SGW's S5/S8-C TEID allocated by client
-	PGWControlFTEID session.FTEID // PGW S5/S8-C control F-TEID (from CSResp Sender FTEID inst 0)
-	PGWS5UFTEID     bearer.FTEID  // PGW-U S5/S8-U F-TEID (from CSResp bearer context inst 2 per Table 7.2.2-2)
-	DefaultEBI      uint8
-	UEIP            netip.Addr // from PGW PAA IE
-	AMBR            *ie.IE     // forwarded to MME in S11 CSResp
+	Cause            uint8
+	SGWS5CTEID       uint32        // SGW's local S5/S8-C TEID advertised in the request
+	PGWControlFTEID  session.FTEID // PGW S5/S8-C control F-TEID (from CSResp Sender FTEID inst 0)
+	PGWS5UFTEID      bearer.FTEID  // PGW-U S5/S8-U F-TEID (from CSResp bearer context inst 2 per Table 7.2.2-2)
+	DefaultEBI       uint8
+	UEIP             netip.Addr // from PGW PAA IE
+	AMBR             *ie.IE     // forwarded to MME in S11 CSResp
+	PCO              *ie.IE     // forwarded to MME in S11 CSResp
+	APNRestriction   *ie.IE     // forwarded to MME in S11 CSResp
+	ChargingID       *ie.IE     // forwarded to MME in S11 CSResp when message-level
+	BearerChargingID *ie.IE     // retained from PGW Bearer Context for accounting/debug; not forwarded in S11 CSRsp Bearer Context
+	Piggybacks       []message.Frame
 }
 
-// New creates an S5/S8-C client listening on cfg.S5C.LocalAddr.
+// New creates an S5/S8-C client listening on the configured S5/S8-C control binding.
 // localIP is the control-plane IP to advertise in Sender F-TEID IEs.
 // rc is the GTPv2-C restart counter used for Recovery IE advertisement per TS 29.274 §7.2.0.
 func New(cfg *sgwcconfig.Config, localIP netip.Addr, rc *recovery.Counter, log *slog.Logger) (*Client, error) {
 	conn, err := transport.Listen(
-		cfg.S5C.LocalAddr,
-		cfg.S5C.T3ResponseSeconds,
-		cfg.S5C.N3Requests,
+		cfg.S5CListen(),
+		cfg.S11.T3ResponseSeconds,
+		cfg.S11.N3Requests,
 		log,
 	)
 	if err != nil {
@@ -64,6 +69,19 @@ func New(cfg *sgwcconfig.Config, localIP netip.Addr, rc *recovery.Counter, log *
 	}
 
 	return c, nil
+}
+
+// NewWithConn creates an S5/S8-C client using an already-bound GTPv2-C
+// transport. This is used when S11 and S5/S8-C share one configured control
+// binding.
+func NewWithConn(conn *transport.Conn, localIP netip.Addr, rc *recovery.Counter, log *slog.Logger) *Client {
+	return &Client{
+		conn:      conn,
+		log:       log,
+		teidAlloc: teid.NewAllocator(),
+		localIP:   localIP,
+		rc:        rc,
+	}
 }
 
 // PGWAddr resolves the PGW S5/S8-C address for a new session.
@@ -82,23 +100,16 @@ func (c *Client) PGWAddr(s11req *message.CreateSessionRequest) (*net.UDPAddr, er
 }
 
 // CreateSession sends a Create Session Request to pgwAddr and returns the result.
-// On success the result carries the allocated SGWS5CTEID and PGW response IEs.
-// On PGW rejection, Cause is the PGW's cause code and SGWS5CTEID is 0.
+// On success the result carries the SGWS5CTEID and PGW response IEs.
+// On PGW rejection, Cause is the PGW's cause code.
 // Per TS 29.274 Rel-15 §7.2.1 / Table 7.2.1-1 (S5/S8-C direction).
 // R15-REAUDIT-001: sgwUS5UFTEID is the SGW-U S5/S8-U F-TEID to include in the bearer context
 // (C per Table 7.2.1-2 — absent when zero, included when non-zero after PFCP allocation).
-func (c *Client) CreateSession(ctx context.Context, pgwAddr *net.UDPAddr, s11req *message.CreateSessionRequest, sgwUS5UFTEID bearer.FTEID) (*CreateSessionResult, error) {
-	// Allocate SGW-C S5/S8-C control TEID per TS 29.274 §4.1.
-	sgwS5CTEID, err := c.teidAlloc.Alloc()
-	if err != nil {
-		return nil, fmt.Errorf("s5c TEID alloc: %w", err)
-	}
-
+func (c *Client) CreateSession(ctx context.Context, pgwAddr *net.UDPAddr, s11req *message.CreateSessionRequest, sgwS5CTEID uint32, sgwUS5UFTEID bearer.FTEID) (*CreateSessionResult, error) {
 	seq := c.conn.AllocSeq()
 	recIE := c.maybeRecoveryIE(pgwAddr)
 	raw, err := buildCSReq(s11req, sgwS5CTEID, c.localIP, seq, recIE, sgwUS5UFTEID)
 	if err != nil {
-		c.teidAlloc.Free(sgwS5CTEID)
 		return nil, fmt.Errorf("build S5/S8-C CSReq: %w", err)
 	}
 
@@ -108,35 +119,37 @@ func (c *Client) CreateSession(ctx context.Context, pgwAddr *net.UDPAddr, s11req
 		"seq", seq,
 	)
 
-	respRaw, err := c.conn.Send(ctx, pgwAddr, raw)
+	respRaw, piggybacks, err := c.conn.SendWithPiggybacks(ctx, pgwAddr, raw)
 	if err != nil {
-		c.teidAlloc.Free(sgwS5CTEID)
 		return nil, fmt.Errorf("s5c send CSReq: %w", err)
 	}
 
 	h, ies, err := message.Parse(respRaw)
 	if err != nil {
-		c.teidAlloc.Free(sgwS5CTEID)
 		return nil, fmt.Errorf("s5c parse CSResp: %w", err)
 	}
 	if h.MessageType != message.MsgTypeCreateSessionResponse {
-		c.teidAlloc.Free(sgwS5CTEID)
 		return nil, fmt.Errorf("s5c unexpected message type %d (want %d)",
 			h.MessageType, message.MsgTypeCreateSessionResponse)
 	}
 
 	resp, err := message.ParseCreateSessionResponse(h, ies)
 	if err != nil {
-		c.teidAlloc.Free(sgwS5CTEID)
 		return nil, fmt.Errorf("s5c decode CSResp: %w", err)
 	}
 
 	cause, _ := resp.Cause.CauseValue()
 	if cause != ie.CauseRequestAccepted {
-		c.teidAlloc.Free(sgwS5CTEID)
+		reject := describeCause(resp.Cause)
 		c.log.Warn("S5/S8-C: PGW rejected Create Session Request",
-			"pgw", pgwAddr, "cause", cause)
-		return &CreateSessionResult{Cause: cause}, nil
+			"pgw", pgwAddr,
+			"cause", cause,
+			"cause_text", reject.CauseText,
+			"offending_ie_type", reject.OffendingIEType,
+			"offending_ie", reject.OffendingIEName,
+			"offending_ie_instance", reject.OffendingIEInstance,
+		)
+		return &CreateSessionResult{Cause: cause, Piggybacks: piggybacks}, nil
 	}
 
 	// C11: on cause=16, PGW Sender F-TEID (instance 1 on S5/S8) and Bearer Context
@@ -144,18 +157,20 @@ func (c *Client) CreateSession(ctx context.Context, pgwAddr *net.UDPAddr, s11req
 	// per Table 7.2.2-1 / Table 7.2.2-2.
 	// Instance 1 is PGW S5/S8-C F-TEID on S5/S8 interface per Table 7.2.2-1.
 	if resp.PGWFTEID == nil {
-		c.teidAlloc.Free(sgwS5CTEID)
 		return nil, fmt.Errorf("s5c PGW CSResp cause=16 but PGW Sender F-TEID (instance 1, S5/S8) absent (Table 7.2.2-1)")
 	}
 	if len(resp.BearerContexts) == 0 {
-		c.teidAlloc.Free(sgwS5CTEID)
 		return nil, fmt.Errorf("s5c PGW CSResp cause=16 but Bearer Context Created absent (Table 7.2.2-2)")
 	}
 
 	result := &CreateSessionResult{
-		Cause:      cause,
-		SGWS5CTEID: sgwS5CTEID,
-		AMBR:       resp.AMBR,
+		Cause:          cause,
+		SGWS5CTEID:     sgwS5CTEID,
+		AMBR:           resp.AMBR,
+		PCO:            resp.PCO,
+		APNRestriction: resp.APNRestriction,
+		ChargingID:     resp.ChargingID,
+		Piggybacks:     piggybacks,
 	}
 
 	// PGW S5/S8-C F-TEID: Sender F-TEID instance 1 on S5/S8 interface per
@@ -189,6 +204,9 @@ func (c *Client) CreateSession(ctx context.Context, pgwAddr *net.UDPAddr, s11req
 				result.PGWS5UFTEID = bearer.FTEID{TEID: pgwUF.TEID, IPv4: pgwUF.IPv4}
 			}
 		}
+		if chargingIDIE := ie.FindFirst(children, ie.TypeChargingID); chargingIDIE != nil {
+			result.BearerChargingID = chargingIDIE
+		}
 	}
 
 	c.log.Info("S5/S8-C: Create Session Response — accepted",
@@ -201,12 +219,28 @@ func (c *Client) CreateSession(ctx context.Context, pgwAddr *net.UDPAddr, s11req
 	return result, nil
 }
 
+// DispatchPiggybacks processes PGW-originated frames that were piggybacked on a
+// response after the caller has committed session state from the primary frame.
+func (c *Client) DispatchPiggybacks(pgwAddr *net.UDPAddr, frames []message.Frame) {
+	c.conn.DispatchFrames(pgwAddr, frames)
+}
+
 // DeleteSession sends a Delete Session Request to the PGW for the given session
 // and returns the cause from the PGW's response.
 // Per TS 29.274 Rel-15 §7.2.9 / Table 7.2.9.1-1 (S5/S8-C direction).
 // If the session has no PGW S5/S8-C binding (Phase 3 not reached), returns
 // CauseRequestAccepted immediately — there is nothing to delete at the PGW.
 func (c *Client) DeleteSession(ctx context.Context, sess *session.SGWSession) (uint8, error) {
+	return c.deleteSession(ctx, sess, nil)
+}
+
+// DeleteSessionFromS11 sends a Delete Session Request to the PGW while preserving
+// S11 request IEs that are valid on S5/S8-C, such as Cause and Indication.
+func (c *Client) DeleteSessionFromS11(ctx context.Context, sess *session.SGWSession, req *message.DeleteSessionRequest) (uint8, error) {
+	return c.deleteSession(ctx, sess, req)
+}
+
+func (c *Client) deleteSession(ctx context.Context, sess *session.SGWSession, req *message.DeleteSessionRequest) (uint8, error) {
 	if sess.PGWControlFTEID.TEID == 0 {
 		return ie.CauseRequestAccepted, nil
 	}
@@ -219,7 +253,7 @@ func (c *Client) DeleteSession(ctx context.Context, sess *session.SGWSession) (u
 
 	seq := c.conn.AllocSeq()
 	recIE := c.maybeRecoveryIE(pgwAddr)
-	raw, err := buildDSReq(sess, seq, recIE)
+	raw, err := buildDSReq(sess, req, seq, recIE)
 	if err != nil {
 		return 0, fmt.Errorf("build S5/S8-C DSReq: %w", err)
 	}
@@ -331,7 +365,8 @@ func (c *Client) Close() error {
 // buildCSReq constructs a GTPv2-C Create Session Request for the S5/S8-C interface.
 // Per TS 29.274 Rel-15 §7.2.1 / Table 7.2.1-1, S5/S8-C column (SGW-C → PGW-C).
 // Header TEID is 0 on the initial request because the PGW's S5/S8-C TEID is not yet
-// known per TS 29.274 §5.5.1.
+// known per TS 29.274 §5.5.2, which lists "Create Session Request message on
+// S2a/S2b/S5/S8" explicitly among the TEID=0 cases.
 // recIE is a Recovery IE to include per §7.2.0 on first contact; nil if not needed.
 // sgwUS5UFTEID is the SGW-U S5/S8-U F-TEID (C per Table 7.2.1-2, instance 2 within bearer context).
 // R15-REAUDIT-001: included after PFCP provisional session allocates the SGW-U S5/S8-U TEID.
@@ -340,7 +375,7 @@ func buildCSReq(s11req *message.CreateSessionRequest, sgwS5CTEID uint32, sgwIP n
 		Version:        2,
 		HasTEID:        true,
 		MessageType:    message.MsgTypeCreateSessionRequest,
-		TEID:           0, // PGW S5/S8-C TEID unknown on initial CSReq per §5.5.1
+		TEID:           0, // PGW S5/S8-C TEID unknown on initial CSReq per §5.5.2
 		SequenceNumber: seq,
 	}
 
@@ -384,15 +419,33 @@ func buildCSReq(s11req *message.CreateSessionRequest, sgwS5CTEID uint32, sgwIP n
 	// PDN Type: M — forwarded.
 	ies = append(ies, s11req.PDNType)
 
-	// PAA: M per Table 7.2.1-1 — MME's suggested UE address, forwarded; PGW may override.
-	ies = append(ies, s11req.PAA)
-
-	// AMBR: M per Table 7.2.1-1 — forwarded.
-	ies = append(ies, s11req.AMBR)
+	// PAA and AMBR are conditional on S11/S5/S8. Forward them when present,
+	// matching Open5GS' tolerant Create Session handling.
+	if s11req.PAA != nil {
+		ies = append(ies, s11req.PAA)
+	}
+	if s11req.AMBR != nil {
+		ies = append(ies, s11req.AMBR)
+	}
 
 	// PCO: C — forward if present.
 	if s11req.PCO != nil {
 		ies = append(ies, s11req.PCO)
+	}
+
+	// APN Restriction: C per Table 7.2.1-1 — forward verbatim when supplied by the MME.
+	if s11req.APNRestriction != nil {
+		ies = append(ies, s11req.APNRestriction)
+	}
+
+	// UE Time Zone: C per Table 7.2.1-1 — forward verbatim when supplied by the MME.
+	if s11req.UETimeZone != nil {
+		ies = append(ies, s11req.UETimeZone)
+	}
+
+	// Charging Characteristics: C per Table 7.2.1-1 — forward verbatim when supplied by the MME.
+	if s11req.ChargingChars != nil {
+		ies = append(ies, s11req.ChargingChars)
 	}
 
 	// Selection Mode: C per Table 7.2.1-1 — forwarded verbatim. The SGW shall not
@@ -440,11 +493,121 @@ func buildCSReq(s11req *message.CreateSessionRequest, sgwS5CTEID uint32, sgwIP n
 	return message.Marshal(hdr, ies)
 }
 
+type causeDescription struct {
+	CauseText           string
+	OffendingIEType     uint8
+	OffendingIEName     string
+	OffendingIEInstance uint8
+}
+
+func describeCause(causeIE *ie.IE) causeDescription {
+	if causeIE == nil {
+		return causeDescription{}
+	}
+	cause, err := causeIE.CauseValue()
+	if err != nil {
+		return causeDescription{}
+	}
+	d := causeDescription{CauseText: causeText(cause)}
+	if len(causeIE.Value) >= 6 {
+		d.OffendingIEType = causeIE.Value[2]
+		d.OffendingIEInstance = causeIE.Value[5] & 0x0F
+		d.OffendingIEName = ieName(d.OffendingIEType)
+	}
+	return d
+}
+
+func causeText(cause uint8) string {
+	switch cause {
+	case ie.CauseRequestAccepted:
+		return "Request accepted"
+	case ie.CauseRequestAcceptedPartially:
+		return "Request accepted partially"
+	case ie.CauseContextNotFound:
+		return "Context not found"
+	case ie.CauseInvalidMessageFormat:
+		return "Invalid message format"
+	case ie.CauseVersionNotSupported:
+		return "Version not supported by next peer"
+	case ie.CauseInvalidLength:
+		return "Invalid length"
+	case ie.CauseMandatoryIEIncorrect:
+		return "Mandatory IE incorrect"
+	case ie.CauseMandatoryIEMissing:
+		return "Mandatory IE missing"
+	case ie.CauseSystemFailure:
+		return "System failure"
+	case ie.CauseNoResourcesAvailable:
+		return "No resources available"
+	case ie.CauseMissingOrUnknownAPN:
+		return "Missing or unknown APN"
+	case 103:
+		return "Conditional IE missing"
+	default:
+		return "Unknown cause"
+	}
+}
+
+func ieName(ieType uint8) string {
+	switch ieType {
+	case ie.TypeIMSI:
+		return "IMSI"
+	case ie.TypeCause:
+		return "Cause"
+	case ie.TypeRecovery:
+		return "Recovery"
+	case ie.TypeAPN:
+		return "APN"
+	case ie.TypeAMBR:
+		return "AMBR"
+	case ie.TypeEBI:
+		return "EBI"
+	case ie.TypeMEI:
+		return "MEI"
+	case ie.TypeMSISDN:
+		return "MSISDN"
+	case ie.TypeIndication:
+		return "Indication"
+	case ie.TypePCO:
+		return "PCO"
+	case ie.TypePAA:
+		return "PAA"
+	case ie.TypeBearerQoS:
+		return "Bearer QoS"
+	case ie.TypeRATType:
+		return "RAT Type"
+	case ie.TypeServingNetwork:
+		return "Serving Network"
+	case ie.TypeULI:
+		return "ULI"
+	case ie.TypeFTEID:
+		return "F-TEID"
+	case ie.TypeBearerContext:
+		return "Bearer Context"
+	case ie.TypeChargingID:
+		return "Charging ID"
+	case ie.TypeChargingChars:
+		return "Charging Characteristics"
+	case ie.TypePDNType:
+		return "PDN Type"
+	case ie.TypePTI:
+		return "PTI"
+	case ie.TypeUETimeZone:
+		return "UE Time Zone"
+	case ie.TypeAPNRestriction:
+		return "APN Restriction"
+	case ie.TypeSelectionMode:
+		return "Selection Mode"
+	default:
+		return "Unknown IE"
+	}
+}
+
 // buildDSReq constructs a Delete Session Request for the S5/S8-C interface.
 // Per TS 29.274 Rel-15 §7.2.9 / Table 7.2.9.1-1 (S5/S8-C, SGW-C → PGW-C).
 // Header TEID = PGW's S5/S8-C control TEID per TS 29.274 §5.5.1.
 // recIE is a Recovery IE to include per §7.2.0 on first contact; nil if not needed.
-func buildDSReq(sess *session.SGWSession, seq uint32, recIE *ie.IE) ([]byte, error) {
+func buildDSReq(sess *session.SGWSession, req *message.DeleteSessionRequest, seq uint32, recIE *ie.IE) ([]byte, error) {
 	hdr := message.Header{
 		Version:        2,
 		HasTEID:        true,
@@ -453,8 +616,27 @@ func buildDSReq(sess *session.SGWSession, seq uint32, recIE *ie.IE) ([]byte, err
 		SequenceNumber: seq,
 	}
 
-	// EBI: C per Table 7.2.9.1-1 — identifies the PDN connection at the PGW.
-	ies := []*ie.IE{ie.NewEBI(sess.DefaultBearerID)}
+	var ies []*ie.IE
+
+	// Cause: C per Table 7.2.9.1-1 in SGW→PGW direction — preserve when present
+	// in the triggering S11 DSReq.
+	if req != nil && req.Cause != nil {
+		ies = append(ies, req.Cause)
+	}
+
+	// EBI: C per Table 7.2.9.1-1 — preserve the MME-provided value when present.
+	// If absent, keep the existing behavior of identifying the PDN connection with
+	// the stored default bearer ID.
+	if req != nil && req.EBI != nil {
+		ies = append(ies, req.EBI)
+	} else {
+		ies = append(ies, ie.NewEBI(sess.DefaultBearerID))
+	}
+
+	// Indication: C — preserve when supplied by the MME.
+	if req != nil && req.Indication != nil {
+		ies = append(ies, req.Indication)
+	}
 
 	// Recovery: CO per Table 7.2.9.1-1; include on first contact per TS 29.274 §7.2.0.
 	if recIE != nil {

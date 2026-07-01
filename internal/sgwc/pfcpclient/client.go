@@ -4,7 +4,7 @@
 // For each configured SGW-U peer the client:
 //   - Establishes a PFCP Association per §5.2.1 (Table 7.4.1-1 / Table 7.4.2-1)
 //   - Sends periodic Heartbeat Requests per §6.1 (Table 7.2.2-1 / Table 7.2.3-1)
-//   - Detects peer restarts via Recovery Time Stamp changes (§5.2.1)
+//   - Detects peer restarts via Heartbeat Recovery Time Stamp changes (§6.2.2 / §7.4.2)
 //   - Re-establishes the association when a peer goes Down
 //
 // Session lifecycle:
@@ -77,8 +77,11 @@ type SessionParams struct {
 
 // SessionResult holds the outcome of a successful PFCP Session Establishment.
 type SessionResult struct {
+	// PeerName and PeerAddr identify the SGW-U peer selected for this PFCP session.
+	PeerName string
+	PeerAddr string
 	// UPSEID is the SEID the SGW-U assigned for this session (from UP F-SEID IE).
-	UPSEID    uint64
+	UPSEID uint64
 	// CreatedPDRs hold the Created PDR IEs from the response, each containing the
 	// PDR ID and the SGW-U-allocated F-TEID (when CHOOSE was set in the request).
 	CreatedPDRs []*pfcpie.IE
@@ -87,15 +90,20 @@ type SessionResult struct {
 // FARUpdate describes a single FAR update for use with ModifySession.
 type FARUpdate struct {
 	// FARID is the FAR to update (must match a FAR created at establishment).
-	FARID       uint32
+	FARID uint32
+	// PDRID identifies the matching PDR for this traffic direction. It is used
+	// when OuterHeaderRemoval needs to be installed with the FAR update.
+	PDRID uint16
 	// ApplyAction is the new Apply Action flags (e.g., FORW after eNB TEID arrives).
 	ApplyAction uint8
 	// DestInterface is the destination interface (0=Access, 1=Core).
 	DestInterface uint8
 	// OuterTEID is the peer's GTP-U TEID for outer header creation (e.g., eNB TEID).
-	OuterTEID   uint32
+	OuterTEID uint32
 	// OuterIP is the peer's GTP-U IP for outer header creation.
-	OuterIP     netip.Addr
+	OuterIP netip.Addr
+	// OuterHeaderRemoval requests GTP-U/UDP/IPv4 decapsulation on PDRID.
+	OuterHeaderRemoval bool
 }
 
 // Client manages PFCP associations from SGW-C to all configured SGW-U peers.
@@ -107,11 +115,15 @@ type Client struct {
 	hbInterval  time.Duration
 	hbTimeout   time.Duration
 	seidCounter atomic.Uint64 // CP-SEID allocator; starts at 1
+	nextPeer    atomic.Uint64 // round-robin cursor for new PFCP sessions
 	log         *slog.Logger
 
 	// onPeerStateChange fires when a peer transitions between Established and Down.
 	// Called with (peerName, peerAddr, newState). Safe to set before Serve().
 	onPeerStateChange func(peerName, peerAddr string, state PeerState)
+	// onPeerRestart fires when a peer's Recovery Time Stamp changes.
+	// The SGW-C must treat PFCP sessions on that peer as stale.
+	onPeerRestart func(peerName, peerAddr string, oldTS, newTS uint32)
 }
 
 // New creates a PFCP client ready for use. Call Serve(ctx) to begin association
@@ -168,6 +180,13 @@ func New(cfg *sgwcconfig.Config, startTime time.Time, log *slog.Logger) (*Client
 // between Established and Down states. Must be called before Serve().
 func (c *Client) SetPeerStateCallback(fn func(peerName, peerAddr string, state PeerState)) {
 	c.onPeerStateChange = fn
+}
+
+// SetPeerRestartCallback registers a callback for PFCP Recovery Time Stamp
+// changes. It is intended for invalidating local PFCP session bindings before
+// new session operations reuse stale UP-SEIDs or SGW-U F-TEIDs.
+func (c *Client) SetPeerRestartCallback(fn func(peerName, peerAddr string, oldTS, newTS uint32)) {
+	c.onPeerRestart = fn
 }
 
 // Peers returns a snapshot of all PFCP peer states for API/observability.
@@ -241,7 +260,6 @@ func (c *Client) managePeer(ctx context.Context, p *peer) {
 			continue
 		}
 
-		c.log.Info("PFCP association established", "peer", p.cfg.Name, "addr", p.cfg.Addr)
 		c.heartbeatLoop(ctx, p)
 		c.log.Warn("PFCP peer Down — re-attempting association",
 			"peer", p.cfg.Name, "addr", p.cfg.Addr)
@@ -289,11 +307,10 @@ func (c *Client) associate(ctx context.Context, p *peer) error {
 	peerNodeID := resp.NodeID.NodeIDIPv4()
 
 	p.mu.Lock()
-	// Restart detection per TS 29.244 §5.2.1: Recovery Time Stamp change = peer restarted.
-	if p.peerRecoveryTS != 0 && peerTS != p.peerRecoveryTS {
-		c.log.Warn("PFCP peer restarted — Recovery Time Stamp changed",
-			"peer", p.cfg.Name, "old_ts", p.peerRecoveryTS, "new_ts", peerTS)
-	}
+	// TS 29.244 Rel-15 Table 7.4.4.2-1 marks Recovery Time Stamp mandatory in
+	// Association Setup Response, but its note says the receiver ignores it for
+	// restart decisions. Association loss is handled by the Down transition and
+	// restart detection is handled on Heartbeat Response.
 	p.state = PeerStateEstablished
 	p.peerNodeID = peerNodeID
 	p.peerRecoveryTS = peerTS
@@ -303,6 +320,12 @@ func (c *Client) associate(ctx context.Context, p *peer) error {
 	if c.onPeerStateChange != nil {
 		c.onPeerStateChange(p.cfg.Name, p.cfg.Addr, PeerStateEstablished)
 	}
+	c.log.Info("PFCP association established with SGW-U",
+		"peer", p.cfg.Name,
+		"addr", p.cfg.Addr,
+		"peer_node_id", peerNodeID.String(),
+		"local_node_id", c.localNodeID.String(),
+		"peer_recovery_ts", peerTS)
 	return nil
 }
 
@@ -357,6 +380,7 @@ func (c *Client) heartbeat(ctx context.Context, p *peer) error {
 		return fmt.Errorf("parse HeartbeatResponse: %w", err)
 	}
 
+	var oldTS, newTS uint32
 	p.mu.Lock()
 	if resp.RecoveryTimeStamp != nil {
 		peerTS, _ := resp.RecoveryTimeStamp.RecoveryTimeStampValue()
@@ -364,11 +388,13 @@ func (c *Client) heartbeat(ctx context.Context, p *peer) error {
 		// When Recovery Time Stamp changes, the peer has restarted and all its PFCP sessions
 		// are invalid. Return an error to trigger peer Down state and re-association, which
 		// ensures PFCP sessions are re-established after the peer recovers.
-		if p.peerRecoveryTS != 0 && peerTS != p.peerRecoveryTS {
-			oldTS := p.peerRecoveryTS
+		if isRecoveryRestart(p.peerRecoveryTS, peerTS) {
+			oldTS = p.peerRecoveryTS
+			newTS = peerTS
 			p.peerRecoveryTS = peerTS
 			p.lastSeen = time.Now()
 			p.mu.Unlock()
+			c.notifyPeerRestart(p, oldTS, newTS)
 			return fmt.Errorf("PFCP peer %s restarted: Recovery Time Stamp changed from %d to %d — triggering re-association",
 				p.cfg.Name, oldTS, peerTS)
 		}
@@ -380,26 +406,60 @@ func (c *Client) heartbeat(ctx context.Context, p *peer) error {
 	return nil
 }
 
+func (c *Client) notifyPeerRestart(p *peer, oldTS, newTS uint32) {
+	if c.onPeerRestart != nil {
+		c.onPeerRestart(p.cfg.Name, p.cfg.Addr, oldTS, newTS)
+	}
+}
+
+func isRecoveryRestart(oldTS, newTS uint32) bool {
+	return oldTS != 0 && newTS != oldTS
+}
+
 // AllocCPSEID allocates a new monotonically increasing CP-SEID for a PFCP session.
 // SEID 0 is reserved per TS 29.244 §8.2.37; counter starts at 1.
 func (c *Client) AllocCPSEID() uint64 {
 	return c.seidCounter.Add(1)
 }
 
-// SelectPeer returns the first established SGW-U peer for session management.
+// SelectPeer returns an established SGW-U peer for new session management.
 // Returns an error if no peer is in the Established state.
-// In Phase 5, only a single SGW-U peer is supported.
+// Phase 13 uses round-robin selection across Established peers; later phases can
+// replace this with APN/DNN, location, capacity, or policy based selection.
 func (c *Client) SelectPeer() (*peer, error) {
-	for _, p := range c.peers {
-		p.mu.RLock()
-		state := p.state
-		addr := p.addr
-		p.mu.RUnlock()
-		if state == PeerStateEstablished {
-			return &peer{cfg: p.cfg, addr: addr, state: state}, nil
+	if len(c.peers) == 0 {
+		return nil, fmt.Errorf("PFCP: no SGW-U peer configured")
+	}
+	start := int(c.nextPeer.Add(1)-1) % len(c.peers)
+	for i := 0; i < len(c.peers); i++ {
+		p := c.peers[(start+i)%len(c.peers)]
+		if peerEstablished(p) {
+			return p, nil
 		}
 	}
 	return nil, fmt.Errorf("PFCP: no SGW-U peer in Established state")
+}
+
+func (c *Client) selectPeerByAddr(peerAddr string) (*peer, error) {
+	if peerAddr == "" {
+		return c.SelectPeer()
+	}
+	for _, p := range c.peers {
+		if p.cfg.Addr != peerAddr {
+			continue
+		}
+		if !peerEstablished(p) {
+			return nil, fmt.Errorf("PFCP: SGW-U peer %s is not Established", peerAddr)
+		}
+		return p, nil
+	}
+	return nil, fmt.Errorf("PFCP: SGW-U peer %s is not configured", peerAddr)
+}
+
+func peerEstablished(p *peer) bool {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.state == PeerStateEstablished
 }
 
 // EstablishSession sends a PFCP Session Establishment Request to the selected SGW-U peer
@@ -458,13 +518,16 @@ func (c *Client) EstablishSession(ctx context.Context, params SessionParams) (*S
 	}
 
 	c.log.Info("PFCP session established",
-		"peer", p.cfg.Addr,
+		"peer", p.cfg.Name,
+		"addr", p.cfg.Addr,
 		"cp_seid", params.CPFSEID,
 		"up_seid", upFSEID.SEID,
 		"created_pdrs", len(resp.CreatedPDRs),
 	)
 
 	return &SessionResult{
+		PeerName:    p.cfg.Name,
+		PeerAddr:    p.cfg.Addr,
 		UPSEID:      upFSEID.SEID,
 		CreatedPDRs: resp.CreatedPDRs,
 	}, nil
@@ -474,20 +537,33 @@ func (c *Client) EstablishSession(ctx context.Context, params SessionParams) (*S
 // The upSEID is the SGW-U's UP-SEID returned at establishment (carried in the header).
 // updates is the list of FAR changes to apply.
 func (c *Client) ModifySession(ctx context.Context, cpSEID, upSEID uint64, updates []FARUpdate) error {
-	p, err := c.SelectPeer()
+	return c.ModifySessionOnPeer(ctx, "", cpSEID, upSEID, updates)
+}
+
+// ModifySessionOnPeer sends a PFCP Session Modification Request to the SGW-U
+// peer that owns the session. PFCP session procedures after establishment must
+// use the same UP function because the header SEID is that peer's UP-SEID.
+func (c *Client) ModifySessionOnPeer(ctx context.Context, peerAddr string, cpSEID, upSEID uint64, updates []FARUpdate) error {
+	p, err := c.selectPeerByAddr(peerAddr)
 	if err != nil {
 		return err
 	}
 
-	var updateFARIEs []*pfcpie.IE
+	var ies []*pfcpie.IE
 	for _, u := range updates {
+		if u.OuterHeaderRemoval && u.PDRID != 0 {
+			ies = append(ies, pfcpie.NewUpdatePDR(
+				pfcpie.NewPDRID(u.PDRID),
+				pfcpie.NewOuterHeaderRemoval(pfcpie.OHRDescGTPUUDPIPv4),
+			))
+		}
 		var ufpChildren []*pfcpie.IE
 		ufpChildren = append(ufpChildren, pfcpie.NewDestinationInterface(u.DestInterface))
 		if u.OuterTEID != 0 && u.OuterIP.IsValid() {
 			ufpChildren = append(ufpChildren,
 				pfcpie.NewOuterHeaderCreation(pfcpie.OHCDescGTPUUDPIPv4, u.OuterTEID, u.OuterIP))
 		}
-		updateFARIEs = append(updateFARIEs, pfcpie.NewUpdateFAR(
+		ies = append(ies, pfcpie.NewUpdateFAR(
 			pfcpie.NewFARID(u.FARID),
 			pfcpie.NewApplyAction(u.ApplyAction),
 			pfcpie.NewUpdateForwardingParameters(ufpChildren...),
@@ -503,7 +579,7 @@ func (c *Client) ModifySession(ctx context.Context, cpSEID, upSEID uint64, updat
 		SequenceNumber: seq,
 	}
 
-	raw, err := pfcpmsg.Marshal(hdr, updateFARIEs)
+	raw, err := pfcpmsg.Marshal(hdr, ies)
 	if err != nil {
 		return fmt.Errorf("marshal PFCP SessionModificationRequest: %w", err)
 	}
@@ -525,7 +601,7 @@ func (c *Client) ModifySession(ctx context.Context, cpSEID, upSEID uint64, updat
 		return fmt.Errorf("PFCP Session Modification rejected by %s: cause=%d (cp_seid=%d)", p.cfg.Addr, cause, cpSEID)
 	}
 
-	c.log.Info("PFCP session modified", "peer", p.cfg.Addr, "cp_seid", cpSEID, "up_seid", upSEID)
+	c.log.Info("PFCP session modified", "peer", p.cfg.Name, "addr", p.cfg.Addr, "cp_seid", cpSEID, "up_seid", upSEID)
 	return nil
 }
 
@@ -534,7 +610,13 @@ func (c *Client) ModifySession(ctx context.Context, cpSEID, upSEID uint64, updat
 // createPDRs and createFARs are the grouped IEs built by the caller.
 // Returns the Created PDR IEs from the response (carrying UP-allocated TEIDs).
 func (c *Client) AddBearerRules(ctx context.Context, cpSEID, upSEID uint64, createPDRs, createFARs []*pfcpie.IE) ([]*pfcpie.IE, error) {
-	p, err := c.SelectPeer()
+	return c.AddBearerRulesOnPeer(ctx, "", cpSEID, upSEID, createPDRs, createFARs)
+}
+
+// AddBearerRulesOnPeer provisions additional bearer rules on the SGW-U peer
+// that owns the existing PFCP session.
+func (c *Client) AddBearerRulesOnPeer(ctx context.Context, peerAddr string, cpSEID, upSEID uint64, createPDRs, createFARs []*pfcpie.IE) ([]*pfcpie.IE, error) {
+	p, err := c.selectPeerByAddr(peerAddr)
 	if err != nil {
 		return nil, err
 	}
@@ -574,7 +656,7 @@ func (c *Client) AddBearerRules(ctx context.Context, cpSEID, upSEID uint64, crea
 		return nil, fmt.Errorf("PFCP AddBearerRules rejected by %s: cause=%d (cp_seid=%d)", p.cfg.Addr, cause, cpSEID)
 	}
 
-	c.log.Info("PFCP bearer rules added", "peer", p.cfg.Addr, "cp_seid", cpSEID, "up_seid", upSEID)
+	c.log.Info("PFCP bearer rules added", "peer", p.cfg.Name, "addr", p.cfg.Addr, "cp_seid", cpSEID, "up_seid", upSEID)
 	return resp.CreatedPDRs, nil
 }
 
@@ -582,7 +664,13 @@ func (c *Client) AddBearerRules(ctx context.Context, cpSEID, upSEID uint64, crea
 // for a dedicated bearer being deleted per TS 29.244 Rel-15 §7.5.4 / Table 7.5.4.1-1.
 // pdrIDs and farIDs are the IDs assigned at creation time.
 func (c *Client) RemoveBearerRules(ctx context.Context, cpSEID, upSEID uint64, pdrIDs, farIDs []uint32) error {
-	p, err := c.SelectPeer()
+	return c.RemoveBearerRulesOnPeer(ctx, "", cpSEID, upSEID, pdrIDs, farIDs)
+}
+
+// RemoveBearerRulesOnPeer removes bearer rules from the SGW-U peer that owns
+// the existing PFCP session.
+func (c *Client) RemoveBearerRulesOnPeer(ctx context.Context, peerAddr string, cpSEID, upSEID uint64, pdrIDs, farIDs []uint32) error {
+	p, err := c.selectPeerByAddr(peerAddr)
 	if err != nil {
 		return err
 	}
@@ -626,7 +714,7 @@ func (c *Client) RemoveBearerRules(ctx context.Context, cpSEID, upSEID uint64, p
 		return fmt.Errorf("PFCP RemoveBearerRules rejected by %s: cause=%d (cp_seid=%d)", p.cfg.Addr, cause, cpSEID)
 	}
 
-	c.log.Info("PFCP bearer rules removed", "peer", p.cfg.Addr, "cp_seid", cpSEID, "up_seid", upSEID)
+	c.log.Info("PFCP bearer rules removed", "peer", p.cfg.Name, "addr", p.cfg.Addr, "cp_seid", cpSEID, "up_seid", upSEID)
 	return nil
 }
 
@@ -634,7 +722,13 @@ func (c *Client) RemoveBearerRules(ctx context.Context, cpSEID, upSEID uint64, p
 // The upSEID is the SGW-U's UP-SEID returned at establishment (carried in the header).
 // Per Table 7.5.6.1-1 the request body is empty.
 func (c *Client) DeleteSession(ctx context.Context, cpSEID, upSEID uint64) error {
-	p, err := c.SelectPeer()
+	return c.DeleteSessionOnPeer(ctx, "", cpSEID, upSEID)
+}
+
+// DeleteSessionOnPeer sends a PFCP Session Deletion Request to the SGW-U peer
+// that owns the existing PFCP session.
+func (c *Client) DeleteSessionOnPeer(ctx context.Context, peerAddr string, cpSEID, upSEID uint64) error {
+	p, err := c.selectPeerByAddr(peerAddr)
 	if err != nil {
 		return err
 	}
@@ -671,7 +765,7 @@ func (c *Client) DeleteSession(ctx context.Context, cpSEID, upSEID uint64) error
 		return fmt.Errorf("PFCP Session Deletion rejected by %s: cause=%d (cp_seid=%d)", p.cfg.Addr, cause, cpSEID)
 	}
 
-	c.log.Info("PFCP session deleted", "peer", p.cfg.Addr, "cp_seid", cpSEID, "up_seid", upSEID)
+	c.log.Info("PFCP session deleted", "peer", p.cfg.Name, "addr", p.cfg.Addr, "cp_seid", cpSEID, "up_seid", upSEID)
 	return nil
 }
 

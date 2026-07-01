@@ -22,8 +22,11 @@ type CreateSessionRequest struct {
 	PAA            *ie.IE
 	AMBR           *ie.IE
 	PCO            *ie.IE // Protocol Configuration Options: C per Table 7.2.1-1, forwarded to PGW
-	SelectionMode  *ie.IE   // C per Table 7.2.1-1 — forwarded verbatim to PGW
-	BearerContexts []*ie.IE // one per bearer (instance 0,1,...)
+	APNRestriction *ie.IE // C per Table 7.2.1-1, forwarded to PGW when present
+	UETimeZone     *ie.IE // C per Table 7.2.1-1, forwarded to PGW when present
+	ChargingChars  *ie.IE // C per Table 7.2.1-1, forwarded to PGW when present
+	SelectionMode  *ie.IE // C per Table 7.2.1-1 — forwarded verbatim to PGW
+	BearerContexts []*ie.IE
 	Indication     *ie.IE
 	Recovery       *ie.IE
 	PTI            *ie.IE
@@ -62,6 +65,12 @@ func ParseCreateSessionRequest(h Header, ies []*ie.IE) (*CreateSessionRequest, e
 			req.AMBR = i
 		case ie.TypePCO:
 			req.PCO = i
+		case ie.TypeAPNRestriction:
+			req.APNRestriction = i
+		case ie.TypeUETimeZone:
+			req.UETimeZone = i
+		case ie.TypeChargingChars:
+			req.ChargingChars = i
 		case ie.TypeSelectionMode:
 			req.SelectionMode = i
 		case ie.TypeBearerContext:
@@ -89,22 +98,6 @@ func (req *CreateSessionRequest) validate() error {
 	if req.IMSI == nil && req.MEI == nil {
 		return &MissingIEError{IEType: ie.TypeIMSI, MsgType: MsgTypeCreateSessionRequest}
 	}
-	// Serving Network: C per Rel-15 Table 7.2.1-1, S4/S11/S5/S8 interfaces.
-	// Condition text: "This IE shall be included on the S4/S11, S5/S8 and S2b interfaces
-	// for an E-UTRAN initial attach, a Handover from Trusted or Untrusted Non-3GPP IP
-	// Access to E-UTRAN, a PDP Context Activation..." (Table 8 row 11, docs/specs/29274-f90.docx).
-	// This implementation supports only S11 E-UTRAN initial attach — require it.
-	if req.ServingNetwork == nil {
-		return &MissingIEError{IEType: ie.TypeServingNetwork, MsgType: MsgTypeCreateSessionRequest}
-	}
-	// Selection Mode: C per Rel-15 Table 7.2.1-1, S4/S11/S5/S8 interfaces.
-	// Condition text: "This IE shall be included on the S4/S11 and S5/S8 interfaces for an
-	// E-UTRAN initial attach, a Handover from Trusted or Untrusted Non-3GPP IP Access to
-	// E-UTRAN, a PDP Context Activation..." (Table 8 row 19, docs/specs/29274-f90.docx).
-	// This implementation supports only S11 E-UTRAN initial attach — require it.
-	if req.SelectionMode == nil {
-		return &MissingIEError{IEType: ie.TypeSelectionMode, MsgType: MsgTypeCreateSessionRequest}
-	}
 	if req.RATType == nil {
 		return &MissingIEError{IEType: ie.TypeRATType, MsgType: MsgTypeCreateSessionRequest}
 	}
@@ -116,14 +109,6 @@ func (req *CreateSessionRequest) validate() error {
 	}
 	if req.PDNType == nil {
 		return &MissingIEError{IEType: ie.TypePDNType, MsgType: MsgTypeCreateSessionRequest}
-	}
-	// PAA: M per Rel-15 Table 7.2.1-1 (S11, MME→SGW-C)
-	if req.PAA == nil {
-		return &MissingIEError{IEType: ie.TypePAA, MsgType: MsgTypeCreateSessionRequest}
-	}
-	// AMBR: M per Rel-15 Table 7.2.1-1 (S11, MME→SGW-C)
-	if req.AMBR == nil {
-		return &MissingIEError{IEType: ie.TypeAMBR, MsgType: MsgTypeCreateSessionRequest}
 	}
 	if len(req.BearerContexts) == 0 {
 		return &MissingIEError{IEType: ie.TypeBearerContext, MsgType: MsgTypeCreateSessionRequest}
@@ -147,6 +132,9 @@ type CreateSessionResponse struct {
 	PGWFTEID       *ie.IE // PGW S5/S8-C F-TEID (instance 1)
 	PAA            *ie.IE
 	AMBR           *ie.IE
+	PCO            *ie.IE
+	APNRestriction *ie.IE
+	ChargingID     *ie.IE
 	BearerContexts []*ie.IE
 	Recovery       *ie.IE
 }
@@ -168,6 +156,12 @@ func ParseCreateSessionResponse(h Header, ies []*ie.IE) (*CreateSessionResponse,
 			resp.PAA = i
 		case ie.TypeAMBR:
 			resp.AMBR = i
+		case ie.TypePCO:
+			resp.PCO = i
+		case ie.TypeAPNRestriction:
+			resp.APNRestriction = i
+		case ie.TypeChargingID:
+			resp.ChargingID = i
 		case ie.TypeBearerContext:
 			resp.BearerContexts = append(resp.BearerContexts, i)
 		case ie.TypeRecovery:

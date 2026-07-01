@@ -63,9 +63,10 @@ func TestBuildCSReqMandatoryIEs(t *testing.T) {
 // S5/S8-C CSReq per TS 29.274 §8.22 Figure 8.22-1.
 //
 // Expected wire layout for instance=0, IFType=IFTypeS5S8CSGW(6), TEID=0xABCD1234, IP=10.1.0.1:
-//   Value[0] = 0x80 | 0x06 = 0x86  (V4=1, InterfaceType=6)
-//   Value[1-4] = 0xAB, 0xCD, 0x12, 0x34
-//   Value[5-8] = 10, 1, 0, 1
+//
+//	Value[0] = 0x80 | 0x06 = 0x86  (V4=1, InterfaceType=6)
+//	Value[1-4] = 0xAB, 0xCD, 0x12, 0x34
+//	Value[5-8] = 10, 1, 0, 1
 func TestBuildCSReqSenderFTEIDWire(t *testing.T) {
 	s11req := makeS11CSReq(t)
 	sgwIP, _ := netip.ParseAddr("10.1.0.1")
@@ -90,7 +91,7 @@ func TestBuildCSReqSenderFTEIDWire(t *testing.T) {
 	want := []byte{
 		0x80 | ie.IFTypeS5S8CSGW, // 0x86: V4=1, InterfaceType=6
 		0xAB, 0xCD, 0x12, 0x34,   // TEID big-endian
-		10, 1, 0, 1,               // IPv4
+		10, 1, 0, 1, // IPv4
 	}
 	if len(fteidIE.Value) != len(want) {
 		t.Fatalf("F-TEID value length = %d; want %d", len(fteidIE.Value), len(want))
@@ -159,6 +160,91 @@ func TestBuildCSReqConditionalIEsForwarded(t *testing.T) {
 				t.Errorf("%s: IE unexpectedly present", tc.name)
 			}
 		}
+	}
+}
+
+func TestBuildCSReqPolicyContextIEsForwarded(t *testing.T) {
+	s11req := makeS11CSReq(t)
+	s11req.APNRestriction = &ie.IE{Type: ie.TypeAPNRestriction, Value: []byte{0x00}}
+	s11req.UETimeZone = &ie.IE{Type: ie.TypeUETimeZone, Value: []byte{0x0A, 0x01}}
+	s11req.ChargingChars = &ie.IE{Type: ie.TypeChargingChars, Value: []byte{0x08, 0x00}}
+
+	sgwIP, _ := netip.ParseAddr("10.1.0.1")
+	raw, err := buildCSReq(s11req, 0x1111, sgwIP, 1, nil, bearer.FTEID{})
+	if err != nil {
+		t.Fatalf("buildCSReq: %v", err)
+	}
+	_, ies, err := message.Parse(raw)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+
+	for _, tc := range []struct {
+		name  string
+		typ   uint8
+		value []byte
+	}{
+		{"APN Restriction", ie.TypeAPNRestriction, []byte{0x00}},
+		{"UE Time Zone", ie.TypeUETimeZone, []byte{0x0A, 0x01}},
+		{"Charging Characteristics", ie.TypeChargingChars, []byte{0x08, 0x00}},
+	} {
+		got := ie.FindFirst(ies, tc.typ)
+		if got == nil {
+			t.Fatalf("%s IE type %d not forwarded", tc.name, tc.typ)
+		}
+		if got.Instance != 0 {
+			t.Errorf("%s instance = %d; want 0", tc.name, got.Instance)
+		}
+		if string(got.Value) != string(tc.value) {
+			t.Errorf("%s value = % X; want % X", tc.name, got.Value, tc.value)
+		}
+	}
+}
+
+func TestParseCreateSessionRequestPreservesPolicyContextIEs(t *testing.T) {
+	hdr := message.Header{
+		Version:        2,
+		HasTEID:        true,
+		MessageType:    message.MsgTypeCreateSessionRequest,
+		SequenceNumber: 1,
+	}
+	ies := makeS11CSReqIEs()
+	ies = append(ies,
+		&ie.IE{Type: ie.TypeAPNRestriction, Value: []byte{0x00}},
+		&ie.IE{Type: ie.TypeUETimeZone, Value: []byte{0x0A, 0x01}},
+		&ie.IE{Type: ie.TypeChargingChars, Value: []byte{0x08, 0x00}},
+	)
+
+	req, err := message.ParseCreateSessionRequest(hdr, ies)
+	if err != nil {
+		t.Fatalf("ParseCreateSessionRequest: %v", err)
+	}
+	if req.APNRestriction == nil || string(req.APNRestriction.Value) != string([]byte{0x00}) {
+		t.Fatalf("APNRestriction not preserved: %#v", req.APNRestriction)
+	}
+	if req.UETimeZone == nil || string(req.UETimeZone.Value) != string([]byte{0x0A, 0x01}) {
+		t.Fatalf("UETimeZone not preserved: %#v", req.UETimeZone)
+	}
+	if req.ChargingChars == nil || string(req.ChargingChars.Value) != string([]byte{0x08, 0x00}) {
+		t.Fatalf("ChargingChars not preserved: %#v", req.ChargingChars)
+	}
+}
+
+func TestDescribeCauseDecodesConditionalIEMissingOffendingIE(t *testing.T) {
+	causeIE := ie.NewCause(103, 0, 0, 0, &ie.IE{Type: ie.TypeAPNRestriction})
+
+	got := describeCause(causeIE)
+	if got.CauseText != "Conditional IE missing" {
+		t.Errorf("CauseText = %q; want %q", got.CauseText, "Conditional IE missing")
+	}
+	if got.OffendingIEType != ie.TypeAPNRestriction {
+		t.Errorf("OffendingIEType = %d; want %d", got.OffendingIEType, ie.TypeAPNRestriction)
+	}
+	if got.OffendingIEName != "APN Restriction" {
+		t.Errorf("OffendingIEName = %q; want APN Restriction", got.OffendingIEName)
+	}
+	if got.OffendingIEInstance != 0 {
+		t.Errorf("OffendingIEInstance = %d; want 0", got.OffendingIEInstance)
 	}
 }
 
@@ -253,7 +339,7 @@ func TestBuildDSReqWire(t *testing.T) {
 	const ebi = 5
 
 	sess := makeSession(pgwTEID, ebi)
-	raw, err := buildDSReq(sess, 77, nil)
+	raw, err := buildDSReq(sess, nil, 77, nil)
 	if err != nil {
 		t.Fatalf("buildDSReq: %v", err)
 	}
@@ -279,18 +365,75 @@ func TestBuildDSReqWire(t *testing.T) {
 	}
 }
 
+func TestBuildDSReqPreservesS11CauseAndIndication(t *testing.T) {
+	const pgwTEID = 0xCAFEBABE
+	sess := makeSession(pgwTEID, 5)
+	req := &message.DeleteSessionRequest{
+		Cause:      ie.NewCause(ie.CauseRequestRejected, 0, 0, 0, nil),
+		EBI:        ie.NewEBI(6),
+		Indication: &ie.IE{Type: ie.TypeIndication, Value: []byte{0x01, 0x02}},
+	}
+
+	raw, err := buildDSReq(sess, req, 77, nil)
+	if err != nil {
+		t.Fatalf("buildDSReq: %v", err)
+	}
+	_, ies, err := message.Parse(raw)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+
+	causeIE := ie.FindFirst(ies, ie.TypeCause)
+	if causeIE == nil {
+		t.Fatal("Cause IE from S11 DSReq not forwarded")
+	}
+	cause, err := causeIE.CauseValue()
+	if err != nil {
+		t.Fatalf("CauseValue: %v", err)
+	}
+	if cause != ie.CauseRequestRejected {
+		t.Errorf("Cause = %d; want %d", cause, ie.CauseRequestRejected)
+	}
+	ebiIE := ie.FindFirst(ies, ie.TypeEBI)
+	if ebiIE == nil {
+		t.Fatal("EBI IE missing")
+	}
+	ebi, err := ebiIE.EBIValue()
+	if err != nil {
+		t.Fatalf("EBIValue: %v", err)
+	}
+	if ebi != 6 {
+		t.Errorf("EBI = %d; want 6 from S11 DSReq", ebi)
+	}
+	indIE := ie.FindFirst(ies, ie.TypeIndication)
+	if indIE == nil {
+		t.Fatal("Indication IE from S11 DSReq not forwarded")
+	}
+	if string(indIE.Value) != string([]byte{0x01, 0x02}) {
+		t.Errorf("Indication value = % X; want 01 02", indIE.Value)
+	}
+}
+
 // ── helpers ──────────────────────────────────────────────────────────────────
 
 func makeS11CSReq(t *testing.T) *message.CreateSessionRequest {
 	t.Helper()
 	hdr := message.Header{
-		Version:     2,
-		HasTEID:     true,
-		MessageType: message.MsgTypeCreateSessionRequest,
-		TEID:        0,
+		Version:        2,
+		HasTEID:        true,
+		MessageType:    message.MsgTypeCreateSessionRequest,
+		TEID:           0,
 		SequenceNumber: 1,
 	}
-	ies := []*ie.IE{
+	req, err := message.ParseCreateSessionRequest(hdr, makeS11CSReqIEs())
+	if err != nil {
+		t.Fatalf("makeS11CSReq: %v", err)
+	}
+	return req
+}
+
+func makeS11CSReqIEs() []*ie.IE {
+	return []*ie.IE{
 		ie.NewIMSI("001010000000001"),
 		ie.NewRATType(ie.RATTypeEUTRAN),
 		ie.NewServingNetwork("001", "01"),
@@ -305,11 +448,6 @@ func makeS11CSReq(t *testing.T) *message.CreateSessionRequest {
 			ie.NewBearerQoS(0, 9, 0, 9, 0, 0, 0, 0),
 		),
 	}
-	req, err := message.ParseCreateSessionRequest(hdr, ies)
-	if err != nil {
-		t.Fatalf("makeS11CSReq: %v", err)
-	}
-	return req
 }
 
 func makeSession(pgwTEID uint32, ebi uint8) *session.SGWSession {

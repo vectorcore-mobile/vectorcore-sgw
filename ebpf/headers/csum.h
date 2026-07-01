@@ -1,4 +1,4 @@
-/* Incremental checksum helpers for TC-BPF programs. */
+/* Checksum helpers for BPF dataplane programs. */
 #pragma once
 
 #include <bpf/bpf_helpers.h>

@@ -1,7 +1,7 @@
 // Package session holds the SGW-U data-plane session state per TS 29.244 Rel-15 §5.3.
 //
 // The SGW-U maintains PDRs and FARs for each session established by the SGW-C
-// via PFCP Session Establishment Request (Table 7.5.2.2-1). The store is the
+// via PFCP Session Establishment Request (Table 7.5.2.1-1). The store is the
 // in-memory model; actual GTP-U forwarding uses this state.
 package session
 
@@ -17,21 +17,21 @@ import (
 // PDR is a Packet Detection Rule per TS 29.244 Rel-15 §5.2.1.
 // Minimal fields for Phase 5: only what is needed for TEID-based GTP-U matching.
 type PDR struct {
-	ID              uint16      // PDR ID — 16-bit per §8.2.1 (Table 8.1-1)
-	Precedence      uint32      // lower value = higher priority per §8.2.2
-	SourceInterface uint8       // 0=Access,1=Core per §8.2.2
-	LocalTEID       uint32      // allocated TEID (when CHOOSE was set in F-TEID IE)
-	LocalIP         netip.Addr  // SGW-U GTP-U IP for this PDR
-	FARID           uint32      // FAR ID to apply on match
+	ID              uint16     // PDR ID — 16-bit per §8.2.1 (Table 8.1.2-1)
+	Precedence      uint32     // lower value = higher priority per §8.2.2
+	SourceInterface uint8      // 0=Access,1=Core per §8.2.2
+	LocalTEID       uint32     // allocated TEID (when CHOOSE was set in F-TEID IE)
+	LocalIP         netip.Addr // SGW-U GTP-U IP for this PDR
+	FARID           uint32     // FAR ID to apply on match
 }
 
 // FAR is a Forwarding Action Rule per TS 29.244 Rel-15 §5.2.1.
 type FAR struct {
-	ID              uint32      // FAR ID — 32-bit per TS 29.244 §8.2.74 / Table 8.1-1 row 108
-	ApplyAction     uint8       // bit flags: DROP=0x01, FORW=0x02 per §8.2.26
-	DestInterface   uint8       // destination interface (0=Access, 1=Core)
-	OuterTEID       uint32      // outer header creation TEID (for GTP-U encapsulation)
-	OuterIP         netip.Addr  // outer header creation peer IP
+	ID            uint32     // FAR ID — 32-bit per TS 29.244 §8.2.74 / Table 8.1.2-1 row 108
+	ApplyAction   uint8      // bit flags: DROP=0x01, FORW=0x02 per §8.2.26
+	DestInterface uint8      // destination interface (0=Access, 1=Core)
+	OuterTEID     uint32     // outer header creation TEID (for GTP-U encapsulation)
+	OuterIP       netip.Addr // outer header creation peer IP
 }
 
 // Session is a PFCP session binding on the SGW-U per TS 29.244 Rel-15 §5.3.
@@ -85,10 +85,27 @@ func (s *Store) AllocTEID() uint32 {
 		if _, err := rand.Read(b[:]); err != nil {
 			panic(fmt.Sprintf("AllocTEID: rand.Read: %v", err))
 		}
-		if v := binary.BigEndian.Uint32(b[:]); v != 0 {
+		if v := binary.BigEndian.Uint32(b[:]); v != 0 && !s.localTEIDInUse(v) {
 			return v
 		}
 	}
+}
+
+func (s *Store) localTEIDInUse(teid uint32) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.localTEIDInUseLocked(teid)
+}
+
+func (s *Store) localTEIDInUseLocked(teid uint32) bool {
+	for _, sess := range s.byCPSEID {
+		for i := range sess.PDRs {
+			if sess.PDRs[i].LocalTEID == teid {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // Create stores a new session. Returns an error if a session with the same CP-SEID
@@ -109,6 +126,19 @@ func (s *Store) FindByCPSEID(cpSEID uint64) *Session {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.byCPSEID[cpSEID]
+}
+
+// All returns a snapshot slice of every session currently in the store,
+// keyed once by CP-SEID (byCPSEID and byUPSEID both point at the same
+// Session, so iterating only one avoids duplicates).
+func (s *Store) All() []*Session {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	list := make([]*Session, 0, len(s.byCPSEID))
+	for _, sess := range s.byCPSEID {
+		list = append(list, sess)
+	}
+	return list
 }
 
 // FindByUPSEID looks up a session by UP-SEID.
@@ -207,4 +237,20 @@ func (s *Store) Count() int {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return len(s.byCPSEID)
+}
+
+// CountByCPNodeKey returns the number of active sessions established by the CP
+// node identified by nodeKey. This is used by SGW-U API diagnostics so PFCP
+// association state can be correlated with the session contexts bound to that
+// CP function.
+func (s *Store) CountByCPNodeKey(nodeKey string) int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	var count int
+	for _, sess := range s.byCPSEID {
+		if sess.CPNodeKey == nodeKey {
+			count++
+		}
+	}
+	return count
 }

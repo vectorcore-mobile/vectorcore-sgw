@@ -14,11 +14,12 @@ import (
 type SessionState string
 
 const (
-	StatePending   SessionState = "pending"   // CSReq received; PGW and PFCP setup not yet complete
-	StateActive    SessionState = "active"    // fully established; data path live
-	StateModifying SessionState = "modifying" // bearer modification in progress
-	StateDeleting  SessionState = "deleting"  // deletion in progress
-	StateDeleted   SessionState = "deleted"   // fully cleaned up
+	StatePending    SessionState = "pending"    // CSReq received; PGW and PFCP setup not yet complete
+	StateActive     SessionState = "active"     // fully established; data path live
+	StateModifying  SessionState = "modifying"  // bearer modification in progress
+	StateRecovering SessionState = "recovering" // SGW-U PFCP binding invalidated after restart/loss
+	StateDeleting   SessionState = "deleting"   // deletion in progress
+	StateDeleted    SessionState = "deleted"    // fully cleaned up
 )
 
 // FTEID is a decoded F-TEID used in session state.
@@ -39,6 +40,8 @@ type FSEID struct {
 type PFCPSessionBinding struct {
 	LocalFSEID  FSEID
 	SGWUFSEID   FSEID
+	SGWUName    string
+	SGWUAddr    string
 	Established bool
 }
 
@@ -111,11 +114,30 @@ func (s *SGWSession) GetState() SessionState {
 	return s.State
 }
 
+// PFCPBinding returns a snapshot of the current PFCP binding.
+func (s *SGWSession) PFCPBinding() PFCPSessionBinding {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.PFCP
+}
+
 // GetBearer returns the bearer for the given EBI, or nil.
 func (s *SGWSession) GetBearer(ebi uint8) *bearer.Bearer {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.Bearers[ebi]
+}
+
+// BearerList returns a snapshot slice of all bearers in this session,
+// safe for concurrent use while other goroutines hold s.mu for writes.
+func (s *SGWSession) BearerList() []*bearer.Bearer {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	list := make([]*bearer.Bearer, 0, len(s.Bearers))
+	for _, b := range s.Bearers {
+		list = append(list, b)
+	}
+	return list
 }
 
 // SetBearer stores a bearer under its EBI.
@@ -145,6 +167,42 @@ func (s *SGWSession) ClearENBFTEIDs() {
 	s.UpdatedAt = time.Now()
 }
 
+// InvalidatePFCPBinding clears PFCP state learned from an SGW-U that has
+// restarted or lost its association. TS 29.244 Rel-15 §6.2.2 heartbeat
+// liveness and §7.4.2 Recovery Time Stamp changes mean the peer PFCP context
+// is no longer safe to reuse; SGW-U allocated F-TEIDs must not be advertised.
+func (s *SGWSession) InvalidatePFCPBinding() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	hadPFCP := s.PFCP.Established || s.PFCP.LocalFSEID.SEID != 0 || s.PFCP.SGWUFSEID.SEID != 0
+	if !hadPFCP {
+		return false
+	}
+	s.PFCP = PFCPSessionBinding{}
+	for _, b := range s.Bearers {
+		b.SGWS1UFTEID = bearer.FTEID{}
+		b.SGWS5UFTEID = bearer.FTEID{}
+	}
+	if s.State != StateDeleting && s.State != StateDeleted {
+		s.State = StateRecovering
+	}
+	s.UpdatedAt = time.Now()
+	return true
+}
+
+// InvalidatePFCPBindingForPeer clears PFCP state only when the session is bound
+// to the affected SGW-U peer. This preserves sessions on unrelated SGW-U peers
+// when one PFCP association is lost or restarted.
+func (s *SGWSession) InvalidatePFCPBindingForPeer(peerName, peerAddr string) bool {
+	s.mu.RLock()
+	matches := s.PFCP.SGWUName == peerName && s.PFCP.SGWUAddr == peerAddr
+	s.mu.RUnlock()
+	if !matches {
+		return false
+	}
+	return s.InvalidatePFCPBinding()
+}
+
 // DeleteBearer removes the bearer with the given EBI.
 func (s *SGWSession) DeleteBearer(ebi uint8) {
 	s.mu.Lock()
@@ -156,11 +214,13 @@ func (s *SGWSession) DeleteBearer(ebi uint8) {
 func validTransition(from, to SessionState) bool {
 	switch from {
 	case StatePending:
-		return to == StateActive || to == StateDeleting || to == StateDeleted
+		return to == StateActive || to == StateRecovering || to == StateDeleting || to == StateDeleted
 	case StateActive:
-		return to == StateModifying || to == StateDeleting
+		return to == StateModifying || to == StateRecovering || to == StateDeleting
 	case StateModifying:
-		return to == StateActive || to == StateDeleting
+		return to == StateActive || to == StateRecovering || to == StateDeleting
+	case StateRecovering:
+		return to == StateActive || to == StateDeleting || to == StateDeleted
 	case StateDeleting:
 		return to == StateDeleted
 	}

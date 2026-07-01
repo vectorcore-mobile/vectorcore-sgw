@@ -10,64 +10,74 @@ import (
 
 // IE type values per TS 29.274 Table 8.1-1.
 const (
-	TypeIMSI             = 1
-	TypeCause            = 2
-	TypeRecovery         = 3
-	TypeAPN              = 71
-	TypeAMBR             = 72
-	TypeEBI              = 73
-	TypeIPAddress        = 74
-	TypeMEI              = 75
-	TypeMSISDN           = 76
-	TypeIndication       = 77
-	TypePCO              = 78
-	TypePAA              = 79
-	TypeBearerQoS        = 80
-	TypeFlowQoS          = 81
-	TypeRATType          = 82
-	TypeServingNetwork   = 83
-	TypeBearerTFT        = 84 // TS 29.274 Table 8.1-1: "84 | EPS Bearer Level Traffic Flow Template (Bearer TFT) | Variable Length / 8.19"
-	TypeULI              = 86
-	TypeFTEID            = 87
-	TypeBearerContext    = 93
-	TypeChargingID       = 94
-	TypeChargingChars    = 95
-	TypePDNType          = 99
-	TypePTI              = 100
-	TypeAPNRestriction   = 167
-	TypeUETimeZone       = 114
-	TypeNodeType         = 135
-	TypeSelectionMode    = 128 // §8.58
+	TypeIMSI           = 1
+	TypeCause          = 2
+	TypeRecovery       = 3
+	TypeAPN            = 71
+	TypeAMBR           = 72
+	TypeEBI            = 73
+	TypeIPAddress      = 74
+	TypeMEI            = 75
+	TypeMSISDN         = 76
+	TypeIndication     = 77
+	TypePCO            = 78
+	TypePAA            = 79
+	TypeBearerQoS      = 80
+	TypeFlowQoS        = 81
+	TypeRATType        = 82
+	TypeServingNetwork = 83
+	TypeBearerTFT      = 84 // TS 29.274 Table 8.1-1: "84 | EPS Bearer Level Traffic Flow Template (Bearer TFT) | Variable Length / 8.19"
+	TypeULI            = 86
+	TypeFTEID          = 87
+	TypeBearerContext  = 93
+	TypeChargingID     = 94
+	TypeChargingChars  = 95
+	TypePDNType        = 99
+	TypePTI            = 100
+	TypeAPNRestriction = 127 // FIXED 2026-06-23: was 167 ("Change to Report Flags" / §8.98).
+	// Real value per Table 8.1-1: "127 | APN Restriction | Extendable / 8.57 | 1". Unused
+	// elsewhere in this codebase, so this was a latent wire-format bug, not yet triggered.
+	TypeUETimeZone    = 114
+	TypeNodeType      = 135
+	TypeSelectionMode = 128 // §8.58
 )
 
 // Cause values per TS 29.274 Rel-15 Table 8.4-1.
 const (
-	CauseRequestAccepted              uint8 = 16
-	CauseContextNotFound              uint8 = 64
-	CauseInvalidMessageFormat         uint8 = 65
-	CauseVersionNotSupported          uint8 = 66
-	CauseInvalidLength                uint8 = 67
-	CauseMandatoryIEIncorrect         uint8 = 69
-	CauseMandatoryIEMissing           uint8 = 70
-	CauseSystemFailure                uint8 = 72
-	CauseNoResourcesAvailable         uint8 = 73 // "No resources available"
-	CauseMissingOrUnknownAPN          uint8 = 79
+	CauseRequestAccepted          uint8 = 16
+	CauseRequestAcceptedPartially uint8 = 17
+	CauseContextNotFound          uint8 = 64
+	CauseInvalidMessageFormat     uint8 = 65
+	CauseVersionNotSupported      uint8 = 66
+	CauseInvalidLength            uint8 = 67
+	CauseMandatoryIEIncorrect     uint8 = 69
+	CauseMandatoryIEMissing       uint8 = 70
+	CauseSystemFailure            uint8 = 72
+	CauseNoResourcesAvailable     uint8 = 73 // "No resources available"
+	CauseMissingOrUnknownAPN      uint8 = 78 // FIXED 2026-06-23: was 79, which Table 8.4-1 marks
+	// "Shall not be used" (reserved). Real value: "78 | Missing or unknown APN". Unused
+	// elsewhere in this codebase, so this was a latent wire-format bug, not yet triggered.
 	CausePreferredPDNTypeNotSupported uint8 = 83
 	CauseAllDynamicAddressesOccupied  uint8 = 84
 	CauseRequestRejected              uint8 = 94 // "Request rejected (reason not specified)"
+	CauseConditionalIEMissing         uint8 = 103
 )
 
 // RAT Type values per TS 29.274 Rel-15 Table 8.17-1.
 const (
-	RATTypeUTRAN         = 1
-	RATTypeGERAN         = 2
-	RATTypeWLAN          = 3
-	RATTypeGAN           = 4
-	RATTypeHSPA          = 5
-	RATTypeEUTRAN        = 6
-	RATTypeVirtual       = 7
-	RATTypeNBIoT         = 8 // E-UTRAN-NB-IoT, added Rel-13
-	RATTypeHSPAEvolution = 9 // E-UTRAN-HSPA-Evolution, added Rel-14
+	RATTypeUTRAN   = 1
+	RATTypeGERAN   = 2
+	RATTypeWLAN    = 3
+	RATTypeGAN     = 4
+	RATTypeHSPA    = 5
+	RATTypeEUTRAN  = 6
+	RATTypeVirtual = 7
+	RATTypeNBIoT   = 8 // EUTRAN-NB-IoT
+	// FIXED 2026-06-23: was named RATTypeHSPAEvolution. Table 8.17-1 lists value 5 as
+	// "HSPA Evolution" (already RATTypeHSPA above) and value 9 as "LTE-M" — this constant's
+	// previous name conflated the two. Unused elsewhere in this codebase, so this was a
+	// latent naming/citation error (the value 9 itself was not wrong), not yet triggered.
+	RATTypeLTEM = 9
 )
 
 // PDN Type values per TS 29.274 Section 8.34.
@@ -79,14 +89,14 @@ const (
 
 // Interface Type values for F-TEID per TS 29.274 Table 8.22-1.
 const (
-	IFTypeS1UENB      = 0
-	IFTypeS1USGW      = 1
-	IFTypeS5S8USGW    = 4
-	IFTypeS5S8UPGW    = 5
-	IFTypeS11MMEC     = 10
-	IFTypeS11S4SGW    = 11
-	IFTypeS5S8CSGW    = 6
-	IFTypeS5S8CPGW    = 7
+	IFTypeS1UENB   = 0
+	IFTypeS1USGW   = 1
+	IFTypeS5S8USGW = 4
+	IFTypeS5S8UPGW = 5
+	IFTypeS11MMEC  = 10
+	IFTypeS11S4SGW = 11
+	IFTypeS5S8CSGW = 6
+	IFTypeS5S8CPGW = 7
 )
 
 // IE is a GTPv2-C Information Element per TS 29.274 Section 8.1.

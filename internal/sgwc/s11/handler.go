@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/netip"
 	"sync"
+	"time"
 
 	sgwcconfig "vectorcore-sgw/internal/config/sgwc"
 	"vectorcore-sgw/internal/gtpv2/ie"
@@ -25,14 +26,67 @@ import (
 // Handler processes inbound S11 messages from the MME.
 type Handler struct {
 	cfg      *sgwcconfig.Config
-	conn     *transport.Conn
+	conn     gtpcConn
 	log      *slog.Logger
 	sessions *session.Manager
 	recovery *recovery.Counter
-	s5c      *s5c.Client
-	pfcp     *pfcpclient.Client
+	s5c      s5cClient
+	pfcp     pfcpClient
 	localIP  netip.Addr // SGW-C S11 control-plane IP for Sender F-TEID IEs
 	peerSeen sync.Map   // addr string → uint8; last restart counter advertised to each MME peer
+
+	cbTxnMu        sync.Mutex
+	cbTxns         map[createBearerTxnKey]*createBearerTxnState
+	cbFPs          map[createBearerFingerprintKey]*createBearerTxnState
+	cbS11          map[s11CreateBearerResponseKey]*pendingS11CreateBearer
+	cbProcFailures map[createBearerProcedureKey]*createBearerProcedureFailure
+}
+
+type gtpcConn interface {
+	AllocSeq() uint32
+	Send(ctx context.Context, addr *net.UDPAddr, raw []byte) ([]byte, error)
+	Serve(ctx context.Context) error
+	Close() error
+	LocalAddr() net.Addr
+}
+
+type s5cClient interface {
+	PGWAddr(s11req *message.CreateSessionRequest) (*net.UDPAddr, error)
+	CreateSession(ctx context.Context, pgwAddr *net.UDPAddr, s11req *message.CreateSessionRequest, sgwS5CTEID uint32, sgwUS5UFTEID bearer.FTEID) (*s5c.CreateSessionResult, error)
+	DispatchPiggybacks(pgwAddr *net.UDPAddr, frames []message.Frame)
+	DeleteSession(ctx context.Context, sess *session.SGWSession) (uint8, error)
+	DeleteSessionFromS11(ctx context.Context, sess *session.SGWSession, req *message.DeleteSessionRequest) (uint8, error)
+	ReplyToPGW(pgwAddr *net.UDPAddr, raw []byte) error
+	AllocTEID() (uint32, error)
+	FreeTEID(teid uint32)
+}
+
+type pfcpClient interface {
+	AllocCPSEID() uint64
+	EstablishSession(ctx context.Context, params pfcpclient.SessionParams) (*pfcpclient.SessionResult, error)
+	ModifySessionOnPeer(ctx context.Context, peerAddr string, cpSEID, upSEID uint64, updates []pfcpclient.FARUpdate) error
+	AddBearerRulesOnPeer(ctx context.Context, peerAddr string, cpSEID, upSEID uint64, createPDRs, createFARs []*pfcpie.IE) ([]*pfcpie.IE, error)
+	RemoveBearerRulesOnPeer(ctx context.Context, peerAddr string, cpSEID, upSEID uint64, pdrIDs, farIDs []uint32) error
+	DeleteSessionOnPeer(ctx context.Context, peerAddr string, cpSEID, upSEID uint64) error
+}
+
+type s11CreateBearerResponseKey struct {
+	peer string
+	seq  uint32
+}
+
+type pendingS11CreateBearer struct {
+	pgwAddr     *net.UDPAddr
+	mmeAddr     string
+	hdr         message.Header
+	cbReq       *message.CreateBearerRequest
+	sess        *session.SGWSession
+	txn         *createBearerTxnState
+	bearerProvs []bearerProvisioning
+	csrspSeq    uint32
+	s11Seq      uint32
+	linkedEBI   uint8
+	createdAt   time.Time
 }
 
 // New creates a new S11 handler, binds the S11 UDP listener, and wires the session manager.
@@ -41,7 +95,7 @@ type Handler struct {
 // localIP is the SGW-C control-plane IP included in Sender F-TEID IEs on S11.
 func New(cfg *sgwcconfig.Config, sessions *session.Manager, rc *recovery.Counter, s5cClient *s5c.Client, pfcpClient *pfcpclient.Client, localIP netip.Addr, log *slog.Logger) (*Handler, error) {
 	conn, err := transport.Listen(
-		cfg.S11.Listen,
+		cfg.S11Listen(),
 		cfg.S11.T3ResponseSeconds,
 		cfg.S11.N3Requests,
 		log,
@@ -50,17 +104,41 @@ func New(cfg *sgwcconfig.Config, sessions *session.Manager, rc *recovery.Counter
 		return nil, fmt.Errorf("s11 listen: %w", err)
 	}
 	h := &Handler{
-		cfg:      cfg,
-		conn:     conn,
-		log:      log,
-		sessions: sessions,
-		recovery: rc,
-		s5c:      s5cClient,
-		pfcp:     pfcpClient,
-		localIP:  localIP,
+		cfg:            cfg,
+		conn:           conn,
+		log:            log,
+		sessions:       sessions,
+		recovery:       rc,
+		s5c:            s5cClient,
+		pfcp:           pfcpClient,
+		localIP:        localIP,
+		cbTxns:         make(map[createBearerTxnKey]*createBearerTxnState),
+		cbFPs:          make(map[createBearerFingerprintKey]*createBearerTxnState),
+		cbS11:          make(map[s11CreateBearerResponseKey]*pendingS11CreateBearer),
+		cbProcFailures: make(map[createBearerProcedureKey]*createBearerProcedureFailure),
 	}
 	conn.SetHandler(h.handle)
 	return h, nil
+}
+
+// NewWithConn creates an S11 handler using an already-bound GTPv2-C transport.
+// This is used when S11 and S5/S8-C share one configured control binding.
+func NewWithConn(cfg *sgwcconfig.Config, conn *transport.Conn, sessions *session.Manager, rc *recovery.Counter, s5cClient *s5c.Client, pfcpClient *pfcpclient.Client, localIP netip.Addr, log *slog.Logger) *Handler {
+	h := &Handler{
+		cfg:            cfg,
+		conn:           conn,
+		log:            log,
+		sessions:       sessions,
+		recovery:       rc,
+		s5c:            s5cClient,
+		pfcp:           pfcpClient,
+		localIP:        localIP,
+		cbTxns:         make(map[createBearerTxnKey]*createBearerTxnState),
+		cbFPs:          make(map[createBearerFingerprintKey]*createBearerTxnState),
+		cbS11:          make(map[s11CreateBearerResponseKey]*pendingS11CreateBearer),
+		cbProcFailures: make(map[createBearerProcedureKey]*createBearerProcedureFailure),
+	}
+	return h
 }
 
 // Serve starts the S11 read loop. Blocks until ctx is cancelled.
@@ -72,6 +150,13 @@ func (h *Handler) Serve(ctx context.Context) error {
 // Close shuts down the S11 listener.
 func (h *Handler) Close() error {
 	return h.conn.Close()
+}
+
+// Handle dispatches one inbound S11 GTPv2-C request. It is exported so the
+// SGW-C shared control socket can route S11 messages without owning a second
+// UDP listener.
+func (h *Handler) Handle(conn *transport.Conn, addr *net.UDPAddr, hdr message.Header, raw []byte) {
+	h.handle(conn, addr, hdr, raw)
 }
 
 func (h *Handler) handle(conn *transport.Conn, addr *net.UDPAddr, hdr message.Header, raw []byte) {
@@ -90,6 +175,8 @@ func (h *Handler) handle(conn *transport.Conn, addr *net.UDPAddr, hdr message.He
 		h.handleCreateSessionRequest(conn, addr, hdr, ies)
 	case message.MsgTypeModifyBearerRequest:
 		h.handleModifyBearerRequest(conn, addr, hdr, ies)
+	case message.MsgTypeCreateBearerResponse:
+		h.handlePiggybackCreateBearerResponse(conn, addr, hdr, raw)
 	case message.MsgTypeDeleteSessionRequest:
 		h.handleDeleteSessionRequest(conn, addr, hdr, ies)
 	case message.MsgTypeReleaseAccessBearersRequest:
@@ -115,7 +202,9 @@ func (h *Handler) handleEchoRequest(conn *transport.Conn, addr *net.UDPAddr, hdr
 
 func (h *Handler) handleCreateSessionRequest(conn *transport.Conn, addr *net.UDPAddr, hdr message.Header, ies []*ie.IE) {
 	// Extract peer (MME) TEID before parse so error responses carry the correct
-	// response TEID per TS 29.274 Rel-15 §5.5.1. On initial attach hdr.TEID=0.
+	// response TEID per TS 29.274 Rel-15 §5.5.2 ("the node should look up the
+	// remote peer's TEID and accordingly set the GTPv2-C header TEID"). On
+	// initial attach hdr.TEID=0.
 	peerTEID := peerTEIDFromIEs(ies)
 
 	req, err := message.ParseCreateSessionRequest(hdr, ies)
@@ -137,9 +226,11 @@ func (h *Handler) handleCreateSessionRequest(conn *transport.Conn, addr *net.UDP
 	apn, _ := req.APN.APNValue()
 	ratType, _ := req.RATType.RATTypeValue()
 
-	// Serving Network: C per Table 7.2.1-1 — required for E-UTRAN initial attach
-	// (validate() already rejected the request if absent; safe to call here).
-	mcc, mnc, _ := req.ServingNetwork.ServingNetworkValue()
+	var servingNetwork string
+	if req.ServingNetwork != nil {
+		mcc, mnc, _ := req.ServingNetwork.ServingNetworkValue()
+		servingNetwork = mcc + "-" + mnc
+	}
 
 	mmeF, _ := req.FTEID.FTEIDValue()
 	mmeTEID := mmeF.TEID
@@ -147,11 +238,19 @@ func (h *Handler) handleCreateSessionRequest(conn *transport.Conn, addr *net.UDP
 	// Decode the default bearer context EBI and QoS.
 	ebi, qci, arp := extractDefaultBearer(req.BearerContexts)
 
+	var reuseSGWS11FTEID session.FTEID
+	if hdr.TEID != 0 {
+		if existing := h.sessions.FindByS11TEID(hdr.TEID); existing != nil {
+			reuseSGWS11FTEID = existing.SGWS11FTEID
+		}
+	}
+
 	sess, evicted, err := h.sessions.Create(session.CreateParams{
-		IMSI:           imsi,
-		APN:            apn,
-		RATType:        ratType,
-		ServingNetwork: mcc + "-" + mnc,
+		IMSI:             imsi,
+		APN:              apn,
+		RATType:          ratType,
+		ServingNetwork:   servingNetwork,
+		ReuseSGWS11FTEID: reuseSGWS11FTEID,
 		MMEControlFTEID: session.FTEID{
 			TEID: mmeF.TEID,
 			IPv4: mmeF.IPv4,
@@ -171,6 +270,7 @@ func (h *Handler) handleCreateSessionRequest(conn *transport.Conn, addr *net.UDP
 	// C13: if an existing PDN connection was evicted (UE re-attach), send Delete
 	// Session to PGW to release its bearer state before establishing the new session.
 	if evicted != nil && evicted.PGWControlFTEID.TEID != 0 {
+		h.clearCreateBearerProcedureFailuresForSession(evicted.SessionID, "reattach_evicted_session")
 		h.log.Info("S11: re-attach detected — releasing evicted PGW session",
 			"evicted_session_id", evicted.SessionID,
 			"pgw_s5c_teid", fmt.Sprintf("0x%08X", evicted.PGWControlFTEID.TEID),
@@ -185,7 +285,8 @@ func (h *Handler) handleCreateSessionRequest(conn *transport.Conn, addr *net.UDP
 	// SGW-U (PFCP) cleanup. Local sessions.Delete() alone leaves stale forwarding state
 	// on the SGW-U with orphaned TEIDs that may collide with the new session.
 	if evicted != nil && evicted.PFCP.Established && evicted.PFCP.SGWUFSEID.SEID != 0 {
-		if pfcpErr := h.pfcp.DeleteSession(context.TODO(),
+		if pfcpErr := h.pfcp.DeleteSessionOnPeer(context.TODO(),
+			evicted.PFCP.SGWUAddr,
 			evicted.PFCP.LocalFSEID.SEID,
 			evicted.PFCP.SGWUFSEID.SEID,
 		); pfcpErr != nil {
@@ -208,8 +309,9 @@ func (h *Handler) handleCreateSessionRequest(conn *transport.Conn, addr *net.UDP
 	pgwAddr, err := h.s5c.PGWAddr(req)
 	if err != nil {
 		h.log.Error("S11: PGW S5/S8-C address unavailable", "error", err)
+		h.clearCreateBearerProcedureFailuresForSession(sess.SessionID, "create_session_abort")
 		h.sessions.Delete(sess.SessionID)
-		h.sendCause(conn, addr, hdr, mmeTEID, ie.CauseNoResourcesAvailable)
+		h.sendCause(conn, addr, hdr, mmeTEID, ie.CauseConditionalIEMissing)
 		return
 	}
 
@@ -222,21 +324,47 @@ func (h *Handler) handleCreateSessionRequest(conn *transport.Conn, addr *net.UDP
 	if pfcpErr != nil {
 		h.log.Error("S11: PFCP provisional session failed — aborting CSReq",
 			"session_id", sess.SessionID, "error", pfcpErr)
+		h.clearCreateBearerProcedureFailuresForSession(sess.SessionID, "create_session_abort")
 		h.sessions.Delete(sess.SessionID)
 		h.sendCause(conn, addr, hdr, mmeTEID, ie.CauseSystemFailure)
 		return
 	}
 
+	// Allocate and register the SGW local S5/S8-C TEID before sending the S5/S8-C
+	// Create Session Request. Once advertised in Sender F-TEID, the PGW may
+	// immediately address responses or PGW-initiated procedures to this local TEID.
+	sgwS5CTEID, err := h.s5c.AllocTEID()
+	if err != nil {
+		h.log.Error("S11: SGW S5/S8-C TEID allocation failed", "session_id", sess.SessionID, "error", err)
+		if delErr := h.pfcp.DeleteSessionOnPeer(context.TODO(), pfcpResult.peerAddr, pfcpResult.cpSEID, pfcpResult.upSEID); delErr != nil {
+			h.log.Warn("S11: PFCP DeleteSession rollback after S5-C TEID allocation failure failed", "error", delErr)
+		}
+		h.clearCreateBearerProcedureFailuresForSession(sess.SessionID, "create_session_abort")
+		h.sessions.Delete(sess.SessionID)
+		h.sendCause(conn, addr, hdr, mmeTEID, ie.CauseNoResourcesAvailable)
+		return
+	}
+	releaseS5CTEID := func() {
+		if sgwS5CTEID != 0 {
+			h.s5c.FreeTEID(sgwS5CTEID)
+			sgwS5CTEID = 0
+		}
+	}
+	sess.SGWS5CFTEID = session.FTEID{TEID: sgwS5CTEID, IPv4: h.localIP}
+	h.sessions.RegisterS5CTEID(sess.SessionID, sgwS5CTEID)
+
 	// Send Create Session Request to PGW on S5/S8-C, including SGW-U S5/S8-U TEID.
 	// Per TS 29.274 Rel-15 §7.2.1 / Table 7.2.1-1 (S5/S8-C direction).
-	s5cResult, err := h.s5c.CreateSession(context.TODO(), pgwAddr, req, pfcpResult.sgwUS5UFTEID)
+	s5cResult, err := h.s5c.CreateSession(context.TODO(), pgwAddr, req, sgwS5CTEID, pfcpResult.sgwUS5UFTEID)
 	if err != nil {
 		h.log.Error("S11: S5/S8-C Create Session failed", "pgw", pgwAddr, "error", err)
 		// Roll back PFCP provisional session — PGW never acknowledged it.
-		if delErr := h.pfcp.DeleteSession(context.TODO(), pfcpResult.cpSEID, pfcpResult.upSEID); delErr != nil {
+		if delErr := h.pfcp.DeleteSessionOnPeer(context.TODO(), pfcpResult.peerAddr, pfcpResult.cpSEID, pfcpResult.upSEID); delErr != nil {
 			h.log.Warn("S11: PFCP DeleteSession rollback failed", "error", delErr)
 		}
+		h.clearCreateBearerProcedureFailuresForSession(sess.SessionID, "create_session_abort")
 		h.sessions.Delete(sess.SessionID)
+		releaseS5CTEID()
 		h.sendCause(conn, addr, hdr, mmeTEID, ie.CauseSystemFailure)
 		return
 	}
@@ -245,10 +373,12 @@ func (h *Handler) handleCreateSessionRequest(conn *transport.Conn, addr *net.UDP
 		h.log.Warn("S11: PGW rejected Create Session Request",
 			"pgw", pgwAddr, "cause", s5cResult.Cause)
 		// Roll back PFCP provisional session.
-		if delErr := h.pfcp.DeleteSession(context.TODO(), pfcpResult.cpSEID, pfcpResult.upSEID); delErr != nil {
+		if delErr := h.pfcp.DeleteSessionOnPeer(context.TODO(), pfcpResult.peerAddr, pfcpResult.cpSEID, pfcpResult.upSEID); delErr != nil {
 			h.log.Warn("S11: PFCP DeleteSession rollback on PGW rejection failed", "error", delErr)
 		}
+		h.clearCreateBearerProcedureFailuresForSession(sess.SessionID, "create_session_abort")
 		h.sessions.Delete(sess.SessionID)
+		releaseS5CTEID()
 		// Propagate PGW's rejection cause to MME.
 		// CS=1 per TS 29.274 §8.4: this cause originated at the PGW (remote node),
 		// not at the SGW-C. Build response manually to set CS correctly (C12).
@@ -269,11 +399,8 @@ func (h *Handler) handleCreateSessionRequest(conn *transport.Conn, addr *net.UDP
 	}
 
 	// Update session with PGW response per TS 29.274 §7.2.2 / Table 7.2.2-1.
-	sess.SGWS5CFTEID = session.FTEID{TEID: s5cResult.SGWS5CTEID, IPv4: h.localIP}
 	sess.PGWControlFTEID = s5cResult.PGWControlFTEID
 	sess.UEIPv4 = s5cResult.UEIP
-	// Register S5/S8-C TEID for PGW-initiated procedure lookup (CBReq, UBReq, DBReq).
-	h.sessions.RegisterS5CTEID(sess.SessionID, s5cResult.SGWS5CTEID)
 
 	// Update default bearer with PGW-U S5/S8-U F-TEID per Table 7.2.2-2.
 	if b := sess.GetBearer(ebi); b != nil {
@@ -285,17 +412,19 @@ func (h *Handler) handleCreateSessionRequest(conn *transport.Conn, addr *net.UDP
 	// R15-REAUDIT-001: this completes the PFCP-first sequence.
 	if s5cResult.PGWS5UFTEID.TEID != 0 {
 		if modErr := h.modifyPFCPUplinkFAR(context.TODO(),
-			pfcpResult.cpSEID, pfcpResult.upSEID, s5cResult.PGWS5UFTEID); modErr != nil {
+			pfcpResult.peerAddr, pfcpResult.cpSEID, pfcpResult.upSEID, s5cResult.PGWS5UFTEID); modErr != nil {
 			h.log.Error("S11: PFCP modify uplink FAR failed — tearing down",
 				"session_id", sess.SessionID, "error", modErr)
 			if _, dsErr := h.s5c.DeleteSession(context.TODO(), sess); dsErr != nil {
 				h.log.Warn("S11: PGW Delete Session after PFCP modify failure also failed",
 					"session_id", sess.SessionID, "error", dsErr)
 			}
-			if delErr := h.pfcp.DeleteSession(context.TODO(), pfcpResult.cpSEID, pfcpResult.upSEID); delErr != nil {
+			if delErr := h.pfcp.DeleteSessionOnPeer(context.TODO(), pfcpResult.peerAddr, pfcpResult.cpSEID, pfcpResult.upSEID); delErr != nil {
 				h.log.Warn("S11: PFCP DeleteSession after modify failure also failed", "error", delErr)
 			}
+			h.clearCreateBearerProcedureFailuresForSession(sess.SessionID, "create_session_abort")
 			h.sessions.Delete(sess.SessionID)
+			releaseS5CTEID()
 			h.sendCause(conn, addr, hdr, mmeTEID, ie.CauseSystemFailure)
 			return
 		}
@@ -307,6 +436,8 @@ func (h *Handler) handleCreateSessionRequest(conn *transport.Conn, addr *net.UDP
 	sess.PFCP = session.PFCPSessionBinding{
 		LocalFSEID:  session.FSEID{SEID: cpSEID, IPv4: h.localIP},
 		SGWUFSEID:   session.FSEID{SEID: upSEID},
+		SGWUName:    pfcpResult.peerName,
+		SGWUAddr:    pfcpResult.peerAddr,
 		Established: true,
 	}
 
@@ -336,6 +467,8 @@ func (h *Handler) handleCreateSessionRequest(conn *transport.Conn, addr *net.UDP
 	// PGW S5/S8-C F-TEID (instance 1): forwarded from PGW CSResp — C.
 	// PAA: UE IP from PGW PAA — C on success.
 	// AMBR: forwarded from PGW if provided, else from MME — C on success.
+	// APN Restriction: forwarded from PGW if provided — C on success.
+	// PCO: forwarded byte-for-byte from PGW if provided — C on success.
 	// Bearer Context created (instance 0): per Table 7.2.2-2.
 	//   - EBI: M
 	//   - Cause: M (bearer level)
@@ -357,6 +490,104 @@ func (h *Handler) handleCreateSessionRequest(conn *transport.Conn, addr *net.UDP
 		ambrIE = req.AMBR // PGW echoed AMBR; fall back to MME value
 	}
 
+	extraIEs := h.buildS11CreateSessionResponseIEs(
+		addr,
+		ebi,
+		sgwS11FTEID,
+		pgwS5CFTEID,
+		paaSGW,
+		ambrIE,
+		s5cResult,
+		pfcpResult,
+	)
+
+	h.log.Info("S11: Create Session Response built",
+		"imsi", imsi,
+		"seq", req.Header.SequenceNumber,
+		"cause", ie.CauseRequestAccepted,
+		"ue_ip", sess.UEIPv4,
+		"sgw_s11_teid", fmt.Sprintf("0x%08X", sess.SGWS11FTEID.TEID),
+		"mme_s11_teid", fmt.Sprintf("0x%08X", mmeTEID),
+		"pgw_s5c_teid", fmt.Sprintf("0x%08X", sess.PGWControlFTEID.TEID),
+		"has_paa", paaSGW != nil,
+		"has_apn_restriction", s5cResult.APNRestriction != nil,
+		"has_pco", s5cResult.PCO != nil,
+		"has_ambr", ambrIE != nil,
+		"has_recovery", ie.FindFirst(extraIEs, ie.TypeRecovery) != nil,
+		"bearer_contexts", 1,
+		"has_sgw_s1u_fteid", pfcpResult.sgwUS1UFTEID.TEID != 0 && pfcpResult.sgwUS1UFTEID.IPv4.IsValid(),
+		"has_pgw_s5u_fteid", s5cResult.PGWS5UFTEID.TEID != 0 && s5cResult.PGWS5UFTEID.IPv4.IsValid(),
+	)
+
+	resp, err := message.MarshalCreateSessionResponse(req, ie.CauseRequestAccepted, extraIEs...)
+	if err != nil {
+		h.log.Error("S11: Create Session Response marshal failed", "error", err)
+		return
+	}
+	var remainingPiggybacks []message.Frame
+	piggybackedCreateBearer := false
+	for _, frame := range s5cResult.Piggybacks {
+		if frame.Header.MessageType != message.MsgTypeCreateBearerRequest {
+			remainingPiggybacks = append(remainingPiggybacks, frame)
+			continue
+		}
+		if piggybackedCreateBearer {
+			remainingPiggybacks = append(remainingPiggybacks, frame)
+			h.log.Warn("S11: multiple Create Bearer piggybacks in one Create Session Response; relaying additional request separately",
+				"session_id", sess.SessionID,
+				"piggyback_seq", frame.Header.SequenceNumber,
+			)
+			continue
+		}
+		prep, ok := h.prepareCreateBearerRelay(pgwAddr, frame.Header, frame.Raw)
+		if !ok {
+			continue
+		}
+		piggybackedResp, pErr := message.MarshalPiggybacked(resp, prep.s11Raw)
+		if pErr != nil {
+			h.log.Error("S11: Create Session Response piggyback marshal failed", "error", pErr)
+			h.removeAllCreateBearerTxnProvisioning(prep.txn.key, prep.sess, prep.bearerProvs)
+			h.replyCreateBearerTxnError(prep.txn.key, prep.pgwAddr, prep.hdr, prep.cbReq,
+				prep.sess.PGWControlFTEID.TEID, ie.CauseSystemFailure)
+			continue
+		}
+		resp = piggybackedResp
+		piggybackedCreateBearer = true
+		h.registerPendingS11CreateBearer(addr, req.Header.SequenceNumber, prep)
+		h.log.Info("S11: forwarding Create Session Response with piggybacked Create Bearer Request",
+			"session_id", sess.SessionID,
+			"mme_teid", fmt.Sprintf("0x%08X", mmeTEID),
+			"csrsp_seq", req.Header.SequenceNumber,
+			"piggyback_msg_type", message.MsgTypeCreateBearerRequest,
+			"piggyback_seq", prep.s11Seq,
+			"bearer_contexts", len(prep.cbReq.BearerContexts),
+			"linked_ebi", prep.linkedEBI,
+		)
+	}
+	if err := conn.Reply(addr, resp); err != nil {
+		h.log.Warn("S11: Create Session Response send failed", "to", addr, "error", err)
+	}
+	if len(remainingPiggybacks) > 0 {
+		h.log.Info("S5/S8-C: dispatching piggybacked frames after Create Session commit",
+			"session_id", sess.SessionID,
+			"frames", len(remainingPiggybacks),
+			"sgw_s5c_teid", fmt.Sprintf("0x%08X", sess.SGWS5CFTEID.TEID),
+			"pgw_s5c_teid", fmt.Sprintf("0x%08X", sess.PGWControlFTEID.TEID),
+		)
+		h.s5c.DispatchPiggybacks(pgwAddr, remainingPiggybacks)
+	}
+}
+
+func (h *Handler) buildS11CreateSessionResponseIEs(
+	addr *net.UDPAddr,
+	ebi uint8,
+	sgwS11FTEID *ie.IE,
+	pgwS5CFTEID *ie.IE,
+	paaSGW *ie.IE,
+	ambrIE *ie.IE,
+	s5cResult *s5c.CreateSessionResult,
+	pfcpResult *pfcpSessionResult,
+) []*ie.IE {
 	var bcChildren []*ie.IE
 	bcChildren = append(bcChildren, ie.NewEBI(ebi))
 	bcChildren = append(bcChildren, ie.NewCause(ie.CauseRequestAccepted, 0, 0, 0, nil))
@@ -376,21 +607,32 @@ func (h *Handler) handleCreateSessionRequest(conn *transport.Conn, addr *net.UDP
 	}
 	bcCreated := ie.NewBearerContext(0, bcChildren...)
 
-	// Include Recovery IE per TS 29.274 §7.2.0 on first contact with this MME.
+	// Cisco StarOS accepts the IMS piggybacked Create Bearer path when the primary
+	// CSRsp closely matches its known-good ordering. IE order is not generally
+	// semantically significant, but keeping a stable order is harmless and gives
+	// interop-sensitive peers the same shape on every APN:
+	// Cause is added by MarshalCreateSessionResponse, then these IEs follow.
 	var extraIEs []*ie.IE
-	extraIEs = append(extraIEs, sgwS11FTEID, pgwS5CFTEID, paaSGW, ambrIE, bcCreated)
-	if recIE := h.maybeRecoveryIE(addr); recIE != nil {
-		extraIEs = append(extraIEs, recIE)
+	extraIEs = append(extraIEs, sgwS11FTEID, pgwS5CFTEID, paaSGW)
+	if s5cResult.APNRestriction != nil {
+		extraIEs = append(extraIEs, s5cResult.APNRestriction)
 	}
-
-	resp, err := message.MarshalCreateSessionResponse(req, ie.CauseRequestAccepted, extraIEs...)
-	if err != nil {
-		h.log.Error("S11: Create Session Response marshal failed", "error", err)
-		return
+	if ambrIE != nil {
+		extraIEs = append(extraIEs, ambrIE)
 	}
-	if err := conn.Reply(addr, resp); err != nil {
-		h.log.Warn("S11: Create Session Response send failed", "to", addr, "error", err)
+	if s5cResult.PCO != nil {
+		extraIEs = append(extraIEs, s5cResult.PCO)
 	}
+	extraIEs = append(extraIEs, bcCreated)
+	if s5cResult.ChargingID != nil {
+		extraIEs = append(extraIEs, s5cResult.ChargingID)
+	}
+	if h.recovery != nil && addr != nil {
+		if recIE := h.maybeRecoveryIE(addr); recIE != nil {
+			extraIEs = append(extraIEs, recIE)
+		}
+	}
+	return extraIEs
 }
 
 func (h *Handler) handleModifyBearerRequest(conn *transport.Conn, addr *net.UDPAddr, hdr message.Header, ies []*ie.IE) {
@@ -401,8 +643,8 @@ func (h *Handler) handleModifyBearerRequest(conn *transport.Conn, addr *net.UDPA
 		return
 	}
 
-	sess := h.sessions.FindByS11TEID(hdr.TEID)
-	if sess == nil {
+	defaultSess := h.sessions.FindByS11TEID(hdr.TEID)
+	if defaultSess == nil {
 		h.log.Warn("S11: Modify Bearer Request — session not found", "teid", fmt.Sprintf("0x%08X", hdr.TEID))
 		// Use Sender F-TEID if present; otherwise 0 (session unknown, MME TEID unavailable).
 		var peerTEID uint32
@@ -415,14 +657,15 @@ func (h *Handler) handleModifyBearerRequest(conn *transport.Conn, addr *net.UDPA
 		conn.Reply(addr, resp) //nolint:errcheck
 		return
 	}
+	mmeTEID := defaultSess.MMEControlFTEID.TEID
 
 	// Process each bearer context and record the per-bearer outcome.
 	// Per TS 29.274 Rel-15 Tables 7.2.8-1/7.2.8-2: MBResp must include a Bearer
 	// Context modified IE for each bearer processed, carrying EBI (M), Cause (M),
 	// and S1-U SGW F-TEID (C, instance 0 per Table 7.2.8-2).
 	type mbResult struct {
-		ebi        uint8
-		cause      uint8
+		ebi         uint8
+		cause       uint8
 		sgwS1UFTEID bearer.FTEID // populated from bearer state after PFCP session exists
 	}
 	var results []mbResult
@@ -444,6 +687,20 @@ func (h *Handler) handleModifyBearerRequest(conn *transport.Conn, addr *net.UDPA
 			continue
 		}
 
+		sess := h.sessions.FindByS11TEIDAndBearer(hdr.TEID, ebi)
+		if sess == nil {
+			knownEBIs, knownPDNs := h.knownS11BearerState(hdr.TEID)
+			h.log.Warn("S11: Modify Bearer — bearer owner not found",
+				"mme_peer", addr.String(),
+				"sgw_s11_teid", fmt.Sprintf("0x%08X", hdr.TEID),
+				"requested_ebi", ebi,
+				"known_ebis", knownEBIs,
+				"known_pdns", knownPDNs,
+			)
+			results = append(results, mbResult{ebi: ebi, cause: ie.CauseContextNotFound})
+			continue
+		}
+
 		b := sess.GetBearer(ebi)
 		if b == nil {
 			h.log.Warn("S11: Modify Bearer — unknown EBI", "session_id", sess.SessionID, "ebi", ebi)
@@ -453,47 +710,67 @@ func (h *Handler) handleModifyBearerRequest(conn *transport.Conn, addr *net.UDPA
 
 		fteid, _ := fteidIE.FTEIDValue()
 
+		if !sess.PFCP.Established || sess.PFCP.SGWUFSEID.SEID == 0 {
+			h.log.Warn("S11: Modify Bearer — PFCP binding unavailable; rejecting bearer update",
+				"session_id", sess.SessionID, "ebi", ebi)
+			results = append(results, mbResult{ebi: ebi, cause: ie.CauseSystemFailure})
+			continue
+		}
+
 		// Save prior eNB FTEID for rollback on PFCP failure (R15-006).
 		oldENBFTEID := b.ENBS1UFTEID
 
 		b.ENBS1UFTEID = bearer.FTEID{TEID: fteid.TEID, IPv4: fteid.IPv4}
 		sess.SetBearer(b)
-		h.log.Info("S11: Modify Bearer — eNodeB S1-U F-TEID updated",
+		h.log.Info("S11: Modify Bearer owner resolution",
 			"session_id", sess.SessionID,
+			"imsi", sess.IMSI,
+			"apn", sess.APN,
+			"default_ebi", sess.DefaultBearerID,
+			"sgw_s11_teid", fmt.Sprintf("0x%08X", hdr.TEID),
+			"mme_s11_teid", fmt.Sprintf("0x%08X", sess.MMEControlFTEID.TEID),
 			"ebi", ebi,
+			"pgw_s5c_teid", fmt.Sprintf("0x%08X", sess.PGWControlFTEID.TEID),
 			"enb_teid", fmt.Sprintf("0x%08X", fteid.TEID),
 			"enb_ip", fteid.IPv4,
+			"lookup_source", "s11_teid_bearer_owner",
 		)
 
 		// PFCP Session Modification: upgrade Core→Access FAR from DROP to FORW
 		// with the eNB TEID as Outer Header Creation per TS 29.244 Rel-15 §7.5.4.
-		// FAR 2 is the Core→Access (downlink) FAR established at session creation.
-		if sess.PFCP.Established && sess.PFCP.SGWUFSEID.SEID != 0 {
-			pfcpErr := h.pfcp.ModifySession(context.TODO(),
-				sess.PFCP.LocalFSEID.SEID,
-				sess.PFCP.SGWUFSEID.SEID,
-				[]pfcpclient.FARUpdate{{
-					FARID:         2, // Core→Access FAR
-					ApplyAction:   pfcpie.ApplyActionFORW,
-					DestInterface: pfcpie.DestInterfaceAccess,
-					OuterTEID:     fteid.TEID,
-					OuterIP:       fteid.IPv4,
-				}},
-			)
-			if pfcpErr != nil {
-				// R15-006 FIX: PFCP failure is fatal — restore prior state and return failure.
-				// Per TS 23.401: do not report bearer success if the UP function did not
-				// install the new forwarding state. Preserve previous state for MME retry.
-				h.log.Warn("S11: PFCP Session Modification failed — rolling back eNB FTEID and returning failure",
-					"session_id", sess.SessionID, "ebi", ebi, "error", pfcpErr)
-				b.ENBS1UFTEID = oldENBFTEID
-				sess.SetBearer(b)
-				results = append(results, mbResult{ebi: ebi, cause: ie.CauseSystemFailure})
-				continue
-			}
+		// Default bearer FAR 2 is established at session creation; dedicated bearers
+		// carry their own PFCP rule IDs from Create Bearer acceptance.
+		pdrID, farID := uint16(b.PDRIDs[1]), b.FARIDs[1]
+		if pdrID == 0 || farID == 0 {
+			pdrID, farID = 2, 2
+		}
+		pfcpErr := h.pfcp.ModifySessionOnPeer(context.TODO(),
+			sess.PFCP.SGWUAddr,
+			sess.PFCP.LocalFSEID.SEID,
+			sess.PFCP.SGWUFSEID.SEID,
+			[]pfcpclient.FARUpdate{{
+				FARID:              farID,
+				PDRID:              pdrID,
+				ApplyAction:        pfcpie.ApplyActionFORW,
+				DestInterface:      pfcpie.DestInterfaceAccess,
+				OuterTEID:          fteid.TEID,
+				OuterIP:            fteid.IPv4,
+				OuterHeaderRemoval: true,
+			}},
+		)
+		if pfcpErr != nil {
+			// R15-006 FIX: PFCP failure is fatal — restore prior state and return failure.
+			// Per TS 23.401: do not report bearer success if the UP function did not
+			// install the new forwarding state. Preserve previous state for MME retry.
+			h.log.Warn("S11: PFCP Session Modification failed — rolling back eNB FTEID and returning failure",
+				"session_id", sess.SessionID, "ebi", ebi, "error", pfcpErr)
+			b.ENBS1UFTEID = oldENBFTEID
+			sess.SetBearer(b)
+			results = append(results, mbResult{ebi: ebi, cause: ie.CauseSystemFailure})
+			continue
 		}
 
-		// PFCP succeeded (or no PFCP session yet): include SGW-U S1-U TEID in MBResp
+		// PFCP succeeded: include SGW-U S1-U TEID in MBResp
 		// per TS 29.274 Rel-15 Table 7.2.8-2 (S1-U SGW F-TEID, instance 0).
 		var sgwS1U bearer.FTEID
 		if refreshedB := sess.GetBearer(ebi); refreshedB != nil {
@@ -543,7 +820,7 @@ func (h *Handler) handleModifyBearerRequest(conn *transport.Conn, addr *net.UDPA
 		bcIEs = append(bcIEs, recIE)
 	}
 
-	resp, err := message.MarshalModifyBearerResponse(req, sess.MMEControlFTEID.TEID, msgCause, bcIEs...)
+	resp, err := message.MarshalModifyBearerResponse(req, mmeTEID, msgCause, bcIEs...)
 	if err != nil {
 		h.log.Error("S11: Modify Bearer Response marshal failed", "error", err)
 		return
@@ -569,6 +846,38 @@ func (h *Handler) handleDeleteSessionRequest(conn *transport.Conn, addr *net.UDP
 		conn.Reply(addr, resp) //nolint:errcheck
 		return
 	}
+	if req.EBI != nil {
+		if deleteEBI, eErr := req.EBI.EBIValue(); eErr == nil {
+			if owner := h.sessions.FindByS11TEIDAndDefaultBearer(hdr.TEID, deleteEBI); owner != nil {
+				sess = owner
+			} else if owner := h.sessions.FindByS11TEIDAndBearer(hdr.TEID, deleteEBI); owner != nil {
+				sess = owner
+			} else {
+				knownEBIs, knownPDNs := h.knownS11BearerState(hdr.TEID)
+				h.log.Warn("S11: Delete Session — bearer owner not found",
+					"mme_peer", addr.String(),
+					"sgw_s11_teid", fmt.Sprintf("0x%08X", hdr.TEID),
+					"delete_ebi", deleteEBI,
+					"known_ebis", knownEBIs,
+					"known_pdns", knownPDNs,
+				)
+				resp, _ := message.MarshalDeleteSessionResponse(req, sess.MMEControlFTEID.TEID, ie.CauseContextNotFound)
+				conn.Reply(addr, resp) //nolint:errcheck
+				return
+			}
+			h.log.Info("S11: Delete Session owner resolved",
+				"session_id", sess.SessionID,
+				"imsi", sess.IMSI,
+				"delete_ebi", deleteEBI,
+				"owner_apn", sess.APN,
+				"owner_default_ebi", sess.DefaultBearerID,
+				"sgw_s11_teid", fmt.Sprintf("0x%08X", hdr.TEID),
+				"mme_s11_teid", fmt.Sprintf("0x%08X", sess.MMEControlFTEID.TEID),
+				"pgw_s5c_teid", fmt.Sprintf("0x%08X", sess.PGWControlFTEID.TEID),
+				"lookup_source", "s11_teid_delete_ebi_owner",
+			)
+		}
+	}
 
 	mmeTEID := sess.MMEControlFTEID.TEID
 	sess.Transition(session.StateDeleting)
@@ -577,7 +886,7 @@ func (h *Handler) handleDeleteSessionRequest(conn *transport.Conn, addr *net.UDP
 	// Per TS 29.274 Rel-15 §7.2.9 / Table 7.2.9.1-1 (S5/S8-C direction).
 	// R15-005: propagate PGW cause to MME; retain local state on failure for retry.
 	if sess.PGWControlFTEID.TEID != 0 {
-		pgwCause, pgwErr := h.s5c.DeleteSession(context.TODO(), sess)
+		pgwCause, pgwErr := h.s5c.DeleteSessionFromS11(context.TODO(), sess, req)
 		if pgwErr != nil {
 			// Transport or decode error: return system failure; retain local state for retry.
 			h.log.Warn("S11: S5/S8-C Delete Session transport error — retaining local state",
@@ -606,7 +915,8 @@ func (h *Handler) handleDeleteSessionRequest(conn *transport.Conn, addr *net.UDP
 	// PGW accepted (or no PGW session): delete PFCP session on SGW-U before local cleanup.
 	// Per TS 23.214 Rel-15 §6.3 and C13 (remote teardown on delete).
 	if sess.PFCP.Established && sess.PFCP.SGWUFSEID.SEID != 0 {
-		if pfcpErr := h.pfcp.DeleteSession(context.TODO(),
+		if pfcpErr := h.pfcp.DeleteSessionOnPeer(context.TODO(),
+			sess.PFCP.SGWUAddr,
 			sess.PFCP.LocalFSEID.SEID,
 			sess.PFCP.SGWUFSEID.SEID,
 		); pfcpErr != nil {
@@ -617,6 +927,7 @@ func (h *Handler) handleDeleteSessionRequest(conn *transport.Conn, addr *net.UDP
 		}
 	}
 
+	h.clearCreateBearerProcedureFailuresForSession(sess.SessionID, "s11_delete_session")
 	h.sessions.Delete(sess.SessionID)
 	h.log.Info("S11: Delete Session Request — session removed",
 		"session_id", sess.SessionID,
@@ -650,6 +961,26 @@ func (h *Handler) buildAndReplyDeleteSessionResponse(conn *transport.Conn, addr 
 	}
 }
 
+func (h *Handler) knownS11BearerState(sgwS11TEID uint32) ([]uint8, []map[string]any) {
+	sessions := h.sessions.FindAllByS11TEID(sgwS11TEID)
+	ebiSeen := make(map[uint8]bool)
+	var ebis []uint8
+	var pdns []map[string]any
+	for _, sess := range sessions {
+		pdns = append(pdns, map[string]any{
+			"apn":         sess.APN,
+			"default_ebi": sess.DefaultBearerID,
+		})
+		for _, b := range sess.BearerList() {
+			if !ebiSeen[b.EBI] {
+				ebiSeen[b.EBI] = true
+				ebis = append(ebis, b.EBI)
+			}
+		}
+	}
+	return ebis, pdns
+}
+
 func (h *Handler) handleReleaseAccessBearersRequest(conn *transport.Conn, addr *net.UDPAddr, hdr message.Header, ies []*ie.IE) {
 	req := message.ParseReleaseAccessBearersRequest(hdr, ies)
 
@@ -669,11 +1000,13 @@ func (h *Handler) handleReleaseAccessBearersRequest(conn *transport.Conn, addr *
 	// (DROP here; full BUFF+DDN requires BAR support, deferred) before the
 	// control-plane procedure completes.
 	if sess.PFCP.Established && sess.PFCP.SGWUFSEID.SEID != 0 {
-		pfcpErr := h.pfcp.ModifySession(context.TODO(),
+		pfcpErr := h.pfcp.ModifySessionOnPeer(context.TODO(),
+			sess.PFCP.SGWUAddr,
 			sess.PFCP.LocalFSEID.SEID,
 			sess.PFCP.SGWUFSEID.SEID,
 			[]pfcpclient.FARUpdate{{
 				FARID:       2, // Core→Access (downlink) FAR — was FORW to eNB, now DROP
+				PDRID:       2,
 				ApplyAction: pfcpie.ApplyActionDROP,
 			}},
 		)
@@ -720,8 +1053,10 @@ func (h *Handler) handleReleaseAccessBearersRequest(conn *transport.Conn, addr *
 
 // pfcpSessionResult holds the outcome of a PFCP Session Establishment for one bearer.
 type pfcpSessionResult struct {
-	cpSEID      uint64
-	upSEID      uint64
+	peerName     string
+	peerAddr     string
+	cpSEID       uint64
+	upSEID       uint64
 	sgwUS1UFTEID bearer.FTEID // SGW-U S1-U TEID (from PDR with Access source interface)
 	sgwUS5UFTEID bearer.FTEID // SGW-U S5/S8-U TEID (from PDR with Core source interface)
 }
@@ -735,12 +1070,14 @@ type pfcpSessionResult struct {
 // Once the PGW CSResp arrives, call modifyPFCPUplinkFAR to switch FAR 1 to FORW.
 //
 // PDR layout (2 PDRs per default bearer):
-//   PDR 1: Access→Core (source=Access, CHOOSE F-TEID for S1-U, FAR 1=DROP initially)
-//   PDR 2: Core→Access (source=Core, CHOOSE F-TEID for S5/S8-U, FAR 2=DROP until MBReq)
+//
+//	PDR 1: Access→Core (source=Access, CHOOSE F-TEID for S1-U, FAR 1=DROP initially)
+//	PDR 2: Core→Access (source=Core, CHOOSE F-TEID for S5/S8-U, FAR 2=DROP until MBReq)
 //
 // FAR layout:
-//   FAR 1: Access→Core DROP (provisional) — upgraded to FORW after PGW CSResp
-//   FAR 2: Core→Access DROP — upgraded to FORW on Modify Bearer Request
+//
+//	FAR 1: Access→Core DROP (provisional) — upgraded to FORW after PGW CSResp
+//	FAR 2: Core→Access DROP — upgraded to FORW on Modify Bearer Request
 func (h *Handler) establishProvisionalPFCPSession(ctx context.Context) (*pfcpSessionResult, error) {
 	cpSEID := h.pfcp.AllocCPSEID()
 
@@ -796,8 +1133,10 @@ func (h *Handler) establishProvisionalPFCPSession(ctx context.Context) (*pfcpSes
 	}
 
 	out := &pfcpSessionResult{
-		cpSEID: cpSEID,
-		upSEID: result.UPSEID,
+		peerName: result.PeerName,
+		peerAddr: result.PeerAddr,
+		cpSEID:   cpSEID,
+		upSEID:   result.UPSEID,
 	}
 
 	// Extract SGW-U TEIDs from Created PDR IEs.
@@ -832,14 +1171,16 @@ func (h *Handler) establishProvisionalPFCPSession(ctx context.Context) (*pfcpSes
 // modifyPFCPUplinkFAR switches FAR 1 (uplink, Access→Core) from DROP to FORW with
 // Outer Header Creation pointing to the PGW-U S5/S8-U TEID and IP.
 // Called after S5/S8-C CSResp provides the PGW-U GTP-U endpoint (R15-REAUDIT-001).
-func (h *Handler) modifyPFCPUplinkFAR(ctx context.Context, cpSEID, upSEID uint64, pgwS5UFTEID bearer.FTEID) error {
-	return h.pfcp.ModifySession(ctx, cpSEID, upSEID, []pfcpclient.FARUpdate{
+func (h *Handler) modifyPFCPUplinkFAR(ctx context.Context, peerAddr string, cpSEID, upSEID uint64, pgwS5UFTEID bearer.FTEID) error {
+	return h.pfcp.ModifySessionOnPeer(ctx, peerAddr, cpSEID, upSEID, []pfcpclient.FARUpdate{
 		{
-			FARID:         1,
-			ApplyAction:   pfcpie.ApplyActionFORW,
-			DestInterface: pfcpie.DestInterfaceCore,
-			OuterTEID:     pgwS5UFTEID.TEID,
-			OuterIP:       pgwS5UFTEID.IPv4,
+			FARID:              1,
+			PDRID:              1,
+			ApplyAction:        pfcpie.ApplyActionFORW,
+			DestInterface:      pfcpie.DestInterfaceCore,
+			OuterTEID:          pgwS5UFTEID.TEID,
+			OuterIP:            pgwS5UFTEID.IPv4,
+			OuterHeaderRemoval: true,
 		},
 	})
 }
@@ -874,7 +1215,7 @@ func (h *Handler) sendMissingIECause(conn *transport.Conn, addr *net.UDPAddr, hd
 }
 
 // sendCauseWithOffending sends a generic error response with an optional offending IE.
-// peerTEID is the MME's S11 control TEID per TS 29.274 Rel-15 §5.5.1.
+// peerTEID is the MME's S11 control TEID, looked up per §5.5.2's response-TEID rule.
 // Pass 0 when the peer TEID cannot be determined (e.g., malformed inbound message).
 func (h *Handler) sendCauseWithOffending(conn *transport.Conn, addr *net.UDPAddr, hdr message.Header, peerTEID uint32, cause uint8, offending *ie.IE) {
 	// Per TS 29.274 Rel-15 Table 6.1-1: response types are explicit constants,
@@ -903,7 +1244,7 @@ func (h *Handler) sendCauseWithOffending(conn *transport.Conn, addr *net.UDPAddr
 
 // peerTEIDFromIEs extracts the Sender F-TEID (instance 0) TEID value from a raw IE list.
 // Used to populate the response header TEID on initial CSReq (where hdr.TEID=0) per
-// TS 29.274 Rel-15 §5.5.1. Returns 0 if the F-TEID IE is absent or malformed.
+// TS 29.274 Rel-15 §5.5.2. Returns 0 if the F-TEID IE is absent or malformed.
 func peerTEIDFromIEs(ies []*ie.IE) uint32 {
 	fteid := ie.FindInstance(ies, ie.TypeFTEID, 0)
 	if fteid == nil {

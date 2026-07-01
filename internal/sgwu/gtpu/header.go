@@ -11,17 +11,17 @@ import (
 // "The port number for GTP-U request messages is 2152. It is the registered port number for GTP-U."
 const Port = 2152
 
-// Message type constants per TS 29.281 Table 13 (Messages in GTP-U).
+// Message type constants per TS 29.281 Table 6.1-1 (Messages in GTP-U).
 // Extracted column: "Msg. Value | Message Type | GTP-U".
 const (
-	MsgTypeEchoRequest     uint8 = 1   // Table 13: "1  | Echo Request      | GTP-U: X"
-	MsgTypeEchoResponse    uint8 = 2   // Table 13: "2  | Echo Response     | GTP-U: X"
-	MsgTypeErrorIndication uint8 = 26  // Table 13: "26 | Error Indication  | GTP-U: X"
-	MsgTypeEndMarker       uint8 = 254 // Table 13: "254 | End Marker       | GTP-U: X"
-	MsgTypeGPDU            uint8 = 255 // Table 13: "255 | G-PDU            | GTP-U: X"
+	MsgTypeEchoRequest     uint8 = 1   // Table 6.1-1: "1  | Echo Request      | GTP-U: X"
+	MsgTypeEchoResponse    uint8 = 2   // Table 6.1-1: "2  | Echo Response     | GTP-U: X"
+	MsgTypeErrorIndication uint8 = 26  // Table 6.1-1: "26 | Error Indication  | GTP-U: X"
+	MsgTypeEndMarker       uint8 = 254 // Table 6.1-1: "254 | End Marker       | GTP-U: X"
+	MsgTypeGPDU            uint8 = 255 // Table 6.1-1: "255 | G-PDU            | GTP-U: X"
 )
 
-// GTP-U header flag constants for octet 1 per TS 29.281 §5.1 Table 0 (Figure 5.1-1):
+// GTP-U header flag constants for octet 1 per TS 29.281 §5.1 Figure 5.1-1:
 //
 //	Bits 8-6: Version — "The version number shall be set to '1'." → 001 in bits 8-6 → 0x20 in wire byte
 //	Bit  5:   PT      — "GTP (when PT is '1')" → 1<<4 = 0x10
@@ -55,7 +55,7 @@ type Header struct {
 	E        bool   // Extension Header flag
 	S        bool   // Sequence Number flag
 	PN       bool   // N-PDU Number flag
-	MsgType  uint8  // message type per Table 13
+	MsgType  uint8  // message type per Table 6.1-1
 	Length   uint16 // bytes after the mandatory 8-octet header (payload + optional fields if set)
 	TEID     uint32 // Tunnel Endpoint Identifier
 

@@ -26,10 +26,12 @@ const inboundCacheTTL = 30 * time.Second
 // The implementation must send any response via conn before returning.
 type Handler func(conn *Conn, addr *net.UDPAddr, hdr message.Header, raw []byte)
 
-// retransmitKey identifies an inbound request by peer address and sequence number.
+// retransmitKey identifies an inbound request for retransmission handling.
 type retransmitKey struct {
-	addr string // "ip:port"
-	seq  uint32
+	addr    string // "ip:port"
+	seq     uint32
+	msgType uint8
+	teid    uint32
 }
 
 // cachedResponse holds an encoded response and its expiry time.
@@ -42,8 +44,9 @@ type cachedResponse struct {
 // sequence number per TS 29.274 §7.6. Seq alone is insufficient when one socket
 // serves multiple PGWs — a late or spoofed response could match a wrong transaction.
 type transactionKey struct {
-	addr string // "ip:port" of the peer
-	seq  uint32
+	addr         string // "ip:port" of the peer
+	seq          uint32
+	responseType uint8
 }
 
 // Conn is a GTPv2-C UDP endpoint with transaction management.
@@ -86,8 +89,9 @@ type pendingRequest struct {
 }
 
 type pendingResult struct {
-	raw []byte
-	err error
+	raw        []byte
+	piggybacks []message.Frame
+	err        error
 }
 
 // Listen creates a GTPv2-C UDP listener on the given address.
@@ -156,7 +160,7 @@ func (c *Conn) Serve(ctx context.Context) error {
 }
 
 func (c *Conn) dispatch(addr *net.UDPAddr, raw []byte) {
-	h, _, err := message.ParseHeader(raw)
+	frames, err := message.SplitFrames(raw)
 	if err != nil {
 		// Per TS 29.274 Rel-15 §7.7.2: unsupported version → send Version Not Supported Indication.
 		var vnErr *message.ErrVersionNotSupported
@@ -188,15 +192,46 @@ func (c *Conn) dispatch(addr *net.UDPAddr, raw []byte) {
 		return
 	}
 
-	// Per TS 29.274 Rel-15 §6.3 and §5.1: when the P (Piggybacking) flag is set,
-	// a second GTPv2-C message follows after the declared length boundary. This
-	// implementation does not process piggybacked messages; they are discarded per
-	// §6.3 which permits a GTP entity to discard a piggybacked message it cannot
-	// process. Piggybacking support is deferred to a future phase.
-	if h.PiggyBacked {
-		c.log.Warn("GTPv2-C piggybacked message not supported — piggybacked part discarded",
-			"from", addr, "msg_type", h.MessageType, "seq", h.SequenceNumber)
+	if len(frames) > 1 {
+		c.log.Info("GTPv2-C piggybacked messages decoded",
+			"from", addr, "frames", len(frames),
+			"primary_msg_type", frames[0].Header.MessageType,
+			"primary_seq", frames[0].Header.SequenceNumber)
 	}
+
+	if c.deliverPendingResponseFrame(addr, frames[0], frames[1:]) {
+		return
+	}
+	c.processFrame(addr, frames[0], false)
+	for i := 1; i < len(frames); i++ {
+		c.processFrame(addr, frames[i], false)
+	}
+}
+
+func (c *Conn) deliverPendingResponseFrame(addr *net.UDPAddr, frame message.Frame, piggybacks []message.Frame) bool {
+	h := frame.Header
+	if err := message.ValidateTFlag(h); err != nil {
+		c.log.Warn("GTPv2-C T-flag violation — discarding", "from", addr,
+			"msg_type", h.MessageType, "has_teid", h.HasTEID, "error", err)
+		return true
+	}
+	if !isResponseType(h.MessageType) {
+		return false
+	}
+	return c.deliverResponse(addr, h.MessageType, h.SequenceNumber, frame.Raw, piggybacks)
+}
+
+// DispatchFrames processes frames that were piggybacked on a response delivered
+// to a pending transaction. The transaction owner calls this after committing
+// any state derived from the primary response.
+func (c *Conn) DispatchFrames(addr *net.UDPAddr, frames []message.Frame) {
+	for _, frame := range frames {
+		c.processFrame(addr, frame, false)
+	}
+}
+
+func (c *Conn) processFrame(addr *net.UDPAddr, frame message.Frame, allowPendingResponse bool) {
+	h := frame.Header
 
 	// Per TS 29.274 §5: enforce T-flag rule (Echo/VersionNotSupported=T=0; EPC messages=T=1).
 	// Check BEFORE response delivery so both inbound requests and responses are validated.
@@ -207,18 +242,30 @@ func (c *Conn) dispatch(addr *net.UDPAddr, raw []byte) {
 	}
 
 	// If it matches a pending outbound request (by peer addr + seq), deliver it as a response.
-	if c.deliverResponse(addr, h.SequenceNumber, raw) {
+	if allowPendingResponse && isResponseType(h.MessageType) && c.deliverResponse(addr, h.MessageType, h.SequenceNumber, frame.Raw, nil) {
 		return
 	}
 
 	// Per TS 29.274 Rel-15 §7.6.3: atomically check whether this (peer, seq) is
 	// cached (retransmit after response), in-flight (concurrent duplicate), or new.
 	// The three checks share inboundCacheMu so no duplicate can slip between them.
-	key := retransmitKey{addr: addr.String(), seq: h.SequenceNumber}
+	key := retransmitKey{addr: addr.String(), seq: h.SequenceNumber, msgType: h.MessageType, teid: h.TEID}
 	cached, inFlight := c.checkAndMarkInFlight(key)
 	if cached != nil {
-		c.log.Debug("GTPv2-C retransmit — resending cached response",
-			"from", addr, "seq", h.SequenceNumber, "msg_type", h.MessageType)
+		if cachedFrames, err := message.SplitFrames(cached); err == nil && len(cachedFrames) > 1 {
+			c.log.Debug("GTPv2-C retransmit — resending cached piggybacked response",
+				"from", addr,
+				"seq", h.SequenceNumber,
+				"msg_type", h.MessageType,
+				"cached_frames", len(cachedFrames),
+				"primary_msg_type", cachedFrames[0].Header.MessageType,
+				"piggyback_msg_type", cachedFrames[1].Header.MessageType,
+				"bytes", len(cached),
+			)
+		} else {
+			c.log.Debug("GTPv2-C retransmit — resending cached response",
+				"from", addr, "seq", h.SequenceNumber, "msg_type", h.MessageType)
+		}
 		if _, err := c.conn.WriteToUDP(cached, addr); err != nil {
 			c.log.Warn("GTPv2-C retransmit cache send failed", "to", addr, "error", err)
 		}
@@ -239,11 +286,28 @@ func (c *Conn) dispatch(addr *net.UDPAddr, raw []byte) {
 		c.log.Warn("GTPv2-C no handler registered", "from", addr, "msg_type", h.MessageType)
 		return
 	}
-	(*hp)(c, addr, h, raw)
+	(*hp)(c, addr, h, frame.Raw)
 }
 
-func (c *Conn) deliverResponse(addr *net.UDPAddr, seq uint32, raw []byte) bool {
-	key := transactionKey{addr: addr.String(), seq: seq}
+func isResponseType(msgType uint8) bool {
+	switch msgType {
+	case message.MsgTypeEchoResponse,
+		message.MsgTypeVersionNotSupported,
+		message.MsgTypeCreateSessionResponse,
+		message.MsgTypeModifyBearerResponse,
+		message.MsgTypeDeleteSessionResponse,
+		message.MsgTypeCreateBearerResponse,
+		message.MsgTypeUpdateBearerResponse,
+		message.MsgTypeDeleteBearerResponse,
+		message.MsgTypeReleaseAccessBearersResponse:
+		return true
+	default:
+		return false
+	}
+}
+
+func (c *Conn) deliverResponse(addr *net.UDPAddr, msgType uint8, seq uint32, raw []byte, piggybacks []message.Frame) bool {
+	key := transactionKey{addr: addr.String(), seq: seq, responseType: msgType}
 	c.pendingMu.Lock()
 	pr, ok := c.pending[key]
 	if ok {
@@ -253,8 +317,8 @@ func (c *Conn) deliverResponse(addr *net.UDPAddr, seq uint32, raw []byte) bool {
 	if !ok {
 		return false
 	}
+	pr.result <- pendingResult{raw: raw, piggybacks: piggybacks}
 	pr.cancel()
-	pr.result <- pendingResult{raw: raw}
 	return true
 }
 
@@ -307,14 +371,27 @@ func (c *Conn) storeInboundCache(key retransmitKey, resp []byte) {
 // Send transmits a request to addr and waits for the response with T3/N3 retransmission.
 // Returns the raw response bytes on success.
 func (c *Conn) Send(ctx context.Context, addr *net.UDPAddr, raw []byte) ([]byte, error) {
-	seq, err := c.extractSeq(raw)
+	resp, _, err := c.SendWithPiggybacks(ctx, addr, raw)
+	return resp, err
+}
+
+// SendWithPiggybacks transmits a request and returns the primary response plus
+// any piggybacked frames that followed it in the same UDP payload. The caller is
+// responsible for dispatching the piggybacked frames after committing state from
+// the primary response.
+func (c *Conn) SendWithPiggybacks(ctx context.Context, addr *net.UDPAddr, raw []byte) ([]byte, []message.Frame, error) {
+	reqHdr, err := c.extractHeader(raw)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
+	}
+	respType, ok := message.ResponseTypeFor(reqHdr.MessageType)
+	if !ok {
+		return nil, nil, fmt.Errorf("GTPv2-C: no response type for request msg_type=%d", reqHdr.MessageType)
 	}
 
 	result := make(chan pendingResult, 1)
 	tCtx, cancel := context.WithCancel(ctx)
-	key := transactionKey{addr: addr.String(), seq: seq}
+	key := transactionKey{addr: addr.String(), seq: reqHdr.SequenceNumber, responseType: respType}
 
 	c.pendingMu.Lock()
 	c.pending[key] = &pendingRequest{addr: addr, raw: raw, result: result, cancel: cancel}
@@ -329,18 +406,18 @@ func (c *Conn) Send(ctx context.Context, addr *net.UDPAddr, raw []byte) ([]byte,
 
 	for attempt := 0; attempt < c.n3; attempt++ {
 		if _, err := c.conn.WriteToUDP(raw, addr); err != nil {
-			return nil, fmt.Errorf("GTPv2-C send: %w", err)
+			return nil, nil, fmt.Errorf("GTPv2-C send: %w", err)
 		}
 		select {
 		case res := <-result:
-			return res.raw, res.err
+			return res.raw, res.piggybacks, res.err
 		case <-tCtx.Done():
-			return nil, ctx.Err()
+			return nil, nil, ctx.Err()
 		case <-time.After(c.t3):
 			// retransmit
 		}
 	}
-	return nil, fmt.Errorf("GTPv2-C: no response after %d attempts (seq=%d)", c.n3, seq)
+	return nil, nil, fmt.Errorf("GTPv2-C: no response after %d attempts (seq=%d)", c.n3, reqHdr.SequenceNumber)
 }
 
 // Reply sends a response to addr and caches it for inbound retransmit detection
@@ -353,7 +430,7 @@ func (c *Conn) Reply(addr *net.UDPAddr, raw []byte) error {
 	// Cache keyed by (peer addr, sequence number from the response).
 	// The response sequence number equals the request sequence number per TS 29.274 §5.1.
 	if h, _, parseErr := message.ParseHeader(raw); parseErr == nil {
-		key := retransmitKey{addr: addr.String(), seq: h.SequenceNumber}
+		key := c.inFlightRetransmitKeyForResponse(addr, h)
 		c.storeInboundCache(key, raw)
 	}
 	return nil
@@ -367,12 +444,27 @@ func (c *Conn) AllocSeq() uint32 {
 	return c.seqVal
 }
 
-func (c *Conn) extractSeq(raw []byte) (uint32, error) {
+func (c *Conn) extractHeader(raw []byte) (message.Header, error) {
 	h, _, err := message.ParseHeader(raw)
 	if err != nil {
-		return 0, err
+		return message.Header{}, err
 	}
-	return h.SequenceNumber, nil
+	return h, nil
+}
+
+func (c *Conn) inFlightRetransmitKeyForResponse(addr *net.UDPAddr, h message.Header) retransmitKey {
+	reqType, ok := message.RequestTypeForResponse(h.MessageType)
+	if !ok {
+		return retransmitKey{addr: addr.String(), seq: h.SequenceNumber, msgType: h.MessageType, teid: h.TEID}
+	}
+	c.inboundCacheMu.Lock()
+	defer c.inboundCacheMu.Unlock()
+	for key := range c.inFlight {
+		if key.addr == addr.String() && key.seq == h.SequenceNumber && key.msgType == reqType {
+			return key
+		}
+	}
+	return retransmitKey{addr: addr.String(), seq: h.SequenceNumber, msgType: reqType}
 }
 
 // Close shuts down the connection.

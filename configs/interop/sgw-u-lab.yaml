@@ -1,0 +1,41 @@
+sgwu:
+  node_id: "sgw-u-lab"
+
+pfcp:
+  listen: "10.90.250.11:8805"
+  allowed_sgwc:
+    - "10.90.250.10"
+
+interfaces:
+  user:
+    # Logical names are operator-chosen labels. gtpu.*.bind references them.
+    lab_user_plane:
+      ifname: "eth0"
+      listen: "10.90.250.11:2152"
+
+gtpu:
+  s1u:
+    bind: "lab_user_plane"
+  s5u:
+    bind: "lab_user_plane"
+
+dataplane:
+  # xdp-generic works in VMs; xdp-native requires NIC driver support.
+  driver_mode: "xdp-generic"
+  unknown_teid: "punt"
+  attach_on_start: true
+  cleanup_on_exit: true
+  map_max_entries: 65536
+
+logging:
+  level: info
+  file: /var/log/vectorcore/sgw/sgw-u-lab.log
+
+api:
+  listen: "0.0.0.0:8081"
+
+metrics:
+  listen: "0.0.0.0:9091"
+
+shutdown:
+  timeout_seconds: 5

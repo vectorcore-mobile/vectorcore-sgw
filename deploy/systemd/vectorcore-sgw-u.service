@@ -1,0 +1,24 @@
+[Unit]
+Description=VectorCore SGW-U
+Documentation=/opt/vectorcore/docs/production-controls.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/opt/vectorcore/bin/sgw-u -c /opt/vectorcore/etc/sgw-u.yaml
+Restart=on-failure
+RestartSec=5s
+User=root
+Group=root
+AmbientCapabilities=CAP_BPF CAP_NET_ADMIN CAP_NET_RAW
+CapabilityBoundingSet=CAP_BPF CAP_NET_ADMIN CAP_NET_RAW
+LimitMEMLOCK=infinity
+LimitNOFILE=1048576
+NoNewPrivileges=true
+ProtectSystem=full
+ProtectHome=true
+ReadWritePaths=/var/log/vectorcore /opt/vectorcore/log
+
+[Install]
+WantedBy=multi-user.target

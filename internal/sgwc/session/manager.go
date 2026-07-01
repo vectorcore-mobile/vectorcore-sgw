@@ -26,10 +26,10 @@ type pdnKey struct {
 type Manager struct {
 	mu        sync.RWMutex
 	byID      map[string]*SGWSession
-	byS11     map[uint32]*SGWSession  // SGW S11 TEID → session
-	byS5C     map[uint32]*SGWSession  // SGW S5/S8-C TEID → session (for PGW-initiated procedures)
-	byIMSI    map[string]*SGWSession  // IMSI → most recent session (any APN)
-	byPDN     map[pdnKey]*SGWSession  // (IMSI+EBI) → active PDN connection
+	byS11     map[uint32][]*SGWSession // SGW S11 TEID → PDN sessions sharing the UE/MME S11 context
+	byS5C     map[uint32]*SGWSession   // SGW S5/S8-C TEID → session (for PGW-initiated procedures)
+	byIMSI    map[string]*SGWSession   // IMSI → most recent session (any APN)
+	byPDN     map[pdnKey]*SGWSession   // (IMSI+EBI) → active PDN connection
 	teidAlloc *teid.Allocator
 }
 
@@ -37,7 +37,7 @@ type Manager struct {
 func NewManager() *Manager {
 	return &Manager{
 		byID:      make(map[string]*SGWSession),
-		byS11:     make(map[uint32]*SGWSession),
+		byS11:     make(map[uint32][]*SGWSession),
 		byS5C:     make(map[uint32]*SGWSession),
 		byIMSI:    make(map[string]*SGWSession),
 		byPDN:     make(map[pdnKey]*SGWSession),
@@ -47,16 +47,17 @@ func NewManager() *Manager {
 
 // CreateParams holds the values needed to create a new session from a CSReq.
 type CreateParams struct {
-	IMSI           string
-	APN            string
-	RATType        uint8
-	ServingNetwork string
-	MMEControlFTEID FTEID
-	DefaultEBI     uint8
-	QCI            uint8
-	ARP            bearer.ARP
-	MBRUplink      uint64
-	MBRDownlink    uint64
+	IMSI             string
+	APN              string
+	RATType          uint8
+	ServingNetwork   string
+	MMEControlFTEID  FTEID
+	ReuseSGWS11FTEID FTEID
+	DefaultEBI       uint8
+	QCI              uint8
+	ARP              bearer.ARP
+	MBRUplink        uint64
+	MBRDownlink      uint64
 }
 
 // Create allocates a new pending session and its SGW S11 control TEID.
@@ -64,14 +65,22 @@ type CreateParams struct {
 // and returned as the second value so the caller can perform remote cleanup
 // (PGW Delete Session, PFCP Session Deletion) per C13.
 func (m *Manager) Create(p CreateParams) (sess *SGWSession, evicted *SGWSession, err error) {
-	sgwTEID, err := m.teidAlloc.Alloc()
-	if err != nil {
-		return nil, nil, fmt.Errorf("session create: %w", err)
+	sgwFTEID := p.ReuseSGWS11FTEID
+	allocatedS11TEID := false
+	if sgwFTEID.TEID == 0 {
+		sgwTEID, allocErr := m.teidAlloc.Alloc()
+		if allocErr != nil {
+			return nil, nil, fmt.Errorf("session create: %w", allocErr)
+		}
+		sgwFTEID = FTEID{TEID: sgwTEID}
+		allocatedS11TEID = true
 	}
 
 	id, err := newSessionID()
 	if err != nil {
-		m.teidAlloc.Free(sgwTEID)
+		if allocatedS11TEID {
+			m.teidAlloc.Free(sgwFTEID.TEID)
+		}
 		return nil, nil, fmt.Errorf("session create: %w", err)
 	}
 
@@ -91,7 +100,7 @@ func (m *Manager) Create(p CreateParams) (sess *SGWSession, evicted *SGWSession,
 		RATType:         p.RATType,
 		ServingNetwork:  p.ServingNetwork,
 		MMEControlFTEID: p.MMEControlFTEID,
-		SGWS11FTEID:     FTEID{TEID: sgwTEID},
+		SGWS11FTEID:     sgwFTEID,
 		DefaultBearerID: p.DefaultEBI,
 		Bearers:         map[uint8]*bearer.Bearer{p.DefaultEBI: defaultBearer},
 		State:           StatePending,
@@ -106,21 +115,13 @@ func (m *Manager) Create(p CreateParams) (sess *SGWSession, evicted *SGWSession,
 	pdn := pdnKey{imsi: p.IMSI, ebi: p.DefaultEBI}
 	if old, exists := m.byPDN[pdn]; exists {
 		evicted = old
-		delete(m.byID, old.SessionID)
-		delete(m.byS11, old.SGWS11FTEID.TEID)
-		// AUD-09: also clean the S5/S8-C TEID index; omitting it leaves a stale
-		// entry that causes FindByS5CTEID to return the wrong (evicted) session.
-		if old.SGWS5CFTEID.TEID != 0 {
-			delete(m.byS5C, old.SGWS5CFTEID.TEID)
+		m.removeLocked(old)
+		if old.SGWS11FTEID.TEID != sgwFTEID.TEID && len(m.byS11[old.SGWS11FTEID.TEID]) == 0 {
+			m.teidAlloc.Free(old.SGWS11FTEID.TEID)
 		}
-		delete(m.byPDN, pdn)
-		if m.byIMSI[old.IMSI] == old {
-			delete(m.byIMSI, old.IMSI)
-		}
-		m.teidAlloc.Free(old.SGWS11FTEID.TEID)
 	}
 	m.byID[id] = sess
-	m.byS11[sgwTEID] = sess
+	m.byS11[sgwFTEID.TEID] = append(m.byS11[sgwFTEID.TEID], sess)
 	m.byPDN[pdn] = sess
 	m.byIMSI[p.IMSI] = sess
 	m.mu.Unlock()
@@ -135,12 +136,57 @@ func (m *Manager) Find(id string) *SGWSession {
 	return m.byID[id]
 }
 
-// FindByS11TEID returns the session whose SGW S11 TEID matches, or nil.
+// FindByS11TEID returns the most recently registered session whose SGW S11 TEID
+// matches, or nil. S11 procedures carrying bearer EBIs should prefer
+// FindByS11TEIDAndBearer or FindByS11TEIDAndDefaultBearer because a UE can have
+// multiple PDN sessions sharing the same SGW S11 TEID.
 // This is the TEID the MME addresses when sending MBReq/DSReq/RABReq.
 func (m *Manager) FindByS11TEID(t uint32) *SGWSession {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	return m.byS11[t]
+	sessions := m.byS11[t]
+	if len(sessions) == 0 {
+		return nil
+	}
+	return sessions[len(sessions)-1]
+}
+
+// FindByS11TEIDAndBearer returns the PDN session under SGW S11 TEID t that owns
+// ebi. EBI values are scoped to a UE/MME S11 context, not globally unique.
+func (m *Manager) FindByS11TEIDAndBearer(t uint32, ebi uint8) *SGWSession {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	sessions := m.byS11[t]
+	for i := len(sessions) - 1; i >= 0; i-- {
+		if sessions[i].GetBearer(ebi) != nil {
+			return sessions[i]
+		}
+	}
+	return nil
+}
+
+// FindByS11TEIDAndDefaultBearer returns the PDN session whose default bearer EBI
+// matches ebi under SGW S11 TEID t.
+func (m *Manager) FindByS11TEIDAndDefaultBearer(t uint32, ebi uint8) *SGWSession {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	sessions := m.byS11[t]
+	for i := len(sessions) - 1; i >= 0; i-- {
+		if sessions[i].DefaultBearerID == ebi {
+			return sessions[i]
+		}
+	}
+	return nil
+}
+
+// FindAllByS11TEID returns all PDN sessions sharing an SGW S11 TEID.
+func (m *Manager) FindAllByS11TEID(t uint32) []*SGWSession {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	sessions := m.byS11[t]
+	out := make([]*SGWSession, len(sessions))
+	copy(out, sessions)
+	return out
 }
 
 // FindByIMSI returns the most recent session for the given IMSI, or nil.
@@ -150,9 +196,11 @@ func (m *Manager) FindByIMSI(imsi string) *SGWSession {
 	return m.byIMSI[imsi]
 }
 
-// RegisterS5CTEID registers the SGW's S5/S8-C control TEID for a session, enabling
-// PGW-initiated procedure lookup (Create Bearer, Update Bearer, Delete Bearer Requests).
-// Must be called after CreateSession establishes the PGW binding.
+// RegisterS5CTEID registers the SGW's local S5/S8-C control TEID for a session,
+// enabling PGW-initiated procedure lookup (Create Bearer, Update Bearer, Delete
+// Bearer Requests). It must be called before the TEID is advertised in the
+// S5/S8-C Create Session Request because the PGW may immediately address a
+// response or piggybacked request to that local TEID.
 func (m *Manager) RegisterS5CTEID(sessionID string, s5cTEID uint32) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -177,8 +225,28 @@ func (m *Manager) Delete(id string) {
 	if !ok {
 		return
 	}
-	delete(m.byID, id)
-	delete(m.byS11, sess.SGWS11FTEID.TEID)
+	sgwS11TEID := sess.SGWS11FTEID.TEID
+	m.removeLocked(sess)
+	if len(m.byS11[sgwS11TEID]) == 0 {
+		m.teidAlloc.Free(sgwS11TEID)
+	}
+}
+
+func (m *Manager) removeLocked(sess *SGWSession) {
+	delete(m.byID, sess.SessionID)
+	if sessions := m.byS11[sess.SGWS11FTEID.TEID]; len(sessions) > 0 {
+		filtered := sessions[:0]
+		for _, candidate := range sessions {
+			if candidate != sess {
+				filtered = append(filtered, candidate)
+			}
+		}
+		if len(filtered) == 0 {
+			delete(m.byS11, sess.SGWS11FTEID.TEID)
+		} else {
+			m.byS11[sess.SGWS11FTEID.TEID] = filtered
+		}
+	}
 	if sess.SGWS5CFTEID.TEID != 0 {
 		delete(m.byS5C, sess.SGWS5CFTEID.TEID)
 	}
@@ -188,8 +256,18 @@ func (m *Manager) Delete(id string) {
 	}
 	if m.byIMSI[sess.IMSI] == sess {
 		delete(m.byIMSI, sess.IMSI)
+		var newest *SGWSession
+		for _, candidate := range m.byID {
+			if candidate.IMSI == sess.IMSI {
+				if newest == nil || candidate.CreatedAt.After(newest.CreatedAt) {
+					newest = candidate
+				}
+			}
+		}
+		if newest != nil {
+			m.byIMSI[sess.IMSI] = newest
+		}
 	}
-	m.teidAlloc.Free(sess.SGWS11FTEID.TEID)
 }
 
 // List returns a snapshot of all sessions.
@@ -201,6 +279,33 @@ func (m *Manager) List() []*SGWSession {
 		out = append(out, s)
 	}
 	return out
+}
+
+// InvalidatePFCPBindings clears all SGW-U PFCP bindings from locally retained
+// SGW-C sessions. It is retained for whole-client shutdown paths and tests;
+// peer-specific PFCP failures should use InvalidatePFCPBindingsForPeer.
+func (m *Manager) InvalidatePFCPBindings() int {
+	sessions := m.List()
+	invalidated := 0
+	for _, sess := range sessions {
+		if sess.InvalidatePFCPBinding() {
+			invalidated++
+		}
+	}
+	return invalidated
+}
+
+// InvalidatePFCPBindingsForPeer clears only the PFCP bindings owned by the
+// affected SGW-U peer, preserving sessions placed on other SGW-U nodes.
+func (m *Manager) InvalidatePFCPBindingsForPeer(peerName, peerAddr string) int {
+	sessions := m.List()
+	invalidated := 0
+	for _, sess := range sessions {
+		if sess.InvalidatePFCPBindingForPeer(peerName, peerAddr) {
+			invalidated++
+		}
+	}
+	return invalidated
 }
 
 // Count returns the number of active sessions.

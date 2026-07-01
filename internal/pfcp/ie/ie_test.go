@@ -116,9 +116,9 @@ func TestParseIEsRoundTrip(t *testing.T) {
 
 // ── Session-level IE wire tests (C14 / C17) ──────────────────────────────────
 
-// TestPDRIDWire verifies PDR ID IE encoding per TS 29.244 Rel-15 §8.2 (§Table 8.1-1).
+// TestPDRIDWire verifies PDR ID IE encoding per TS 29.244 Rel-15 §8.2 (§Table 8.1.2-1).
 // Type=56 (0x0038), Length=2, Value=uint16 big-endian.
-// Verified from docs/specs/29244-fa0.docx Table 8.1-1: "56 | PDR ID | Extendable / Clause 8.2.36"
+// Verified from docs/specs/29244-fa0.docx Table 8.1.2-1: "56 | PDR ID | Extendable / Clause 8.2.36"
 func TestPDRIDWire(t *testing.T) {
 	p := ie.NewPDRID(1)
 	raw := p.Marshal()
@@ -137,7 +137,7 @@ func TestPDRIDWire(t *testing.T) {
 
 // TestFARIDWire verifies FAR ID IE encoding per TS 29.244 Rel-15 §8.2.
 // Type=108 (0x006C), Length=4, Value=uint32 big-endian.
-// Verified from docs/specs/29244-fa0.docx Table 8.1-1: "108 | FAR ID | Extendable / Clause 8.2.74"
+// Verified from docs/specs/29244-fa0.docx Table 8.1.2-1: "108 | FAR ID | Extendable / Clause 8.2.74"
 func TestFARIDWire(t *testing.T) {
 	f := ie.NewFARID(1)
 	raw := f.Marshal()
@@ -156,7 +156,7 @@ func TestFARIDWire(t *testing.T) {
 
 // TestPrecedenceWire verifies Precedence IE encoding per TS 29.244 Rel-15 §8.2.
 // Type=29 (0x001D), Length=4, Value=uint32 big-endian.
-// Verified from docs/specs/29244-fa0.docx Table 8.1-1: "29 | Precedence | Extendable / Clause 8.2.11"
+// Verified from docs/specs/29244-fa0.docx Table 8.1.2-1: "29 | Precedence | Extendable / Clause 8.2.11"
 func TestPrecedenceWire(t *testing.T) {
 	p := ie.NewPrecedence(100)
 	raw := p.Marshal()
@@ -168,7 +168,7 @@ func TestPrecedenceWire(t *testing.T) {
 // TestSourceInterfaceWire verifies Source Interface IE encoding per TS 29.244 Rel-15 §8.2.2.
 // Type=20 (0x0014), Length=1.
 // C17: tests both Access(0) and Core(1) flag states.
-// Verified from docs/specs/29244-fa0.docx Table 8.1-1 row "20 | Source Interface" and
+// Verified from docs/specs/29244-fa0.docx Table 8.1.2-1 row "20 | Source Interface" and
 // Table 8.2.2-1 rows "Access | 0" and "Core | 1".
 func TestSourceInterfaceWire(t *testing.T) {
 	tests := []struct {
@@ -201,7 +201,7 @@ func TestSourceInterfaceWire(t *testing.T) {
 // TestDestinationInterfaceWire verifies Destination Interface IE encoding per §8.2.25.
 // Type=42 (0x002A), Length=1.
 // C17: tests both Access(0) and Core(1) flag states.
-// Verified from docs/specs/29244-fa0.docx Table 8.1-1 row "42 | Destination Interface" and
+// Verified from docs/specs/29244-fa0.docx Table 8.1.2-1 row "42 | Destination Interface" and
 // Table 8.2.24-1 rows "Access | 0" and "Core | 1".
 func TestDestinationInterfaceWire(t *testing.T) {
 	tests := []struct {
@@ -234,7 +234,7 @@ func TestDestinationInterfaceWire(t *testing.T) {
 // TestApplyActionWire verifies Apply Action IE encoding per TS 29.244 Rel-15 §8.2.26.
 // Type=44 (0x002C), Length=1.
 // C17 — tests all spec-defined flag states: DROP(bit1), FORW(bit2), BUFF(bit3), NOCP(bit4).
-// Verified from docs/specs/29244-fa0.docx Table 8.1-1 row "44 | Apply Action" and
+// Verified from docs/specs/29244-fa0.docx Table 8.1.2-1 row "44 | Apply Action" and
 // Figure 8.2.26-1: "Bit 1 DROP=0x01, Bit 2 FORW=0x02, Bit 3 BUFF=0x04, Bit 4 NOCP=0x08".
 func TestApplyActionWire(t *testing.T) {
 	tests := []struct {
@@ -342,7 +342,7 @@ func TestUPFunctionFeaturesZeroWire(t *testing.T) {
 // TestFTEIDPFCPStaticWire verifies PFCP F-TEID IE with V4=1 per TS 29.244 Rel-15 §8.2.3.
 // Type=21 (0x0015), Length=9, Value=[V4=0x01, TEID(4), IPv4(4)].
 // C17: second flag state — static TEID (not CHOOSE).
-// Verified from docs/specs/29244-fa0.docx Table 8.1-1 row "21 | F-TEID" and
+// Verified from docs/specs/29244-fa0.docx Table 8.1.2-1 row "21 | F-TEID" and
 // Figure 8.2.3-1: "Bit 1 – V4" = 0x01.
 func TestFTEIDPFCPStaticWire(t *testing.T) {
 	v4 := netip.MustParseAddr("10.0.0.1") // 0x0A 0x00 0x00 0x01
@@ -369,7 +369,7 @@ func TestFTEIDPFCPStaticWire(t *testing.T) {
 
 // TestFSEIDWire verifies F-SEID IE encoding per TS 29.244 Rel-15 §8.2.37.
 // Type=57 (0x0039), Length=13 for V4, Value=[flags(1), SEID(8), IPv4(4)].
-// Verified from docs/specs/29244-fa0.docx Table 8.1-1 row "57 | F-SEID" and
+// Verified from docs/specs/29244-fa0.docx Table 8.1.2-1 row "57 | F-SEID" and
 // Figure 8.2.37-1: "Bit 2 – V4" = 0x02.
 func TestFSEIDWire(t *testing.T) {
 	v4 := netip.MustParseAddr("192.168.1.1") // 0xC0 0xA8 0x01 0x01
@@ -400,7 +400,7 @@ func TestFSEIDWire(t *testing.T) {
 // TestOuterHeaderCreationWire verifies Outer Header Creation IE per TS 29.244 Rel-15 §8.2.56.
 // Type=84 (0x0054), Length=10 for GTP-U/UDP/IPv4.
 // Value=[desc(2), TEID(4), IPv4(4)].
-// Verified from docs/specs/29244-fa0.docx Table 8.1-1 row "84 | Outer Header Creation" and
+// Verified from docs/specs/29244-fa0.docx Table 8.1.2-1 row "84 | Outer Header Creation" and
 // Figure 8.2.56-1: Octet 5 Bit 8 (MSB of first octet) = GTP-U/UDP/IPv4 → 0x0100 big-endian.
 func TestOuterHeaderCreationWire(t *testing.T) {
 	v4 := netip.MustParseAddr("10.0.0.2") // 0x0A 0x00 0x00 0x02
@@ -432,8 +432,8 @@ func TestOuterHeaderCreationWire(t *testing.T) {
 }
 
 // TestGroupedIEChildren verifies grouped IE (PDI) marshaling and child parse round-trip.
-// PDI type=2 (0x0002) per TS 29.244 §Table 8.1-1.
-// Verified from docs/specs/29244-fa0.docx Table 8.1-1: "2 | PDI | Extendable / Table 7.5.2.2-2"
+// PDI type=2 (0x0002) per TS 29.244 §Table 8.1.2-1.
+// Verified from docs/specs/29244-fa0.docx Table 8.1.2-1: "2 | PDI | Extendable / Table 7.5.2.2-2"
 func TestGroupedIEChildren(t *testing.T) {
 	srcIface := ie.NewSourceInterface(ie.SourceInterfaceAccess)
 	fteid := ie.NewFTEIDChoose()
@@ -463,7 +463,7 @@ func TestGroupedIEChildren(t *testing.T) {
 
 // TestCreatePDRGrouped verifies Create PDR grouped IE marshaling and parse.
 // Type=1 (0x0001); must contain PDR ID, Precedence, PDI, FAR ID.
-// Verified from docs/specs/29244-fa0.docx Table 8.1-1: "1 | Create PDR | Extendable / Table 7.5.2.2-1"
+// Verified from docs/specs/29244-fa0.docx Table 8.1.2-1: "1 | Create PDR | Extendable / Table 7.5.2.2-1"
 func TestCreatePDRGrouped(t *testing.T) {
 	pdi := ie.NewPDI(ie.NewSourceInterface(ie.SourceInterfaceAccess))
 	cpdr := ie.NewCreatePDR(
@@ -495,9 +495,27 @@ func TestCreatePDRGrouped(t *testing.T) {
 	}
 }
 
+// TestPFCPGroupedIEChildrenHaveNoInstanceOctet documents the C10 boundary for PFCP.
+// TS 29.244 Rel-15 §8.1 encodes IEs as Type(2)|Length(2)|Value with no GTPv2-C
+// instance octet. Grouped IE tables such as Table 7.5.2.2-1 and 7.5.2.2-2
+// therefore cite child IE type and presence only.
+func TestPFCPGroupedIEChildrenHaveNoInstanceOctet(t *testing.T) {
+	pdi := ie.NewPDI(ie.NewSourceInterface(ie.SourceInterfaceAccess))
+	raw := pdi.Marshal()
+
+	// PDI: type=2, len=5, then child Source Interface: type=20, len=1, value=Access(0).
+	// If PFCP had a GTPv2-style child instance octet, this vector would be 10 bytes
+	// instead of 9 and the Source Interface value would shift by one byte.
+	want := []byte{
+		0x00, 0x02, 0x00, 0x05,
+		0x00, 0x14, 0x00, 0x01, 0x00,
+	}
+	checkWire(t, "PDI without child instance octet", raw, want)
+}
+
 // TestCreateFARGrouped verifies Create FAR grouped IE marshaling.
 // Type=3 (0x0003); must contain FAR ID, Apply Action, Forwarding Parameters.
-// Verified from docs/specs/29244-fa0.docx Table 8.1-1: "3 | Create FAR | Extendable / Table 7.5.2.3-1"
+// Verified from docs/specs/29244-fa0.docx Table 8.1.2-1: "3 | Create FAR | Extendable / Table 7.5.2.3-1"
 func TestCreateFARGrouped(t *testing.T) {
 	fwdParams := ie.NewForwardingParameters(
 		ie.NewDestinationInterface(ie.DestInterfaceCore),
@@ -526,7 +544,7 @@ func TestCreateFARGrouped(t *testing.T) {
 
 // TestCreatedPDRGrouped verifies Created PDR grouped IE (in session est response).
 // Type=8 (0x0008); contains PDR ID (M) and F-TEID (C when CHOOSE was set).
-// Verified from docs/specs/29244-fa0.docx Table 8.1-1: "8 | Created PDR | Extendable / Table 7.5.3.2-1"
+// Verified from docs/specs/29244-fa0.docx Table 8.1.2-1: "8 | Created PDR | Extendable / Table 7.5.3.2-1"
 func TestCreatedPDRGrouped(t *testing.T) {
 	v4 := netip.MustParseAddr("10.0.0.1")
 	createdPDR := ie.NewCreatedPDR(
@@ -559,9 +577,10 @@ func TestCreatedPDRGrouped(t *testing.T) {
 // sent in a PFCP Session Modification Request per TS 29.244 Rel-15 §7.5.4.
 //
 // Critical type numbers (root cause of Phase 4/5 bugs when taken from memory):
-//   Table 7.5.4.3-1: "Octet 1 and 2 | Update FAR IE Type = 10 (decimal)"
-//   Table 7.5.4.3-2: "Octet 1 and 2 | Update Forwarding Parameters IE Type = 11 (decimal)"
-//   Table 8.1-1:     "108 | FAR ID", "44 | Apply Action", "42 | Destination Interface"
+//
+//	Table 7.5.4.3-1: "Octet 1 and 2 | Update FAR IE Type = 10 (decimal)"
+//	Table 7.5.4.3-2: "Octet 1 and 2 | Update Forwarding Parameters IE Type = 11 (decimal)"
+//	Table 8.1.2-1:     "108 | FAR ID", "44 | Apply Action", "42 | Destination Interface"
 //
 // The Phase 8 use case: Core→Access downlink FAR upgraded from DROP to FORW with
 // eNB outer header (TEID from Modify Bearer Request, IP from eNB F-TEID).
@@ -591,13 +610,13 @@ func TestUpdateFARWire(t *testing.T) {
 	want := []byte{
 		0x00, 0x0A, 0x00, 0x24, // UpdateFAR: type=10, len=36
 		0x00, 0x6C, 0x00, 0x04, 0x00, 0x00, 0x00, 0x02, // FAR ID: type=108, val=2
-		0x00, 0x2C, 0x00, 0x01, 0x02,                   // Apply Action: type=44, FORW
-		0x00, 0x0B, 0x00, 0x13,                         // UpdateFP: type=11, len=19
-		0x00, 0x2A, 0x00, 0x01, 0x00,                   // DestInterface: type=42, Access=0
-		0x00, 0x54, 0x00, 0x0A,                         // OHC: type=84, len=10
-		0x01, 0x00,                                     // desc=OHCDescGTPUUDPIPv4
-		0x12, 0x34, 0xAB, 0xCD,                         // TEID
-		0x0A, 0x01, 0x00, 0x01,                         // IP=10.1.0.1
+		0x00, 0x2C, 0x00, 0x01, 0x02, // Apply Action: type=44, FORW
+		0x00, 0x0B, 0x00, 0x13, // UpdateFP: type=11, len=19
+		0x00, 0x2A, 0x00, 0x01, 0x00, // DestInterface: type=42, Access=0
+		0x00, 0x54, 0x00, 0x0A, // OHC: type=84, len=10
+		0x01, 0x00, // desc=OHCDescGTPUUDPIPv4
+		0x12, 0x34, 0xAB, 0xCD, // TEID
+		0x0A, 0x01, 0x00, 0x01, // IP=10.1.0.1
 	}
 	checkWire(t, "UpdateFAR", raw, want)
 

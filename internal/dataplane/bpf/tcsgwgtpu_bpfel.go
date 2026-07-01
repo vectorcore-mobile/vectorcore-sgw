@@ -78,7 +78,7 @@ type TcSgwGtpuSpecs struct {
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type TcSgwGtpuProgramSpecs struct {
-	TcSgwGtpuFunc *ebpf.ProgramSpec `ebpf:"tc_sgw_gtpu_func"`
+	XdpSgwGtpuFunc *ebpf.ProgramSpec `ebpf:"xdp_sgw_gtpu_func"`
 }
 
 // TcSgwGtpuMapSpecs contains maps before they are loaded into the kernel.
@@ -136,12 +136,12 @@ type TcSgwGtpuVariables struct {
 //
 // It can be passed to LoadTcSgwGtpuObjects or ebpf.CollectionSpec.LoadAndAssign.
 type TcSgwGtpuPrograms struct {
-	TcSgwGtpuFunc *ebpf.Program `ebpf:"tc_sgw_gtpu_func"`
+	XdpSgwGtpuFunc *ebpf.Program `ebpf:"xdp_sgw_gtpu_func"`
 }
 
 func (p *TcSgwGtpuPrograms) Close() error {
 	return _TcSgwGtpuClose(
-		p.TcSgwGtpuFunc,
+		p.XdpSgwGtpuFunc,
 	)
 }
 

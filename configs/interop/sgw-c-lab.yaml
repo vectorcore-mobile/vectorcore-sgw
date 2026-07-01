@@ -1,0 +1,44 @@
+sgwc:
+  node_id: "sgw-c-lab"
+  plmn:
+    mcc: "001"
+    mnc: "01"
+  control_plane_ip: "10.90.250.10"
+
+interfaces:
+  control:
+    # Logical names are operator-chosen labels. gtpc.*.bind references them.
+    lab_control:
+      listen: "10.90.250.10:2123"
+
+gtpc:
+  s11:
+    bind: "lab_control"
+  s5c:
+    bind: "lab_control"
+
+s11:
+  t3_response_seconds: 3
+  n3_requests: 5
+
+pfcp:
+  local_addr: "10.90.250.10:8805"
+  heartbeat_interval_seconds: 10
+  heartbeat_timeout_seconds: 30
+  sgwu:
+    - name: "sgw-u-lab"
+      node_id: "sgw-u-lab"
+      addr: "10.90.250.11:8805"
+
+logging:
+  level: info
+  file: /var/log/vectorcore/sgw/sgw-c-lab.log
+
+api:
+  listen: "0.0.0.0:8080"
+
+metrics:
+  listen: "0.0.0.0:9090"
+
+shutdown:
+  timeout_seconds: 5

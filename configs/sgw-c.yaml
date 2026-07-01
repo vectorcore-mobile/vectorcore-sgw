@@ -4,24 +4,35 @@ sgwc:
     mcc: "311"
     mnc: "435"
 
+interfaces:
+  control:
+    # "sgwinterface" is an operator-chosen logical name. It can be any
+    # YAML key; gtpc.s11.bind and gtpc.s5c.bind below reference this name.
+    sgwinterface:
+      listen: "10.90.250.59:2123"
+
+gtpc:
+  s11:
+    # Bind S11 to interfaces.control.sgwinterface.
+    bind: "sgwinterface"
+  s5c:
+    # Bind S5/S8-C to interfaces.control.sgwinterface. 
+    bind: "sgwinterface"
+  create_bearer_retry_guard:
+    enabled: true
+
 s11:
-  listen: "10.90.250.186:2123"
   t3_response_seconds: 3
   n3_requests: 5
 
-s5c:
-  local_addr: "10.90.250.186:2123"
-  # PGW S5/S8-C address comes from the MME's CSReq F-TEID IE (instance 1)
-  # per TS 23.401 §5.3.2.1 and TS 29.274 Table 7.2.1-1.
-
 pfcp:
-  local_addr: "10.90.250.186:8805"
+  local_addr: "127.0.0.1:8805"
   heartbeat_interval_seconds: 10
   heartbeat_timeout_seconds: 30
   sgwu:
     - name: "sgw-u-1"
       node_id: "sgw-u-1"
-      addr: "10.90.250.186:8805"
+      addr: "127.0.0.2:8805"
 
 logging:
   level: info

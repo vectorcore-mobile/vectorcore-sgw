@@ -36,13 +36,25 @@ type EndMarkerSender interface {
 	SendEndMarker(teid uint32, dstIP netip.Addr)
 }
 
-// BPFRuleInstaller is implemented by the TC-BPF dataplane to install, update,
+// BPFRuleInstaller is implemented by the eBPF dataplane to install, update,
 // and remove GTP-U forwarding rules derived from PFCP PDR/FAR state (Phase 7).
 // Called after session establishment, modification, and deletion.
 type BPFRuleInstaller interface {
 	InstallSession(sess *sgwusession.Session) error
 	UpdateSession(sess *sgwusession.Session) error
 	RemoveSession(sess *sgwusession.Session) error
+}
+
+type parsedFARUpdate struct {
+	farID       uint32
+	applyAction *pfcpie.IE
+	ufpIE       *pfcpie.IE
+}
+
+type endMarkerEvent struct {
+	farID uint32
+	teid  uint32
+	dstIP netip.Addr
 }
 
 // ntpEpochOffset is the seconds between NTP epoch (1900-01-01) and Unix epoch (1970-01-01)
@@ -60,18 +72,33 @@ type PeerRecord struct {
 	lastAddr   *net.UDPAddr // last known UDP address for outbound Node Report Requests
 }
 
+// PeerView is a point-in-time API view of one established SGW-C PFCP
+// association on the SGW-U. PFCP association identity is the Node ID from TS
+// 29.244 Rel-15 §8.2.8, and restart detection is based on the Recovery Time
+// Stamp from §8.2.11.
+type PeerView struct {
+	NodeIDKey         string    `json:"node_id_key"`
+	State             string    `json:"state"`
+	RecoveryTimestamp uint32    `json:"recovery_timestamp"`
+	LastSeen          time.Time `json:"last_seen"`
+	LastAddr          string    `json:"last_addr,omitempty"`
+	SessionCount      int       `json:"session_count"`
+}
+
 // Server listens for PFCP messages from SGW-C peers on the SGW-U.
 type Server struct {
 	conn        *pfcptransport.Conn
 	localNodeID net.IP
-	localIP     netip.Addr // SGW-U GTP-U data-plane IP (used in Created PDR F-TEID)
+	localIP     netip.Addr // SGW-U PFCP IP (Node ID / UP F-SEID endpoint)
+	accessIP    netip.Addr // SGW-U S1-U GTP-U IP (Access-side local F-TEID)
+	coreIP      netip.Addr // SGW-U S5/S8-U GTP-U IP (Core-side local F-TEID)
 	localTS     uint32     // NTP timestamp when this process started (Recovery Time Stamp)
 	allowedNets []*net.IPNet
-	peers       sync.Map         // nodeIDKey string → *PeerRecord (keyed by Node ID per §8.2.8)
+	peers       sync.Map // nodeIDKey string → *PeerRecord (keyed by Node ID per §8.2.8)
 	sessions    *sgwusession.Store
 	log         *slog.Logger
-	emSender    EndMarkerSender // optional; wired after both server and forwarder are created
-	bpfInstall  BPFRuleInstaller // optional; wired when TC-BPF dataplane is active (Phase 7)
+	emSender    EndMarkerSender  // optional; wired after both server and forwarder are created
+	bpfInstall  BPFRuleInstaller // optional; wired when eBPF dataplane is active
 }
 
 // SetEndMarkerSender wires the GTP-U forwarder so that PFCP-triggered tunnel
@@ -81,8 +108,8 @@ func (s *Server) SetEndMarkerSender(sender EndMarkerSender) {
 	s.emSender = sender
 }
 
-// SetBPFInstaller wires the TC-BPF rule compiler so that PFCP session events
-// are reflected in the kernel BPF forwarding maps (Phase 7).
+// SetBPFInstaller wires the BPF rule compiler so that PFCP session events are
+// reflected in the kernel BPF forwarding maps.
 func (s *Server) SetBPFInstaller(installer BPFRuleInstaller) {
 	s.bpfInstall = installer
 }
@@ -116,11 +143,23 @@ func New(cfg *sgwuconfig.Config, startTime time.Time, log *slog.Logger) (*Server
 	}
 
 	localNetipAddr := netip.AddrFrom4([4]byte(localIP))
+	accessIP, err := cfg.S1ULocalAddr()
+	if err != nil {
+		_ = conn.Close()
+		return nil, fmt.Errorf("PFCP server: invalid S1-U listen address: %w", err)
+	}
+	coreIP, err := cfg.S5ULocalAddr()
+	if err != nil {
+		_ = conn.Close()
+		return nil, fmt.Errorf("PFCP server: invalid S5/S8-U listen address: %w", err)
+	}
 
 	s := &Server{
 		conn:        conn,
 		localNodeID: localIP,
 		localIP:     localNetipAddr,
+		accessIP:    accessIP,
+		coreIP:      coreIP,
 		localTS:     uint32(startTime.Unix()) + ntpEpochOffset,
 		allowedNets: allowedNets,
 		sessions:    sgwusession.NewStore(),
@@ -145,6 +184,36 @@ func (s *Server) Close() error {
 // Phase 6: the forwarder reads PDR/FAR state to resolve TEIDs and forwarding actions.
 func (s *Server) SessionStore() *sgwusession.Store {
 	return s.sessions
+}
+
+// Peers returns a stable snapshot of SGW-C PFCP associations currently known
+// by this SGW-U. Entries are added by Association Setup and removed by
+// Association Release, so every returned peer is an established association.
+func (s *Server) Peers() []PeerView {
+	var peers []PeerView
+	seen := make(map[*PeerRecord]bool)
+	s.peers.Range(func(_, val any) bool {
+		pr := val.(*PeerRecord)
+		if seen[pr] {
+			return true
+		}
+		seen[pr] = true
+		pr.mu.RLock()
+		view := PeerView{
+			NodeIDKey:         pr.nodeIDKey,
+			State:             "Established",
+			RecoveryTimestamp: pr.recoveryTS,
+			LastSeen:          pr.lastSeen,
+			SessionCount:      s.sessions.CountByCPNodeKey(pr.nodeIDKey),
+		}
+		if pr.lastAddr != nil {
+			view.LastAddr = pr.lastAddr.String()
+		}
+		pr.mu.RUnlock()
+		peers = append(peers, view)
+		return true
+	})
+	return peers
 }
 
 func (s *Server) handle(conn *pfcptransport.Conn, addr *net.UDPAddr, hdr pfcpmsg.Header, raw []byte) {
@@ -183,6 +252,16 @@ func nodeIDKey(nodeID *pfcpie.IE) string {
 	return ""
 }
 
+func cpNodeKey(nodeID *pfcpie.IE, addr *net.UDPAddr) string {
+	if key := nodeIDKey(nodeID); key != "" {
+		return key
+	}
+	if addr == nil {
+		return ""
+	}
+	return "ipv4:" + addr.IP.String()
+}
+
 // handleAssocSetup processes an Association Setup Request per TS 29.244 §5.2.1/§7.4.1.
 func (s *Server) handleAssocSetup(conn *pfcptransport.Conn, addr *net.UDPAddr, hdr pfcpmsg.Header, raw []byte) {
 	req, err := pfcpmsg.ParseAssociationSetupRequest(raw)
@@ -212,6 +291,7 @@ func (s *Server) handleAssocSetup(conn *pfcptransport.Conn, addr *net.UDPAddr, h
 		// Node ID parsed but type unsupported (e.g., FQDN); fall back to addr.
 		peerKey = "addr:" + addr.String()
 	}
+	sourceKey := "ipv4:" + addr.IP.String()
 
 	if v, ok := s.peers.Load(peerKey); ok {
 		pr := v.(*PeerRecord)
@@ -225,16 +305,21 @@ func (s *Server) handleAssocSetup(conn *pfcptransport.Conn, addr *net.UDPAddr, h
 		pr.lastSeen = time.Now()
 		pr.lastAddr = addr
 		pr.mu.Unlock()
+		if sourceKey != peerKey {
+			s.peers.Store(sourceKey, pr)
+		}
 	} else {
-		s.peers.Store(peerKey, &PeerRecord{
+		pr := &PeerRecord{
 			nodeIDKey:  peerKey,
 			recoveryTS: peerTS,
 			lastSeen:   time.Now(),
 			lastAddr:   addr,
-		})
+		}
+		s.peers.Store(peerKey, pr)
+		if sourceKey != peerKey {
+			s.peers.Store(sourceKey, pr)
+		}
 	}
-
-	s.log.Info("PFCP association established with SGW-C", "from", addr)
 
 	// R15-007 FIX: advertise FTUP in UP Function Features IE per TS 29.244 §5.5.1 / §6.2.6.2.2:
 	// "shall send an PFCP Association Setup Response with a successful cause, its Node ID, and
@@ -259,7 +344,13 @@ func (s *Server) handleAssocSetup(conn *pfcptransport.Conn, addr *net.UDPAddr, h
 	}
 	if err := conn.Reply(addr, respRaw); err != nil {
 		s.log.Warn("PFCP send AssociationSetupResponse failed", "to", addr, "error", err)
+		return
 	}
+	s.log.Info("PFCP association established with SGW-C",
+		"from", addr,
+		"peer_node_id", peerKey,
+		"local_node_id", s.localNodeID.String(),
+		"peer_recovery_ts", peerTS)
 }
 
 // handleHeartbeat processes a Heartbeat Request per TS 29.244 §6.1/§7.2.2.
@@ -289,15 +380,7 @@ func (s *Server) handleHeartbeat(conn *pfcptransport.Conn, addr *net.UDPAddr, _ 
 				"from", addr, "old_ts", pr.recoveryTS, "new_ts", peerTS)
 			// AUD-02: collect deleted sessions and remove their BPF rules so the
 			// fast path does not keep forwarding for stale sessions after CP restart.
-			deleted := s.sessions.DeleteByCPNodeKey(heartbeatKey)
-			if s.bpfInstall != nil {
-				for _, sess := range deleted {
-					if bpfErr := s.bpfInstall.RemoveSession(sess); bpfErr != nil {
-						s.log.Error("BPF cleanup failed for restarted peer session",
-							"cp_seid", sess.CPSEID, "error", bpfErr)
-					}
-				}
-			}
+			s.deletePeerSessions(heartbeatKey, "restarted peer session")
 		}
 		pr.recoveryTS = peerTS
 		pr.lastSeen = time.Now()
@@ -320,6 +403,19 @@ func (s *Server) handleHeartbeat(conn *pfcptransport.Conn, addr *net.UDPAddr, _ 
 	if err := conn.Reply(addr, respRaw); err != nil {
 		s.log.Warn("PFCP send HeartbeatResponse failed", "to", addr, "error", err)
 	}
+}
+
+func (s *Server) deletePeerSessions(peerKey, reason string) int {
+	deleted := s.sessions.DeleteByCPNodeKey(peerKey)
+	if s.bpfInstall != nil {
+		for _, sess := range deleted {
+			if bpfErr := s.bpfInstall.RemoveSession(sess); bpfErr != nil {
+				s.log.Error("BPF cleanup failed for "+reason,
+					"cp_seid", sess.CPSEID, "error", bpfErr)
+			}
+		}
+	}
+	return len(deleted)
 }
 
 // hasAssociation returns true if the source address has an established PFCP association.
@@ -487,16 +583,18 @@ func (s *Server) handleSessionEstablishment(conn *pfcptransport.Conn, addr *net.
 			if isCH {
 				// Allocate a TEID for this PDR's GTP-U receive endpoint.
 				allocTEID := s.sessions.AllocTEID()
+				localFTEIDIP, createdPDR, ipErr := s.newCreatedPDRForSource(pdrID, allocTEID, srcIface)
+				if ipErr != nil {
+					s.log.Warn("PFCP SER: Create PDR source interface cannot be mapped to a GTP-U local IP — rejecting whole request",
+						"source_interface", srcIface, "error", ipErr)
+					s.replySessionEstRuleFailure(conn, addr, hdr)
+					return
+				}
 				pdr.LocalTEID = allocTEID
-				pdr.LocalIP = s.localIP
+				pdr.LocalIP = localFTEIDIP
 
 				// Build Created PDR IE: PDR ID (M) + F-TEID (C: allocated TEID+IP).
-				createdPDRIEs = append(createdPDRIEs,
-					pfcpie.NewCreatedPDR(
-						pfcpie.NewPDRID(pdrID),
-						pfcpie.NewFTEIDv4(allocTEID, s.localIP),
-					),
-				)
+				createdPDRIEs = append(createdPDRIEs, createdPDR)
 			}
 		}
 		pdrs = append(pdrs, pdr)
@@ -702,128 +800,25 @@ func (s *Server) handleSessionModification(conn *pfcptransport.Conn, addr *net.U
 		return
 	}
 
-	// R15-004 FIX: validate ALL Update FARs before applying any.
-	// Per TS 29.244 §6.3.3.3: "reject a modification request which would relate to a
-	// rule not existing in the UP function; discard any updates on the PFCP session context."
-	// Validation pass — no mutation of session state.
-	type parsedFARUpdate struct {
-		farID       uint32
-		applyAction *pfcpie.IE
-		ufpIE       *pfcpie.IE
-	}
-	var updates []parsedFARUpdate
-	for _, ufarIE := range req.UpdateFARs {
-		children, cErr := ufarIE.Children()
-		if cErr != nil {
-			s.log.Warn("PFCP SMR: Update FAR children parse error — rejecting whole request", "error", cErr)
-			s.replySessionModRuleFailure(conn, addr, req)
-			return
-		}
-		farIDIE := pfcpie.Find(children, pfcpie.TypeFARID)
-		if farIDIE == nil {
-			s.log.Warn("PFCP SMR: Update FAR missing mandatory FAR ID IE — rejecting whole request")
-			s.replySessionModRuleFailure(conn, addr, req)
-			return
-		}
-		farID, _ := farIDIE.FARIDValue()
-
-		// Per §6.3.3.3: reject if the FAR does not exist in this session.
-		found := false
-		for _, f := range sess.FARs {
-			if f.ID == farID {
-				found = true
-				break
-			}
-		}
-		if !found {
-			s.log.Warn("PFCP SMR: Update FAR references non-existent FAR — rejecting whole request",
-				"up_seid", req.SEID, "far_id", farID)
-			s.replySessionModRuleFailure(conn, addr, req)
-			return
-		}
-		updates = append(updates, parsedFARUpdate{
-			farID:       farID,
-			applyAction: pfcpie.Find(children, pfcpie.TypeApplyAction),
-			ufpIE:       pfcpie.Find(children, pfcpie.TypeUpdateForwardingParameters),
-		})
-	}
-
-	// All updates validated — apply atomically per §6.3.3.3.
-	// AUD-07: hold the session write-lock so the GTP-U forwarder cannot read FARs
-	// concurrently while we are modifying them.
-	sess.Mu.Lock()
-	for _, u := range updates {
-		for i := range sess.FARs {
-			if sess.FARs[i].ID != u.farID {
-				continue
-			}
-			// R15-REAUDIT-009: capture old OHC before applying the update.
-			// If the outer header changes (tunnel switch), send End Marker to old downstream peer.
-			oldOuterTEID := sess.FARs[i].OuterTEID
-			oldOuterIP := sess.FARs[i].OuterIP
-
-			if u.applyAction != nil {
-				sess.FARs[i].ApplyAction, _ = u.applyAction.ApplyActionValue()
-			}
-			if u.ufpIE != nil {
-				fpChildren, fpErr := u.ufpIE.Children()
-				if fpErr == nil {
-					if dstIE := pfcpie.Find(fpChildren, pfcpie.TypeDestinationInterface); dstIE != nil {
-						sess.FARs[i].DestInterface, _ = dstIE.DestinationInterfaceValue()
-					}
-					if ohcIE := pfcpie.Find(fpChildren, pfcpie.TypeOuterHeaderCreation); ohcIE != nil {
-						ohc, ohcErr := ohcIE.OuterHeaderCreationValue()
-						if ohcErr == nil {
-							sess.FARs[i].OuterTEID = ohc.TEID
-							sess.FARs[i].OuterIP = ohc.IPv4
-						}
-					}
-				}
-			}
-
-			// R15-REAUDIT-009: if the outer header changed and we had a valid old destination,
-			// send End Marker to old downstream (eNB) per TS 29.281 §7.3.2.
-			newOuterTEID := sess.FARs[i].OuterTEID
-			newOuterIP := sess.FARs[i].OuterIP
-			if s.emSender != nil &&
-				oldOuterTEID != 0 && oldOuterIP.IsValid() &&
-				(oldOuterTEID != newOuterTEID || oldOuterIP != newOuterIP) {
-				s.log.Debug("PFCP SMR: FAR outer header changed — sending End Marker to old downstream",
-					"far_id", u.farID, "old_teid", oldOuterTEID, "old_ip", oldOuterIP)
-				s.emSender.SendEndMarker(oldOuterTEID, oldOuterIP)
-			}
-
-			s.log.Info("PFCP SMR: FAR updated",
-				"up_seid", req.SEID,
-				"far_id", u.farID,
-				"apply_action", sess.FARs[i].ApplyAction,
-			)
-			break
-		}
-	}
-	sess.Mu.Unlock() // AUD-07: release after all FAR writes are complete
-
-	// Persist the updated session.
-	if updateErr := s.sessions.Update(sess); updateErr != nil {
-		s.log.Warn("PFCP SMR: session update failed", "up_seid", req.SEID, "error", updateErr)
-		s.replySessionModRejection(conn, addr, req)
+	createdPDRIEs, endMarkers, applyErr := s.applySessionModification(sess, req)
+	if applyErr != nil {
+		s.log.Error("PFCP SMR rejected before session commit",
+			"up_seid", req.SEID, "error", applyErr)
+		s.replySessionModRuleFailure(conn, addr, req)
 		return
 	}
 
-	// Phase 7: re-install BPF forwarding rules with updated FAR values.
-	// AUD-01: BPF failure means the fast path did not apply the modification.
-	// Return CauseRuleCreationFailure so the SGW-C knows the update did not take effect.
-	// Note: the in-memory session is already updated; the SGW-C will retry or tear down.
-	if s.bpfInstall != nil {
-		if bpfErr := s.bpfInstall.UpdateSession(sess); bpfErr != nil {
-			s.log.Error("BPF rule update failed after SMR — fast path has stale rules; returning failure",
-				"up_seid", req.SEID, "error", bpfErr)
-			s.replySessionModRuleFailure(conn, addr, req)
-			return
+	for _, ev := range endMarkers {
+		if s.emSender == nil {
+			continue
 		}
+		s.log.Debug("PFCP SMR: FAR outer header changed — sending End Marker to old downstream",
+			"far_id", ev.farID, "old_teid", ev.teid, "old_ip", ev.dstIP)
+		s.emSender.SendEndMarker(ev.teid, ev.dstIP)
 	}
 
-	// Build Session Modification Response per Table 7.5.5.1-1: Cause is M.
+	// Build Session Modification Response per Table 7.5.5.1-1: Cause is M;
+	// Created PDR is present when new PDRs used CHOOSE F-TEID.
 	respHdr := pfcpmsg.Header{
 		Version:        1,
 		HasSEID:        true,
@@ -831,7 +826,9 @@ func (s *Server) handleSessionModification(conn *pfcptransport.Conn, addr *net.U
 		MessageType:    pfcpmsg.MsgTypeSessionModificationResponse,
 		SequenceNumber: req.SequenceNumber,
 	}
-	respRaw, err := pfcpmsg.Marshal(respHdr, []*pfcpie.IE{pfcpie.NewCause(pfcpie.CauseRequestAccepted)})
+	respIEs := []*pfcpie.IE{pfcpie.NewCause(pfcpie.CauseRequestAccepted)}
+	respIEs = append(respIEs, createdPDRIEs...)
+	respRaw, err := pfcpmsg.Marshal(respHdr, respIEs)
 	if err != nil {
 		s.log.Error("PFCP marshal SessionModificationResponse failed", "error", err)
 		return
@@ -872,6 +869,332 @@ func (s *Server) replySessionModRuleFailure(conn *pfcptransport.Conn, addr *net.
 	if err == nil {
 		conn.Reply(addr, raw) //nolint:errcheck
 	}
+}
+
+func (s *Server) applySessionModification(sess *sgwusession.Session, req *pfcpmsg.SessionModificationRequest) ([]*pfcpie.IE, []endMarkerEvent, error) {
+	sess.Mu.Lock()
+	defer sess.Mu.Unlock()
+
+	candidate := &sgwusession.Session{
+		CPSEID:    sess.CPSEID,
+		UPSEID:    sess.UPSEID,
+		CPNodeKey: sess.CPNodeKey,
+		PDRs:      append([]sgwusession.PDR(nil), sess.PDRs...),
+		FARs:      append([]sgwusession.FAR(nil), sess.FARs...),
+	}
+
+	for _, cfarIE := range req.CreateFARs {
+		far, err := parseCreateFAR(cfarIE)
+		if err != nil {
+			return nil, nil, err
+		}
+		for _, existing := range candidate.FARs {
+			if existing.ID == far.ID {
+				return nil, nil, fmt.Errorf("FAR %d already exists", far.ID)
+			}
+		}
+		candidate.FARs = append(candidate.FARs, far)
+	}
+
+	var createdPDRIEs []*pfcpie.IE
+	for _, cpdrIE := range req.CreatePDRs {
+		pdr, choose, err := parseCreatePDR(cpdrIE)
+		if err != nil {
+			return nil, nil, err
+		}
+		for _, existing := range candidate.PDRs {
+			if existing.ID == pdr.ID {
+				return nil, nil, fmt.Errorf("PDR %d already exists", pdr.ID)
+			}
+		}
+		if choose {
+			allocTEID := s.sessions.AllocTEID()
+			localFTEIDIP, createdPDR, ipErr := s.newCreatedPDRForSource(pdr.ID, allocTEID, pdr.SourceInterface)
+			if ipErr != nil {
+				return nil, nil, ipErr
+			}
+			pdr.LocalTEID = allocTEID
+			pdr.LocalIP = localFTEIDIP
+			createdPDRIEs = append(createdPDRIEs, createdPDR)
+		}
+		candidate.PDRs = append(candidate.PDRs, pdr)
+	}
+
+	for _, rpdrIE := range req.RemovePDRs {
+		children, err := rpdrIE.Children()
+		if err != nil {
+			return nil, nil, fmt.Errorf("Remove PDR children: %w", err)
+		}
+		pdrIDIE := pfcpie.Find(children, pfcpie.TypePDRID)
+		if pdrIDIE == nil {
+			return nil, nil, fmt.Errorf("Remove PDR missing PDR ID")
+		}
+		pdrID, _ := pdrIDIE.PDRIDValue()
+		found := false
+		out := candidate.PDRs[:0]
+		for _, pdr := range candidate.PDRs {
+			if pdr.ID == pdrID {
+				found = true
+				continue
+			}
+			out = append(out, pdr)
+		}
+		if !found {
+			return nil, nil, fmt.Errorf("PDR %d does not exist", pdrID)
+		}
+		candidate.PDRs = out
+	}
+
+	for _, rfarIE := range req.RemoveFARs {
+		children, err := rfarIE.Children()
+		if err != nil {
+			return nil, nil, fmt.Errorf("Remove FAR children: %w", err)
+		}
+		farIDIE := pfcpie.Find(children, pfcpie.TypeFARID)
+		if farIDIE == nil {
+			return nil, nil, fmt.Errorf("Remove FAR missing FAR ID")
+		}
+		farID, _ := farIDIE.FARIDValue()
+		found := false
+		out := candidate.FARs[:0]
+		for _, far := range candidate.FARs {
+			if far.ID == farID {
+				found = true
+				continue
+			}
+			out = append(out, far)
+		}
+		if !found {
+			return nil, nil, fmt.Errorf("FAR %d does not exist", farID)
+		}
+		candidate.FARs = out
+	}
+
+	updates, err := parseUpdateFARs(req.UpdateFARs, candidate.FARs)
+	if err != nil {
+		return nil, nil, err
+	}
+	endMarkers, err := applyFARUpdatesToCandidate(candidate.FARs, updates)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	if s.bpfInstall != nil {
+		if err := s.bpfInstall.UpdateSession(candidate); err != nil {
+			return nil, nil, err
+		}
+	}
+
+	sess.PDRs = candidate.PDRs
+	sess.FARs = candidate.FARs
+	return createdPDRIEs, endMarkers, nil
+}
+
+func parseCreatePDR(cpdrIE *pfcpie.IE) (sgwusession.PDR, bool, error) {
+	children, err := cpdrIE.Children()
+	if err != nil {
+		return sgwusession.PDR{}, false, fmt.Errorf("Create PDR children: %w", err)
+	}
+	pdrIDIE := pfcpie.Find(children, pfcpie.TypePDRID)
+	precIE := pfcpie.Find(children, pfcpie.TypePrecedence)
+	farIDIE := pfcpie.Find(children, pfcpie.TypeFARID)
+	pdiIE := pfcpie.Find(children, pfcpie.TypePDI)
+	if pdrIDIE == nil || precIE == nil || farIDIE == nil || pdiIE == nil {
+		return sgwusession.PDR{}, false, fmt.Errorf("Create PDR missing PDR ID, Precedence, FAR ID, or PDI")
+	}
+	pdrID, _ := pdrIDIE.PDRIDValue()
+	farID, _ := farIDIE.FARIDValue()
+	pdiChildren, err := pdiIE.Children()
+	if err != nil {
+		return sgwusession.PDR{}, false, fmt.Errorf("PDI children: %w", err)
+	}
+	srcIfaceIE := pfcpie.Find(pdiChildren, pfcpie.TypeSourceInterface)
+	if srcIfaceIE == nil {
+		return sgwusession.PDR{}, false, fmt.Errorf("PDI missing Source Interface")
+	}
+	srcIface, _ := srcIfaceIE.SourceInterfaceValue()
+	pdr := sgwusession.PDR{ID: pdrID, FARID: farID, SourceInterface: srcIface}
+	if len(precIE.Value) >= 4 {
+		pdr.Precedence = (uint32(precIE.Value[0]) << 24) | (uint32(precIE.Value[1]) << 16) |
+			(uint32(precIE.Value[2]) << 8) | uint32(precIE.Value[3])
+	}
+	choose := false
+	if fteidIE := pfcpie.Find(pdiChildren, pfcpie.TypeFTEID); fteidIE != nil {
+		fteid, isCH, err := fteidIE.FTEIDPFCPValue()
+		if err != nil {
+			return sgwusession.PDR{}, false, fmt.Errorf("PDI F-TEID: %w", err)
+		}
+		choose = isCH
+		if !isCH {
+			pdr.LocalTEID = fteid.TEID
+			pdr.LocalIP = fteid.IPv4
+		}
+	}
+	return pdr, choose, nil
+}
+
+func parseCreateFAR(cfarIE *pfcpie.IE) (sgwusession.FAR, error) {
+	children, err := cfarIE.Children()
+	if err != nil {
+		return sgwusession.FAR{}, fmt.Errorf("Create FAR children: %w", err)
+	}
+	farIDIE := pfcpie.Find(children, pfcpie.TypeFARID)
+	aaIE := pfcpie.Find(children, pfcpie.TypeApplyAction)
+	if farIDIE == nil || aaIE == nil {
+		return sgwusession.FAR{}, fmt.Errorf("Create FAR missing FAR ID or Apply Action")
+	}
+	farID, _ := farIDIE.FARIDValue()
+	applyAction, _ := aaIE.ApplyActionValue()
+	far := sgwusession.FAR{ID: farID, ApplyAction: applyAction}
+	if applyAction&pfcpie.ApplyActionFORW == 0 {
+		return far, nil
+	}
+	fpIE := pfcpie.Find(children, pfcpie.TypeForwardingParameters)
+	if fpIE == nil {
+		return sgwusession.FAR{}, fmt.Errorf("Create FAR with FORW missing Forwarding Parameters")
+	}
+	fpChildren, err := fpIE.Children()
+	if err != nil {
+		return sgwusession.FAR{}, fmt.Errorf("Forwarding Parameters children: %w", err)
+	}
+	dstIfaceIE := pfcpie.Find(fpChildren, pfcpie.TypeDestinationInterface)
+	if dstIfaceIE == nil {
+		return sgwusession.FAR{}, fmt.Errorf("Forwarding Parameters missing Destination Interface")
+	}
+	far.DestInterface, _ = dstIfaceIE.DestinationInterfaceValue()
+	if ohcIE := pfcpie.Find(fpChildren, pfcpie.TypeOuterHeaderCreation); ohcIE != nil {
+		ohc, err := ohcIE.OuterHeaderCreationValue()
+		if err != nil {
+			return sgwusession.FAR{}, err
+		}
+		far.OuterTEID = ohc.TEID
+		far.OuterIP = ohc.IPv4
+	}
+	return far, nil
+}
+
+func parseUpdateFARs(updateFARs []*pfcpie.IE, fars []sgwusession.FAR) ([]parsedFARUpdate, error) {
+	var updates []parsedFARUpdate
+	for _, ufarIE := range updateFARs {
+		children, cErr := ufarIE.Children()
+		if cErr != nil {
+			return nil, fmt.Errorf("Update FAR children: %w", cErr)
+		}
+		farIDIE := pfcpie.Find(children, pfcpie.TypeFARID)
+		if farIDIE == nil {
+			return nil, fmt.Errorf("Update FAR missing FAR ID")
+		}
+		farID, _ := farIDIE.FARIDValue()
+		found := false
+		for _, f := range fars {
+			if f.ID == farID {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return nil, fmt.Errorf("FAR %d does not exist", farID)
+		}
+		updates = append(updates, parsedFARUpdate{
+			farID:       farID,
+			applyAction: pfcpie.Find(children, pfcpie.TypeApplyAction),
+			ufpIE:       pfcpie.Find(children, pfcpie.TypeUpdateForwardingParameters),
+		})
+	}
+	return updates, nil
+}
+
+// applyFARUpdates applies all FAR changes as one transaction per TS 29.244
+// Rel-15 §6.3.3.3: if any requested update is rejected, the existing PFCP
+// session context remains as if the request had not been received.
+func (s *Server) applyFARUpdates(sess *sgwusession.Session, updates []parsedFARUpdate) ([]endMarkerEvent, error) {
+	sess.Mu.Lock()
+	defer sess.Mu.Unlock()
+
+	candidate := &sgwusession.Session{
+		CPSEID:    sess.CPSEID,
+		UPSEID:    sess.UPSEID,
+		CPNodeKey: sess.CPNodeKey,
+		PDRs:      append([]sgwusession.PDR(nil), sess.PDRs...),
+		FARs:      append([]sgwusession.FAR(nil), sess.FARs...),
+	}
+
+	endMarkers, err := applyFARUpdatesToCandidate(candidate.FARs, updates)
+	if err != nil {
+		return nil, err
+	}
+
+	// TS 29.244 Rel-15 §6.3.3 requires acceptance only when all requested
+	// modifications are performed successfully. Updating BPF against the candidate
+	// before committing keeps memory and fast path aligned on failure.
+	if s.bpfInstall != nil {
+		if err := s.bpfInstall.UpdateSession(candidate); err != nil {
+			return nil, err
+		}
+	}
+
+	sess.FARs = candidate.FARs
+	return endMarkers, nil
+}
+
+func applyFARUpdatesToCandidate(fars []sgwusession.FAR, updates []parsedFARUpdate) ([]endMarkerEvent, error) {
+	var endMarkers []endMarkerEvent
+	for _, u := range updates {
+		found := false
+		for i := range fars {
+			if fars[i].ID != u.farID {
+				continue
+			}
+			found = true
+			oldOuterTEID := fars[i].OuterTEID
+			oldOuterIP := fars[i].OuterIP
+
+			if u.applyAction != nil {
+				applyAction, err := u.applyAction.ApplyActionValue()
+				if err != nil {
+					return nil, fmt.Errorf("apply action for FAR %d: %w", u.farID, err)
+				}
+				fars[i].ApplyAction = applyAction
+			}
+			if u.ufpIE != nil {
+				fpChildren, err := u.ufpIE.Children()
+				if err != nil {
+					return nil, fmt.Errorf("update forwarding parameters for FAR %d: %w", u.farID, err)
+				}
+				if dstIE := pfcpie.Find(fpChildren, pfcpie.TypeDestinationInterface); dstIE != nil {
+					dstInterface, err := dstIE.DestinationInterfaceValue()
+					if err != nil {
+						return nil, fmt.Errorf("destination interface for FAR %d: %w", u.farID, err)
+					}
+					fars[i].DestInterface = dstInterface
+				}
+				if ohcIE := pfcpie.Find(fpChildren, pfcpie.TypeOuterHeaderCreation); ohcIE != nil {
+					ohc, err := ohcIE.OuterHeaderCreationValue()
+					if err != nil {
+						return nil, fmt.Errorf("outer header creation for FAR %d: %w", u.farID, err)
+					}
+					fars[i].OuterTEID = ohc.TEID
+					fars[i].OuterIP = ohc.IPv4
+				}
+			}
+
+			newOuterTEID := fars[i].OuterTEID
+			newOuterIP := fars[i].OuterIP
+			if oldOuterTEID != 0 && oldOuterIP.IsValid() &&
+				(oldOuterTEID != newOuterTEID || oldOuterIP != newOuterIP) {
+				endMarkers = append(endMarkers, endMarkerEvent{
+					farID: u.farID,
+					teid:  oldOuterTEID,
+					dstIP: oldOuterIP,
+				})
+			}
+			break
+		}
+		if !found {
+			return nil, fmt.Errorf("FAR %d does not exist", u.farID)
+		}
+	}
+	return endMarkers, nil
 }
 
 // handleSessionDeletion processes a PFCP Session Deletion Request
@@ -962,14 +1285,10 @@ func (s *Server) handleAssociationRelease(conn *pfcptransport.Conn, addr *net.UD
 		return
 	}
 
-	peerKey := nodeIDKey(req.NodeID)
-	if peerKey == "" {
-		peerKey = "addr:" + addr.String()
-	}
+	peerKey := cpNodeKey(req.NodeID, addr)
 
 	// Delete all sessions for the peer (AUD-02 pattern: return sessions so BPF can be cleaned up).
-	heartbeatKey := "addr:" + addr.String()
-	deleted := s.sessions.DeleteByCPNodeKey(heartbeatKey)
+	deleted := s.sessions.DeleteByCPNodeKey(peerKey)
 	s.log.Info("PFCP AssociationReleaseRequest: sessions deleted",
 		"from", addr, "peer", peerKey, "sessions", len(deleted))
 	if s.bpfInstall != nil {
@@ -1082,4 +1401,32 @@ func extractIPv4(addrPort string) (net.IP, error) {
 		return nil, fmt.Errorf("PFCP Node ID requires IPv4, got: %q", host)
 	}
 	return v4, nil
+}
+
+// localGTPUIPForSource maps a PFCP PDR Source Interface to the SGW-U local
+// GTP-U address that must be returned in Created PDR F-TEID when CHOOSE is set.
+//
+// TS 29.244 Rel-15 §5.5.3: "The Source Interface IE indicates for which
+// interface the F-TEID is to be assigned." For this SGW-U, Access means S1-U
+// and Core means S5/S8-U.
+func (s *Server) localGTPUIPForSource(sourceInterface uint8) (netip.Addr, error) {
+	switch sourceInterface {
+	case pfcpie.SourceInterfaceAccess:
+		return s.accessIP, nil
+	case pfcpie.SourceInterfaceCore:
+		return s.coreIP, nil
+	default:
+		return netip.Addr{}, fmt.Errorf("unsupported Source Interface %d", sourceInterface)
+	}
+}
+
+func (s *Server) newCreatedPDRForSource(pdrID uint16, teid uint32, sourceInterface uint8) (netip.Addr, *pfcpie.IE, error) {
+	localFTEIDIP, err := s.localGTPUIPForSource(sourceInterface)
+	if err != nil {
+		return netip.Addr{}, nil, err
+	}
+	return localFTEIDIP, pfcpie.NewCreatedPDR(
+		pfcpie.NewPDRID(pdrID),
+		pfcpie.NewFTEIDv4(teid, localFTEIDIP),
+	), nil
 }

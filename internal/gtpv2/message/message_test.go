@@ -1,6 +1,7 @@
 package message_test
 
 import (
+	"bytes"
 	"encoding/binary"
 	"errors"
 	"net/netip"
@@ -104,8 +105,159 @@ func TestMessageLengthValidation(t *testing.T) {
 	}
 }
 
+func TestSplitFramesPiggybackedCreateBearerRequest(t *testing.T) {
+	primaryHdr := message.Header{
+		Version:        2,
+		PiggyBacked:    true,
+		HasTEID:        true,
+		MessageType:    message.MsgTypeCreateSessionResponse,
+		TEID:           0x01020304,
+		SequenceNumber: 0x010203,
+	}
+	primary, err := message.Marshal(primaryHdr, []*ie.IE{
+		ie.NewCause(ie.CauseRequestAccepted, 0, 0, 0, nil),
+	})
+	if err != nil {
+		t.Fatalf("Marshal primary response: %v", err)
+	}
+
+	piggyHdr := message.Header{
+		Version:        2,
+		HasTEID:        true,
+		MessageType:    message.MsgTypeCreateBearerRequest,
+		TEID:           0x11223344,
+		SequenceNumber: 0x010204,
+	}
+	piggy, err := message.Marshal(piggyHdr, []*ie.IE{
+		ie.NewEBI(5),
+		ie.NewBearerContext(0,
+			ie.NewEBI(6),
+			ie.NewBearerQoS(0, 9, 0, 5, 0, 0, 0, 0),
+		),
+	})
+	if err != nil {
+		t.Fatalf("Marshal piggybacked request: %v", err)
+	}
+
+	frames, err := message.SplitFrames(append(primary, piggy...))
+	if err != nil {
+		t.Fatalf("SplitFrames: %v", err)
+	}
+	if len(frames) != 2 {
+		t.Fatalf("frames = %d; want 2", len(frames))
+	}
+	if frames[0].Header.MessageType != message.MsgTypeCreateSessionResponse {
+		t.Fatalf("frame[0] type = %d; want Create Session Response", frames[0].Header.MessageType)
+	}
+	if frames[1].Header.MessageType != message.MsgTypeCreateBearerRequest {
+		t.Fatalf("frame[1] type = %d; want Create Bearer Request", frames[1].Header.MessageType)
+	}
+	if !bytes.Equal(frames[0].Raw, primary) {
+		t.Fatalf("primary raw was not bounded to first message")
+	}
+	if !bytes.Equal(frames[1].Raw, piggy) {
+		t.Fatalf("piggy raw mismatch")
+	}
+	if frames[0].End != len(primary) || frames[1].Start != len(primary) {
+		t.Fatalf("frame boundaries = [%d,%d] [%d,%d]; primary len=%d",
+			frames[0].Start, frames[0].End, frames[1].Start, frames[1].End, len(primary))
+	}
+}
+
+func TestMarshalPiggybackedCreateSessionResponseWithCreateBearerRequest(t *testing.T) {
+	primary, err := message.Marshal(message.Header{
+		Version:        2,
+		HasTEID:        true,
+		MessageType:    message.MsgTypeCreateSessionResponse,
+		TEID:           0x01020304,
+		SequenceNumber: 0x010203,
+	}, []*ie.IE{
+		ie.NewCause(ie.CauseRequestAccepted, 0, 0, 0, nil),
+	})
+	if err != nil {
+		t.Fatalf("Marshal primary response: %v", err)
+	}
+	piggy, err := message.Marshal(message.Header{
+		Version:        2,
+		HasTEID:        true,
+		MessageType:    message.MsgTypeCreateBearerRequest,
+		TEID:           0x11223344,
+		SequenceNumber: 0x010204,
+	}, []*ie.IE{
+		ie.NewEBI(6),
+		ie.NewBearerContext(0,
+			ie.NewEBI(0),
+			ie.NewBearerTFT([]byte{0x21, 0x01, 0x02}),
+			ie.NewFTEID(1, ie.IFTypeS5S8UPGW, 0x55667788, netip.MustParseAddr("10.90.252.92")),
+			ie.NewBearerQoS(1, 5, 0, 5, 128000, 128000, 64000, 64000),
+		),
+	})
+	if err != nil {
+		t.Fatalf("Marshal piggyback request: %v", err)
+	}
+
+	out, err := message.MarshalPiggybacked(primary, piggy)
+	if err != nil {
+		t.Fatalf("MarshalPiggybacked: %v", err)
+	}
+	frames, err := message.SplitFrames(out)
+	if err != nil {
+		t.Fatalf("SplitFrames: %v", err)
+	}
+	if len(frames) != 2 {
+		t.Fatalf("frames = %d; want 2", len(frames))
+	}
+	if !frames[0].Header.PiggyBacked {
+		t.Fatal("primary P flag is clear; want set when another message follows")
+	}
+	if frames[1].Header.PiggyBacked {
+		t.Fatal("final piggybacked message P flag is set; want clear")
+	}
+	if frames[0].Header.MessageType != message.MsgTypeCreateSessionResponse {
+		t.Fatalf("frame[0] type = %d; want Create Session Response", frames[0].Header.MessageType)
+	}
+	if frames[1].Header.MessageType != message.MsgTypeCreateBearerRequest {
+		t.Fatalf("frame[1] type = %d; want Create Bearer Request", frames[1].Header.MessageType)
+	}
+	if frames[0].Header.SequenceNumber != 0x010203 || frames[1].Header.SequenceNumber != 0x010204 {
+		t.Fatalf("sequences = 0x%06X/0x%06X; want 0x010203/0x010204",
+			frames[0].Header.SequenceNumber, frames[1].Header.SequenceNumber)
+	}
+	if frames[0].End != len(primary) || frames[1].Start != len(primary) || frames[1].End != len(out) {
+		t.Fatalf("frame boundaries = [%d,%d] [%d,%d]; primary len=%d total=%d",
+			frames[0].Start, frames[0].End, frames[1].Start, frames[1].End, len(primary), len(out))
+	}
+	if int(frames[0].Header.Length)+4 != len(primary) {
+		t.Fatalf("primary length field covers %d bytes; want %d", int(frames[0].Header.Length)+4, len(primary))
+	}
+	if int(frames[1].Header.Length)+4 != len(piggy) {
+		t.Fatalf("piggyback length field covers %d bytes; want %d", int(frames[1].Header.Length)+4, len(piggy))
+	}
+}
+
+func TestSplitFramesRejectsMissingPiggybackedMessage(t *testing.T) {
+	primary, err := message.Marshal(message.Header{
+		Version:        2,
+		PiggyBacked:    true,
+		HasTEID:        true,
+		MessageType:    message.MsgTypeCreateSessionResponse,
+		TEID:           0x01020304,
+		SequenceNumber: 0x010203,
+	}, []*ie.IE{ie.NewCause(ie.CauseRequestAccepted, 0, 0, 0, nil)})
+	if err != nil {
+		t.Fatalf("Marshal primary response: %v", err)
+	}
+
+	_, err = message.SplitFrames(primary)
+	if err == nil {
+		t.Fatal("SplitFrames succeeded for P flag without following message")
+	}
+}
+
 // TestHeaderMPFlagWire verifies MP flag and Message Priority encoding in the GTPv2-C
-// header per TS 29.274 Rel-15 §5.1. Per C14: raw wire tests required.
+// header per TS 29.274 §5.4 Figure 5.4-1 (TEID-bearing variant). Per C14: raw wire tests
+// required. Per C17: TestHeaderNoTEIDIgnoresMP below covers the other flag-bit state —
+// the §5.3 (no-TEID) variant, where bit 3 is plain spare and there is no MP subfield at all.
 func TestHeaderMPFlagWire(t *testing.T) {
 	// With TEID: octet 1 bit 2 = MP; octet 12 bits 7-4 = priority.
 	h := message.Header{
@@ -142,6 +294,37 @@ func TestHeaderMPFlagWire(t *testing.T) {
 	}
 	if buf2[11] != 0x00 {
 		t.Errorf("octet 12 spare not zero when MP=false: 0x%02X", buf2[11])
+	}
+}
+
+// TestHeaderNoTEIDIgnoresMP verifies that the no-TEID header variant (§5.3 Figure 5.3-1:
+// Echo Request/Response, Version Not Supported Indication) never sets or interprets the
+// MP bit or a Message-Priority subfield — bit 3 of octet 1 and the trailing octet are
+// plain spare in that figure (no MP CR applied to it), unlike the TEID-bearing §5.4
+// variant covered by TestHeaderMPFlagWire above. Found and fixed 2026-06-23: ParseHeader/
+// MarshalHeader previously read/wrote MP unconditionally regardless of HasTEID.
+func TestHeaderNoTEIDIgnoresMP(t *testing.T) {
+	h := message.Header{
+		Version: 2, HasTEID: false, MP: true, MessagePriority: 9,
+		MessageType: message.MsgTypeEchoRequest, SequenceNumber: 1,
+	}
+	buf := message.MarshalHeader(h, 0)
+	if buf[0]&0x04 != 0 {
+		t.Errorf("octet 1 bit 3 (spare per §5.3) set despite no MP subfield in this variant: 0x%02X", buf[0])
+	}
+	if buf[7] != 0x00 {
+		t.Errorf("trailing octet (plain Spare per §5.3) not zero: 0x%02X", buf[7])
+	}
+
+	got, _, err := message.ParseHeader(buf)
+	if err != nil {
+		t.Fatalf("ParseHeader: %v", err)
+	}
+	if got.MP {
+		t.Error("MP parsed as true for no-TEID header; §5.3 defines no MP bit for this variant")
+	}
+	if got.MessagePriority != 0 {
+		t.Errorf("MessagePriority: got %d; want 0 (no subfield in §5.3 variant)", got.MessagePriority)
 	}
 }
 
@@ -381,9 +564,57 @@ func TestCreateSessionResponseRoundtrip(t *testing.T) {
 	}
 }
 
-// TestCreateSessionRequestMissingPAA verifies that CSReq without PAA is rejected.
-// Per TS 29.274 Rel-15 Table 7.2.1-1, PAA is Mandatory (M) on S11.
-func TestCreateSessionRequestMissingPAA(t *testing.T) {
+func TestCreateSessionResponsePreservesPolicyContextIEs(t *testing.T) {
+	h := message.Header{
+		Version:        2,
+		HasTEID:        true,
+		MessageType:    message.MsgTypeCreateSessionResponse,
+		TEID:           0x11223344,
+		SequenceNumber: 1,
+	}
+	pco := &ie.IE{Type: ie.TypePCO, Value: []byte{0x80, 0x80, 0x21}}
+	apnRestriction := &ie.IE{Type: ie.TypeAPNRestriction, Value: []byte{0x00}}
+	chargingID := &ie.IE{Type: ie.TypeChargingID, Value: []byte{0x01, 0x02, 0x03, 0x04}}
+	raw, err := message.Marshal(h, []*ie.IE{
+		ie.NewCause(ie.CauseRequestAccepted, 0, 0, 0, nil),
+		ie.NewFTEID(1, ie.IFTypeS5S8CPGW, 0x01020304, netip.MustParseAddr("10.0.0.1")),
+		ie.NewPAA(ie.PDNTypeIPv4, netip.MustParseAddr("100.64.0.1")),
+		ie.NewAMBR(256000, 256000),
+		pco,
+		apnRestriction,
+		chargingID,
+		ie.NewBearerContext(0,
+			ie.NewEBI(5),
+			ie.NewCause(ie.CauseRequestAccepted, 0, 0, 0, nil),
+			ie.NewFTEID(2, ie.IFTypeS5S8UPGW, 0x11121314, netip.MustParseAddr("10.0.0.2")),
+		),
+	})
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	parsedH, parsedIEs, err := message.Parse(raw)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	resp, err := message.ParseCreateSessionResponse(parsedH, parsedIEs)
+	if err != nil {
+		t.Fatalf("ParseCreateSessionResponse: %v", err)
+	}
+	if resp.PCO == nil || string(resp.PCO.Value) != string(pco.Value) {
+		t.Fatalf("PCO not preserved: %#v", resp.PCO)
+	}
+	if resp.APNRestriction == nil || string(resp.APNRestriction.Value) != string(apnRestriction.Value) {
+		t.Fatalf("APNRestriction not preserved: %#v", resp.APNRestriction)
+	}
+	if resp.ChargingID == nil || string(resp.ChargingID.Value) != string(chargingID.Value) {
+		t.Fatalf("ChargingID not preserved: %#v", resp.ChargingID)
+	}
+}
+
+// TestCreateSessionRequestMissingPAAAccepted verifies that CSReq without PAA is
+// accepted. PAA is conditional on S11/S5/S8, and Open5GS does not reject the
+// S11 Create Session Request solely because it is absent.
+func TestCreateSessionRequestMissingPAAAccepted(t *testing.T) {
 	h := message.Header{Version: 2, HasTEID: true, MessageType: message.MsgTypeCreateSessionRequest}
 	ies := []*ie.IE{
 		ie.NewIMSI("311430000000001"),
@@ -397,15 +628,19 @@ func TestCreateSessionRequestMissingPAA(t *testing.T) {
 		ie.NewAMBR(256000, 256000),
 		ie.NewBearerContext(0, ie.NewEBI(5), ie.NewBearerQoS(0, 9, 0, 9, 0, 0, 0, 0)),
 	}
-	_, err := message.ParseCreateSessionRequest(h, ies)
-	if err == nil {
-		t.Error("expected error for missing PAA (M per Rel-15 Table 7.2.1-1)")
+	req, err := message.ParseCreateSessionRequest(h, ies)
+	if err != nil {
+		t.Fatalf("ParseCreateSessionRequest: %v", err)
+	}
+	if req.PAA != nil {
+		t.Fatalf("PAA = %#v; want nil", req.PAA)
 	}
 }
 
-// TestCreateSessionRequestMissingAMBR verifies that CSReq without AMBR is rejected.
-// Per TS 29.274 Rel-15 Table 7.2.1-1, AMBR is Mandatory (M) on S11.
-func TestCreateSessionRequestMissingAMBR(t *testing.T) {
+// TestCreateSessionRequestMissingAMBRAccepted verifies that CSReq without AMBR
+// is accepted. AMBR is conditional on S11/S5/S8, and Open5GS tolerates it being
+// absent on the inbound S11 Create Session Request.
+func TestCreateSessionRequestMissingAMBRAccepted(t *testing.T) {
 	h := message.Header{Version: 2, HasTEID: true, MessageType: message.MsgTypeCreateSessionRequest}
 	ies := []*ie.IE{
 		ie.NewIMSI("311430000000001"),
@@ -419,9 +654,12 @@ func TestCreateSessionRequestMissingAMBR(t *testing.T) {
 		// AMBR omitted
 		ie.NewBearerContext(0, ie.NewEBI(5), ie.NewBearerQoS(0, 9, 0, 9, 0, 0, 0, 0)),
 	}
-	_, err := message.ParseCreateSessionRequest(h, ies)
-	if err == nil {
-		t.Error("expected error for missing AMBR (M per Rel-15 Table 7.2.1-1)")
+	req, err := message.ParseCreateSessionRequest(h, ies)
+	if err != nil {
+		t.Fatalf("ParseCreateSessionRequest: %v", err)
+	}
+	if req.AMBR != nil {
+		t.Fatalf("AMBR = %#v; want nil", req.AMBR)
 	}
 }
 
@@ -488,13 +726,14 @@ func TestDeleteSessionRequestMissingEBI(t *testing.T) {
 // TS 29.274 Rel-15 §7.2.8 / Table 7.2.8-1 and Table 7.2.8-2.
 //
 // Compliance checks exercised:
-//   C4:  Response header TEID = peerTEID (MME's S11 TEID), not the request TEID.
-//        Per TS 29.274 §5.5.1: TEID in response must be the one received from the peer.
-//   C5:  MessageType = 35 (MsgTypeModifyBearerResponse per Table 6.1-1), not request type 34.
-//   C10: Bearer Context Modified IE at instance=0 per Table 7.2.8-1:
-//        "Bearer Contexts modified | C | ... | Bearer Context | 0".
-//   C10: S1-U SGW F-TEID at instance=0 within Bearer Context per Table 7.2.8-2:
-//        "S1-U SGW F-TEID | C | ... | F-TEID | 0".
+//
+//	C4:  Response header TEID = peerTEID (MME's S11 TEID), not the request TEID.
+//	     Per TS 29.274 §5.5.1: TEID in response must be the one received from the peer.
+//	C5:  MessageType = 35 (MsgTypeModifyBearerResponse per Table 6.1-1), not request type 34.
+//	C10: Bearer Context Modified IE at instance=0 per Table 7.2.8-1:
+//	     "Bearer Contexts modified | C | ... | Bearer Context | 0".
+//	C10: S1-U SGW F-TEID at instance=0 within Bearer Context per Table 7.2.8-2:
+//	     "S1-U SGW F-TEID | C | ... | F-TEID | 0".
 func TestModifyBearerResponseWire(t *testing.T) {
 	// Request TEID 0x12345678 is SGW's own S11 TEID used to route the MBReq inbound.
 	// Response header must use peerTEID 0xAABBCCDD (the MME's S11 TEID), not 0x12345678.
@@ -674,6 +913,34 @@ func TestModifyBearerRequestMissingBearerContext(t *testing.T) {
 	}
 	if len(req.BearerContexts) != 0 {
 		t.Error("BearerContexts should be empty when not present")
+	}
+}
+
+func TestResponseTypeForRel15RequestPairs(t *testing.T) {
+	tests := []struct {
+		name string
+		req  uint8
+		resp uint8
+	}{
+		{"Echo", message.MsgTypeEchoRequest, message.MsgTypeEchoResponse},
+		{"CreateSession", message.MsgTypeCreateSessionRequest, message.MsgTypeCreateSessionResponse},
+		{"ModifyBearer", message.MsgTypeModifyBearerRequest, message.MsgTypeModifyBearerResponse},
+		{"DeleteSession", message.MsgTypeDeleteSessionRequest, message.MsgTypeDeleteSessionResponse},
+		{"CreateBearer", message.MsgTypeCreateBearerRequest, message.MsgTypeCreateBearerResponse},
+		{"UpdateBearer", message.MsgTypeUpdateBearerRequest, message.MsgTypeUpdateBearerResponse},
+		{"DeleteBearer", message.MsgTypeDeleteBearerRequest, message.MsgTypeDeleteBearerResponse},
+		{"ReleaseAccessBearers", message.MsgTypeReleaseAccessBearersRequest, message.MsgTypeReleaseAccessBearersResponse},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, ok := message.ResponseTypeFor(tc.req)
+			if !ok || got != tc.resp {
+				t.Fatalf("ResponseTypeFor(%d) = (%d, %v), want (%d, true)", tc.req, got, ok, tc.resp)
+			}
+		})
+	}
+	if got, ok := message.ResponseTypeFor(255); ok {
+		t.Fatalf("ResponseTypeFor(255) = (%d, true), want unknown", got)
 	}
 }
 

@@ -9,10 +9,10 @@ import (
 	"vectorcore-sgw/internal/pfcp/ie"
 )
 
-// Message type codes per TS 29.244 Rel-15 Table 7.1-1.
+// Message type codes per TS 29.244 Rel-15 Table 7.3-1.
 // Node-level types (confirmed by re-audit):
 //
-// Table 7.1-1 rows (extracted from docs/specs/29244-fa0.docx):
+// Table 7.3-1 rows (extracted from docs/specs/29244-fa0.docx):
 //
 //	"1  | PFCP Heartbeat Request"
 //	"2  | PFCP Heartbeat Response"
@@ -23,37 +23,38 @@ import (
 //	"12 | PFCP Node Report Request"
 //	"13 | PFCP Node Report Response"
 const (
-	MsgTypeHeartbeatRequest          uint8 = 1  // Table 7.1-1: "1 | PFCP Heartbeat Request"
-	MsgTypeHeartbeatResponse         uint8 = 2  // Table 7.1-1: "2 | PFCP Heartbeat Response"
-	MsgTypeAssociationSetupRequest   uint8 = 5  // Table 7.1-1: "5 | PFCP Association Setup Request"
-	MsgTypeAssociationSetupResponse  uint8 = 6  // Table 7.1-1: "6 | PFCP Association Setup Response"
-	MsgTypeAssociationReleaseRequest uint8 = 9  // Table 7.1-1: "9 | PFCP Association Release Request"
-	MsgTypeAssociationReleaseResponse uint8 = 10 // Table 7.1-1: "10 | PFCP Association Release Response"
-	MsgTypeNodeReportRequest         uint8 = 12 // Table 7.1-1: "12 | PFCP Node Report Request"
-	MsgTypeNodeReportResponse        uint8 = 13 // Table 7.1-1: "13 | PFCP Node Report Response"
+	MsgTypeHeartbeatRequest           uint8 = 1  // Table 7.3-1: "1 | PFCP Heartbeat Request"
+	MsgTypeHeartbeatResponse          uint8 = 2  // Table 7.3-1: "2 | PFCP Heartbeat Response"
+	MsgTypeAssociationSetupRequest    uint8 = 5  // Table 7.3-1: "5 | PFCP Association Setup Request"
+	MsgTypeAssociationSetupResponse   uint8 = 6  // Table 7.3-1: "6 | PFCP Association Setup Response"
+	MsgTypeAssociationReleaseRequest  uint8 = 9  // Table 7.3-1: "9 | PFCP Association Release Request"
+	MsgTypeAssociationReleaseResponse uint8 = 10 // Table 7.3-1: "10 | PFCP Association Release Response"
+	MsgTypeNodeReportRequest          uint8 = 12 // Table 7.3-1: "12 | PFCP Node Report Request"
+	MsgTypeNodeReportResponse         uint8 = 13 // Table 7.3-1: "13 | PFCP Node Report Response"
 )
 
-// Session-level message type codes per TS 29.244 Rel-15 Table 7.1-1
+// Session-level message type codes per TS 29.244 Rel-15 Table 7.3-1
 // (extracted from docs/specs/29244-fa0.docx, Table 7):
-//   "50 | PFCP Session Establishment Request | X"
-//   "51 | PFCP Session Establishment Response | X"
-//   "52 | PFCP Session Modification Request | X"
-//   "53 | PFCP Session Modification Response | X"
-//   "54 | PFCP Session Deletion Request | X"
-//   "55 | PFCP Session Deletion Response | X"
+//
+//	"50 | PFCP Session Establishment Request | X"
+//	"51 | PFCP Session Establishment Response | X"
+//	"52 | PFCP Session Modification Request | X"
+//	"53 | PFCP Session Modification Response | X"
+//	"54 | PFCP Session Deletion Request | X"
+//	"55 | PFCP Session Deletion Response | X"
 const (
-	MsgTypeSessionEstablishmentRequest  uint8 = 50 // Table 7.1-1 row: "50 | PFCP Session Establishment Request"
-	MsgTypeSessionEstablishmentResponse uint8 = 51 // Table 7.1-1 row: "51 | PFCP Session Establishment Response"
-	MsgTypeSessionModificationRequest   uint8 = 52 // Table 7.1-1 row: "52 | PFCP Session Modification Request"
-	MsgTypeSessionModificationResponse  uint8 = 53 // Table 7.1-1 row: "53 | PFCP Session Modification Response"
-	MsgTypeSessionDeletionRequest       uint8 = 54 // Table 7.1-1 row: "54 | PFCP Session Deletion Request"
-	MsgTypeSessionDeletionResponse      uint8 = 55 // Table 7.1-1 row: "55 | PFCP Session Deletion Response"
+	MsgTypeSessionEstablishmentRequest  uint8 = 50 // Table 7.3-1 row: "50 | PFCP Session Establishment Request"
+	MsgTypeSessionEstablishmentResponse uint8 = 51 // Table 7.3-1 row: "51 | PFCP Session Establishment Response"
+	MsgTypeSessionModificationRequest   uint8 = 52 // Table 7.3-1 row: "52 | PFCP Session Modification Request"
+	MsgTypeSessionModificationResponse  uint8 = 53 // Table 7.3-1 row: "53 | PFCP Session Modification Response"
+	MsgTypeSessionDeletionRequest       uint8 = 54 // Table 7.3-1 row: "54 | PFCP Session Deletion Request"
+	MsgTypeSessionDeletionResponse      uint8 = 55 // Table 7.3-1 row: "55 | PFCP Session Deletion Response"
 )
 
 const (
-	pfcpVersion          uint8 = 1
-	headerLenNodeLevel         = 8  // S=0: flags(1)|type(1)|len(2)|seq(3)|spare(1)
-	headerLenSessionLevel      = 16 // S=1: flags(1)|type(1)|len(2)|SEID(8)|seq(3)|spare(1)
+	pfcpVersion           uint8 = 1
+	headerLenNodeLevel          = 8  // S=0: flags(1)|type(1)|len(2)|seq(3)|spare(1)
+	headerLenSessionLevel       = 16 // S=1: flags(1)|type(1)|len(2)|SEID(8)|seq(3)|spare(1)
 )
 
 // Header is a parsed PFCP message header per TS 29.244 Rel-15 §7.1.
@@ -80,7 +81,7 @@ const (
 //	Octet 16:    Spare
 type Header struct {
 	Version        uint8
-	HasSEID        bool   // S flag; false for all Phase 4 node-level messages
+	HasSEID        bool // S flag; false for all Phase 4 node-level messages
 	MessageType    uint8
 	Length         uint16
 	SEID           uint64 // populated only when HasSEID=true (Phase 5+ session messages)
@@ -195,16 +196,21 @@ func Parse(b []byte) (Header, []*ie.IE, error) {
 }
 
 // AssociationSetupRequest is a parsed PFCP Association Setup Request
-// per TS 29.244 Rel-15 §7.4.1 Table 7.4.1-1.
+// per TS 29.244 Rel-15 §7.4.4.1 Table 7.4.4.1-1.
+// FIXED 2026-06-23: was cited §7.4.1/Table 7.4.1-1 — §7.4.1 is actually "General"
+// (a generic intro clause for all node messages), not Association Setup. The real
+// table is 7.4.4.1-1. Also CPFeatures was cited "CO"; the table's condition column
+// literally reads "C": "This IE shall be present if the CP function sends this
+// message and the CP function supports at least one CP feature defined in this IE."
 type AssociationSetupRequest struct {
 	Header
-	NodeID            *ie.IE // M per Table 7.4.1-1
-	RecoveryTimeStamp *ie.IE // M per Table 7.4.1-1
-	CPFeatures        *ie.IE // CO per Table 7.4.1-1
+	NodeID            *ie.IE // M per Table 7.4.4.1-1
+	RecoveryTimeStamp *ie.IE // M per Table 7.4.4.1-1
+	CPFeatures        *ie.IE // C per Table 7.4.4.1-1
 }
 
 // ParseAssociationSetupRequest decodes raw PFCP bytes.
-// Validates message type, S=0 (node-level), and M-IEs per Table 7.4.1-1.
+// Validates message type, S=0 (node-level), and M-IEs per Table 7.4.4.1-1.
 func ParseAssociationSetupRequest(b []byte) (*AssociationSetupRequest, error) {
 	h, ies, err := Parse(b)
 	if err != nil {
@@ -229,27 +235,30 @@ func ParseAssociationSetupRequest(b []byte) (*AssociationSetupRequest, error) {
 		}
 	}
 	if req.NodeID == nil {
-		return nil, fmt.Errorf("AssociationSetupRequest: missing mandatory Node ID IE (Table 7.4.1-1)")
+		return nil, fmt.Errorf("AssociationSetupRequest: missing mandatory Node ID IE (Table 7.4.4.1-1)")
 	}
 	if req.RecoveryTimeStamp == nil {
-		return nil, fmt.Errorf("AssociationSetupRequest: missing mandatory Recovery Time Stamp IE (Table 7.4.1-1)")
+		return nil, fmt.Errorf("AssociationSetupRequest: missing mandatory Recovery Time Stamp IE (Table 7.4.4.1-1)")
 	}
 	return req, nil
 }
 
 // AssociationSetupResponse is a parsed PFCP Association Setup Response
-// per TS 29.244 Rel-15 §7.4.2 Table 7.4.2-1.
+// per TS 29.244 Rel-15 §7.4.4.2 Table 7.4.4.2-1.
+// FIXED 2026-06-23: was cited §7.4.2/Table 7.4.2-1 (wrong section — see
+// AssociationSetupRequest's comment above). UPFeatures/CPFeatures were cited "CO";
+// the table's condition column for both literally reads "C".
 type AssociationSetupResponse struct {
 	Header
-	NodeID            *ie.IE // M per Table 7.4.2-1
-	Cause             *ie.IE // M per Table 7.4.2-1
-	RecoveryTimeStamp *ie.IE // M per Table 7.4.2-1
-	UPFeatures        *ie.IE // CO per Table 7.4.2-1
-	CPFeatures        *ie.IE // CO per Table 7.4.2-1
+	NodeID            *ie.IE // M per Table 7.4.4.2-1
+	Cause             *ie.IE // M per Table 7.4.4.2-1
+	RecoveryTimeStamp *ie.IE // M per Table 7.4.4.2-1
+	UPFeatures        *ie.IE // C per Table 7.4.4.2-1
+	CPFeatures        *ie.IE // C per Table 7.4.4.2-1
 }
 
 // ParseAssociationSetupResponse decodes raw PFCP bytes.
-// Validates message type, S=0 (node-level), and M-IEs per Table 7.4.2-1.
+// Validates message type, S=0 (node-level), and M-IEs per Table 7.4.4.2-1.
 func ParseAssociationSetupResponse(b []byte) (*AssociationSetupResponse, error) {
 	h, ies, err := Parse(b)
 	if err != nil {
@@ -276,20 +285,22 @@ func ParseAssociationSetupResponse(b []byte) (*AssociationSetupResponse, error) 
 			resp.CPFeatures = i
 		}
 	}
-	// C11-equivalent: validate M-IEs on success path per Table 7.4.2-1.
+	// C11-equivalent: validate M-IEs on success path per Table 7.4.4.2-1.
 	if resp.NodeID == nil {
-		return nil, fmt.Errorf("AssociationSetupResponse: missing mandatory Node ID IE (Table 7.4.2-1)")
+		return nil, fmt.Errorf("AssociationSetupResponse: missing mandatory Node ID IE (Table 7.4.4.2-1)")
 	}
 	if resp.Cause == nil {
-		return nil, fmt.Errorf("AssociationSetupResponse: missing mandatory Cause IE (Table 7.4.2-1)")
+		return nil, fmt.Errorf("AssociationSetupResponse: missing mandatory Cause IE (Table 7.4.4.2-1)")
 	}
 	if resp.RecoveryTimeStamp == nil {
-		return nil, fmt.Errorf("AssociationSetupResponse: missing mandatory Recovery Time Stamp IE (Table 7.4.2-1)")
+		return nil, fmt.Errorf("AssociationSetupResponse: missing mandatory Recovery Time Stamp IE (Table 7.4.4.2-1)")
 	}
 	return resp, nil
 }
 
-// HeartbeatRequest is a parsed PFCP Heartbeat Request per TS 29.244 §7.2.2.
+// HeartbeatRequest is a parsed PFCP Heartbeat Request per TS 29.244 §7.4.2.1
+// Table 7.4.2.1-1 (corrected 2026-06-23 — §7.2.2 is "Message Header", the generic
+// header-format clause, not the Heartbeat message definition).
 type HeartbeatRequest struct {
 	Header
 	// RecoveryTimeStamp: M per TS 29.244 Rel-15 Tables 7.4.2.1-1 and 7.4.2.2-1.
@@ -324,7 +335,9 @@ func ParseHeartbeatRequest(b []byte) (*HeartbeatRequest, error) {
 	return req, nil
 }
 
-// HeartbeatResponse is a parsed PFCP Heartbeat Response per TS 29.244 §7.2.3.
+// HeartbeatResponse is a parsed PFCP Heartbeat Response per TS 29.244 §7.4.2.2
+// Table 7.4.2.2-1 (corrected 2026-06-23 — §7.2.3 is "Information Elements", a
+// generic IE-presence-rules clause, not the Heartbeat Response message definition).
 type HeartbeatResponse struct {
 	Header
 	// RecoveryTimeStamp: M per TS 29.244 Rel-15 Tables 7.4.2.1-1 and 7.4.2.2-1.
@@ -362,24 +375,24 @@ func ParseHeartbeatResponse(b []byte) (*HeartbeatResponse, error) {
 // ── Session-level messages (Phase 5) ─────────────────────────────────────────
 
 // SessionEstablishmentRequest is a parsed PFCP Session Establishment Request
-// per TS 29.244 Rel-15 §7.5.2 Table 7.5.2.2-1.
+// per TS 29.244 Rel-15 §7.5.2 Table 7.5.2.1-1.
 // The request is session-level (S=1, SEID field carries CP-SEID toward UP).
 // On the initial request the SEID field is 0 (UP has no session yet);
 // the CP F-SEID IE carries the SGW-C's assigned SEID and address.
 type SessionEstablishmentRequest struct {
 	Header
-	// NodeID: M per Table 7.5.2.2-1 — identifies the CP function
+	// NodeID: M per Table 7.5.2.1-1 — identifies the CP function
 	NodeID *ie.IE
-	// CPSEID: M per Table 7.5.2.2-1 — CP Function's F-SEID for this session
+	// CPSEID: M per Table 7.5.2.1-1 — CP Function's F-SEID for this session
 	CPSEID *ie.IE
-	// CreatePDRs: M (at least 1) per Table 7.5.2.2-1
+	// CreatePDRs: M (at least 1) per Table 7.5.2.1-1
 	CreatePDRs []*ie.IE
-	// CreateFARs: M (at least 1) per Table 7.5.2.2-1
+	// CreateFARs: M (at least 1) per Table 7.5.2.1-1
 	CreateFARs []*ie.IE
 }
 
 // ParseSessionEstablishmentRequest decodes raw PFCP bytes.
-// Validates message type, S=1 (session-level), SEID=0 (initial request), and M-IEs per Table 7.5.2.2-1.
+// Validates message type, S=1 (session-level), SEID=0 (initial request), and M-IEs per Table 7.5.2.1-1.
 func ParseSessionEstablishmentRequest(b []byte) (*SessionEstablishmentRequest, error) {
 	h, ies, err := Parse(b)
 	if err != nil {
@@ -392,10 +405,11 @@ func ParseSessionEstablishmentRequest(b []byte) (*SessionEstablishmentRequest, e
 	if h.MessageType != MsgTypeSessionEstablishmentRequest {
 		return nil, fmt.Errorf("SessionEstablishmentRequest: wrong message type %d (want %d)", h.MessageType, MsgTypeSessionEstablishmentRequest)
 	}
-	// Per TS 29.244 §7.5.2: "the SEID field in the PFCP Session Establishment Request
-	// message shall be set to 0" (CP has no UP session context yet).
+	// Per TS 29.244 §7.2.2.4.2 (fixed 2026-06-23, was miscited §7.5.2): "PFCP Session
+	// Establishment Request message on Sxa/Sxb/Sxc" is explicitly listed among the
+	// SEID=0 cases (CP has no UP session context yet).
 	if h.SEID != 0 {
-		return nil, fmt.Errorf("SessionEstablishmentRequest: initial SEID must be 0, got %d (§7.5.2)", h.SEID)
+		return nil, fmt.Errorf("SessionEstablishmentRequest: initial SEID must be 0, got %d (§7.2.2.4.2)", h.SEID)
 	}
 	req := &SessionEstablishmentRequest{Header: h}
 	for _, i := range ies {
@@ -410,22 +424,22 @@ func ParseSessionEstablishmentRequest(b []byte) (*SessionEstablishmentRequest, e
 			req.CreateFARs = append(req.CreateFARs, i)
 		}
 	}
-	// C11-equivalent: validate M-IEs per Table 7.5.2.2-1.
+	// C11-equivalent: validate M-IEs per Table 7.5.2.1-1.
 	// "Node ID" — M, condition: "mandatory"
 	if req.NodeID == nil {
-		return nil, fmt.Errorf("SessionEstablishmentRequest: missing mandatory Node ID IE (Table 7.5.2.2-1)")
+		return nil, fmt.Errorf("SessionEstablishmentRequest: missing mandatory Node ID IE (Table 7.5.2.1-1)")
 	}
 	// "CP F-SEID" — M, condition: "mandatory"
 	if req.CPSEID == nil {
-		return nil, fmt.Errorf("SessionEstablishmentRequest: missing mandatory CP F-SEID IE (Table 7.5.2.2-1)")
+		return nil, fmt.Errorf("SessionEstablishmentRequest: missing mandatory CP F-SEID IE (Table 7.5.2.1-1)")
 	}
 	// "Create PDR" — M (minimum 1), condition: "mandatory"
 	if len(req.CreatePDRs) == 0 {
-		return nil, fmt.Errorf("SessionEstablishmentRequest: missing mandatory Create PDR IE (Table 7.5.2.2-1)")
+		return nil, fmt.Errorf("SessionEstablishmentRequest: missing mandatory Create PDR IE (Table 7.5.2.1-1)")
 	}
 	// "Create FAR" — M (minimum 1), condition: "mandatory"
 	if len(req.CreateFARs) == 0 {
-		return nil, fmt.Errorf("SessionEstablishmentRequest: missing mandatory Create FAR IE (Table 7.5.2.2-1)")
+		return nil, fmt.Errorf("SessionEstablishmentRequest: missing mandatory Create FAR IE (Table 7.5.2.1-1)")
 	}
 	return req, nil
 }
@@ -500,6 +514,9 @@ type SessionModificationRequest struct {
 	// UpdateFARs: C per Table 7.5.4.1-1
 	// Condition text: "present if the CP function wants to update a FAR"
 	UpdateFARs []*ie.IE
+	// UpdatePDRs: C per Table 7.5.4.1-1
+	// Condition text: "present if the CP function wants to update a PDR"
+	UpdatePDRs []*ie.IE
 	// CreatePDRs: C per Table 7.5.4.1-1
 	// Condition text: "present if the CP function wants to create a PDR"
 	CreatePDRs []*ie.IE
@@ -534,6 +551,8 @@ func ParseSessionModificationRequest(b []byte) (*SessionModificationRequest, err
 			req.CPSEID = i
 		case ie.TypeUpdateFAR:
 			req.UpdateFARs = append(req.UpdateFARs, i)
+		case ie.TypeUpdatePDR:
+			req.UpdatePDRs = append(req.UpdatePDRs, i)
 		case ie.TypeCreatePDR:
 			req.CreatePDRs = append(req.CreatePDRs, i)
 		case ie.TypeCreateFAR:

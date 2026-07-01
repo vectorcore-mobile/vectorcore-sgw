@@ -65,6 +65,16 @@ func main() {
 		"node_id", cfg.SGWU.NodeID,
 		"version", version,
 		"build_date", buildDate,
+		"config", cfgPath,
+		"pfcp", cfg.PFCP.Listen,
+		"s1u_bind", cfg.GTPU.S1U.Bind,
+		"s5u_bind", cfg.GTPU.S5U.Bind,
+		"dataplane", "ebpf",
+		"driver_mode", cfg.Dataplane.DriverMode,
+		"attach_on_start", cfg.Dataplane.AttachOnStart,
+		"cleanup_on_exit", cfg.Dataplane.CleanupOnExit,
+		"api", cfg.API.Listen,
+		"metrics", cfg.Metrics.Listen,
 	)
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -88,85 +98,62 @@ func main() {
 		}
 	}()
 
-	// GTP-U dataplane setup: tc-bpf (default) or userspace fallback.
+	// GTP-U dataplane setup: eBPF fast path with a userspace signalling socket.
 	// Port 2152 per TS 29.281 §4.4.2.1: "The port number for GTP-U request messages is 2152."
 	var gtpuFwd *gtpu.Forwarder
-	switch cfg.Dataplane.Mode {
-	case "tc-bpf":
-		// Phase 7: TC-BPF GTP-U fast path.
-		// Attach BPF program to S1-U and S5/S8-U interfaces.
-		s1uLocalIP, parseErr := netip.ParseAddr(cfg.GTPU.Access.LocalAddr)
-		if parseErr != nil {
-			logger.Error("GTP-U: invalid access local_addr", "addr", cfg.GTPU.Access.LocalAddr, "error", parseErr)
-			os.Exit(1)
-		}
-		s5uLocalIP, parseErr := netip.ParseAddr(cfg.GTPU.Core.LocalAddr)
-		if parseErr != nil {
-			logger.Error("GTP-U: invalid core local_addr", "addr", cfg.GTPU.Core.LocalAddr, "error", parseErr)
-			os.Exit(1)
-		}
-		maxEntries := cfg.Dataplane.BPFMapMaxEntries
-		if !cfg.Dataplane.AttachOnStart {
-			logger.Info("TC-BPF: attach_on_start=false — BPF hooks skipped")
-			break
-		}
-		tcDp, bpfErr := bpf.New(cfg.GTPU.Access.Ifname, cfg.GTPU.Core.Ifname, maxEntries)
+	// xdpDp stays nil if attach_on_start=false; the API layer reports an empty
+	// BPF rule list in that case.
+	var xdpDp *bpf.XDPDataplane
+	s1u := cfg.S1UInterface()
+	s5u := cfg.S5UInterface()
+	s1uLocalIP, parseErr := cfg.S1ULocalAddr()
+	if parseErr != nil {
+		logger.Error("GTP-U: invalid s1u listen address", "listen", s1u.Listen, "error", parseErr)
+		os.Exit(1)
+	}
+	s5uLocalIP, parseErr := cfg.S5ULocalAddr()
+	if parseErr != nil {
+		logger.Error("GTP-U: invalid s5u listen address", "listen", s5u.Listen, "error", parseErr)
+		os.Exit(1)
+	}
+	maxEntries := cfg.Dataplane.MapMaxEntries
+	if !cfg.Dataplane.AttachOnStart {
+		logger.Info("XDP-BPF: attach_on_start=false — BPF hooks skipped")
+	} else {
+		var bpfErr error
+		xdpDp, bpfErr = bpf.NewWithMode(s1u.Ifname, s5u.Ifname, maxEntries, cfg.Dataplane.DriverMode)
 		if bpfErr != nil {
-			logger.Error("TC-BPF dataplane failed to start", "error", bpfErr)
+			logger.Error("XDP-BPF dataplane failed to start", "error", bpfErr)
 			os.Exit(1)
 		}
-		compiler := bpf.NewCompiler(tcDp, s1uLocalIP, s5uLocalIP, logger.Logger)
+		compiler := bpf.NewCompiler(xdpDp, s1uLocalIP, s5uLocalIP, logger.Logger)
 		pfcpSrv.SetBPFInstaller(compiler)
-		logger.Info("TC-BPF GTP-U fast path active",
-			"s1u_iface", cfg.GTPU.Access.Ifname,
-			"s5u_iface", cfg.GTPU.Core.Ifname,
+		logger.Info("XDP-BPF GTP-U fast path active",
+			"s1u_iface", s1u.Ifname,
+			"s5u_iface", s5u.Ifname,
+			"driver_mode", cfg.Dataplane.DriverMode,
+			"single_interface_gtpu", xdpDp.SharedInterface(),
 			"map_entries", maxEntries,
 		)
 		if cfg.Dataplane.CleanupOnExit {
-			defer func() { _ = tcDp.Close() }()
+			defer func() { _ = xdpDp.Close() }()
 		}
+	}
 
-		// AUD-03: start GTP-U signalling listener in tc-bpf mode too.
-		// BPF redirects matched G-PDUs before they reach the socket; the userspace
-		// listener handles Echo Request/Response, Error Indication, End Marker, and
-		// G-PDUs for unknown TEIDs (Error Indication per TS 29.281 §7.3.1).
-		gtpuFwd, err = gtpu.New(cfg.GTPU.Listen, s1uLocalIP, pfcpSrv.SessionStore(), logger.Logger)
-		if err != nil {
-			logger.Error("GTP-U signalling listener failed to start", "error", err)
-			os.Exit(1)
-		}
-		pfcpSrv.SetEndMarkerSender(gtpuFwd)
-		go func() {
-			if err := gtpuFwd.Serve(ctx); err != nil {
-				logger.Error("GTP-U signalling listener serve error", "error", err)
-			}
-		}()
-
-	case "userspace":
-		// Phase 6: userspace GTP-U forwarder (reference / fallback path).
-		localGTPUIP, parseErr := netip.ParseAddr(cfg.GTPU.Access.LocalAddr)
-		if parseErr != nil {
-			logger.Error("GTP-U: invalid access local_addr", "addr", cfg.GTPU.Access.LocalAddr, "error", parseErr)
-			os.Exit(1)
-		}
-		gtpuFwd, err = gtpu.New(cfg.GTPU.Listen, localGTPUIP, pfcpSrv.SessionStore(), logger.Logger)
-		if err != nil {
-			logger.Error("GTP-U forwarder failed to start", "error", err)
-			os.Exit(1)
-		}
-		// R15-REAUDIT-009: wire GTP-U forwarder as End Marker sender so PFCP session
-		// modifications (tunnel switch) trigger End Markers to the old downstream peer.
-		pfcpSrv.SetEndMarkerSender(gtpuFwd)
-		go func() {
-			if err := gtpuFwd.Serve(ctx); err != nil {
-				logger.Error("GTP-U forwarder serve error", "error", err)
-			}
-		}()
-
-	default:
-		logger.Error("unknown dataplane.mode in config", "mode", cfg.Dataplane.Mode)
+	// BPF redirects matched G-PDUs before they reach the socket; the userspace
+	// listener handles Echo Request/Response, Error Indication, End Marker, and
+	// G-PDUs for unknown TEIDs (Error Indication per TS 29.281 §7.3.1).
+	gtpuFwd, err = gtpu.New(cfg.GTPUListen(), s1uLocalIP, pfcpSrv.SessionStore(), logger.Logger)
+	if err != nil {
+		logger.Error("GTP-U signalling listener failed to start", "error", err)
 		os.Exit(1)
 	}
+	pfcpSrv.SetEndMarkerSender(gtpuFwd)
+	go func() {
+		if err := gtpuFwd.Serve(ctx); err != nil {
+			logger.Error("GTP-U signalling listener serve error", "error", err)
+		}
+	}()
 
 	// Phase 11: wire PathProber to report GTP-U path failures to SGW-C via PFCP Node Report.
 	// PathProber uses the same GTP-U socket as the forwarder per TS 29.281 §11/§12.
@@ -195,7 +182,8 @@ func main() {
 		os.Exit(1)
 	}
 
-	apiSrv := api.NewServer(cfg.API.Listen, api.BuildInfo{Version: version, BuildDate: buildDate}, logger.Logger)
+	apiSrv := api.NewServer(cfg.API.Listen, api.BuildInfo{Component: "SGW-U", Version: version, BuildDate: buildDate}, logger.Logger)
+	api.RegisterSGWURoutes(apiSrv.HumaAPI(), pfcpSrv.SessionStore(), pfcpSrv, xdpDp)
 	if err := apiSrv.Start(ctx); err != nil {
 		logger.Error("API server failed to start", "error", err)
 		os.Exit(1)
@@ -203,10 +191,10 @@ func main() {
 
 	logger.Info("VectorCore SGW-U ready",
 		"pfcp", cfg.PFCP.Listen,
-		"s1u_iface", cfg.GTPU.Access.Ifname,
-		"s5u_iface", cfg.GTPU.Core.Ifname,
-		"dataplane", cfg.Dataplane.Mode,
-		"gtpu_listen", cfg.GTPU.Listen,
+		"s1u_iface", s1u.Ifname,
+		"s5u_iface", s5u.Ifname,
+		"dataplane", "ebpf",
+		"gtpu_listen", cfg.GTPUListen(),
 		"api", cfg.API.Listen,
 		"metrics", cfg.Metrics.Listen,
 	)

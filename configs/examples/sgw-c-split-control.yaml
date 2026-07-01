@@ -1,0 +1,45 @@
+sgwc:
+  node_id: "sgw-c-1"
+  plmn:
+    mcc: "311"
+    mnc: "435"
+
+interfaces:
+  control:
+    # Logical names are operator-chosen labels. gtpc.*.bind references them.
+    my_mme_side:
+      listen: "10.90.250.59:2123"
+    my_pgw_control_side:
+      listen: "10.90.251.59:2123"
+
+gtpc:
+  s11:
+    bind: "my_mme_side"
+  s5c:
+    bind: "my_pgw_control_side"
+
+s11:
+  t3_response_seconds: 3
+  n3_requests: 5
+
+pfcp:
+  local_addr: "127.0.0.1:8805"
+  heartbeat_interval_seconds: 10
+  heartbeat_timeout_seconds: 30
+  sgwu:
+    - name: "sgw-u-1"
+      node_id: "sgw-u-1"
+      addr: "127.0.0.2:8805"
+
+logging:
+  level: info
+  file: /var/log/vectorcore/sgw/sgw-c.log
+
+api:
+  listen: "0.0.0.0:8080"
+
+metrics:
+  listen: "0.0.0.0:9090"
+
+shutdown:
+  timeout_seconds: 5

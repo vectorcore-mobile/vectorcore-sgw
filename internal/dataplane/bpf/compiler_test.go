@@ -1,6 +1,7 @@
 package bpf
 
 import (
+	"context"
 	"log/slog"
 	"net/netip"
 	"testing"
@@ -13,6 +14,21 @@ func newTestLogger(t *testing.T) *slog.Logger {
 	t.Helper()
 	return slog.Default()
 }
+
+type captureHandler struct {
+	records []slog.Record
+}
+
+func (h *captureHandler) Enabled(context.Context, slog.Level) bool { return true }
+
+func (h *captureHandler) Handle(_ context.Context, r slog.Record) error {
+	clone := r.Clone()
+	h.records = append(h.records, clone)
+	return nil
+}
+
+func (h *captureHandler) WithAttrs([]slog.Attr) slog.Handler { return h }
+func (h *captureHandler) WithGroup(string) slog.Handler      { return h }
 
 // TestBuildKeyUplinkAccess verifies that an uplink PDR (SourceInterface=Access)
 // produces a map key using the S1-U interface index.
@@ -241,4 +257,100 @@ func TestSyncRulesSkipsZeroTEID(t *testing.T) {
 	if err != nil {
 		t.Errorf("syncRules with zero TEID: unexpected error: %v", err)
 	}
+}
+
+func TestSyncRulesReportsUnchangedRulesWithoutReinstallNoise(t *testing.T) {
+	h := &captureHandler{}
+	c := &Compiler{
+		dp: &TCDataplane{
+			s1uIfindex: 10,
+			s5uIfindex: 20,
+			testRules:  make(map[TcSgwGtpuSgwRuleKey]TcSgwGtpuSgwRuleValue),
+		},
+		log: slog.New(h),
+	}
+	sess := &session.Session{
+		CPSEID: 1,
+		PDRs: []session.PDR{{
+			ID:              1,
+			LocalTEID:       0x1000,
+			SourceInterface: pfcpie.SourceInterfaceAccess,
+			FARID:           1,
+		}},
+		FARs: []session.FAR{{
+			ID:          1,
+			ApplyAction: pfcpie.ApplyActionDROP,
+		}},
+	}
+
+	if err := c.UpdateSession(sess); err != nil {
+		t.Fatalf("first UpdateSession: %v", err)
+	}
+	if err := c.UpdateSession(sess); err != nil {
+		t.Fatalf("second UpdateSession: %v", err)
+	}
+	if err := c.RemoveSession(sess); err != nil {
+		t.Fatalf("RemoveSession: %v", err)
+	}
+	if err := c.RemoveSession(sess); err != nil {
+		t.Fatalf("second RemoveSession: %v", err)
+	}
+
+	summaries := syncSummaries(h.records)
+	if len(summaries) != 4 {
+		t.Fatalf("sync summaries = %d; want 4", len(summaries))
+	}
+	assertSummaryCounts(t, summaries[0], 1, 0, 0, 0)
+	assertSummaryCounts(t, summaries[1], 0, 0, 0, 1)
+	assertSummaryCounts(t, summaries[2], 0, 0, 1, 0)
+	assertSummaryCounts(t, summaries[3], 0, 0, 0, 1)
+	if got := countLogMessage(h.records, "BPF compiler: rule added"); got != 1 {
+		t.Fatalf("rule added logs = %d; want 1", got)
+	}
+	if got := countLogMessage(h.records, "BPF compiler: rule updated"); got != 0 {
+		t.Fatalf("rule updated logs = %d; want 0", got)
+	}
+	if got := countLogMessage(h.records, "BPF compiler: rule removed"); got != 1 {
+		t.Fatalf("rule removed logs = %d; want 1", got)
+	}
+}
+
+func syncSummaries(records []slog.Record) []map[string]int {
+	var out []map[string]int
+	for _, r := range records {
+		if r.Message != "BPF compiler: sync summary" {
+			continue
+		}
+		m := map[string]int{}
+		r.Attrs(func(a slog.Attr) bool {
+			switch a.Key {
+			case "rules_added", "rules_updated", "rules_removed", "rules_unchanged":
+				m[a.Key] = int(a.Value.Int64())
+			}
+			return true
+		})
+		out = append(out, m)
+	}
+	return out
+}
+
+func assertSummaryCounts(t *testing.T, summary map[string]int, added, updated, removed, unchanged int) {
+	t.Helper()
+	if summary["rules_added"] != added ||
+		summary["rules_updated"] != updated ||
+		summary["rules_removed"] != removed ||
+		summary["rules_unchanged"] != unchanged {
+		t.Fatalf("summary = %+v; want added=%d updated=%d removed=%d unchanged=%d",
+			summary, added, updated, removed, unchanged)
+	}
+}
+
+func countLogMessage(records []slog.Record, msg string) int {
+	var count int
+	for _, r := range records {
+		if r.Message == msg {
+			count++
+		}
+	}
+	return count
 }

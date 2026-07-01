@@ -1,7 +1,18 @@
 // Package ie implements PFCP Information Elements per TS 29.244 Rel-15 §8.
 //
-// Wire format per §8.1: 2-byte Type | 2-byte Length (value octets only) | Value
+// Wire format per §8.1: 2-byte Type | 2-byte Length (value octets only) | Value.
 // This differs from GTPv2-C IEs which use 1-byte Type + 2-byte Length + 1-byte Instance.
+//
+// C10 ("Grouped IE Instance Numbers Spec-Cited") does not apply to this
+// package: C10 is written around GTPv2-C's IE model, where TS 29.274's wire
+// format carries a Spare+Instance octet per IE (see internal/gtpv2/ie's
+// IE.Instance field) and grouped-IE tables have an explicit Instance column.
+// PFCP has neither: this IE struct has no Instance field, and TS 29.244
+// Rel-15 grouped-IE tables list "Information elements / P / Condition /
+// Appl. / IE Type" with no Instance column. Verified against local
+// docs/specs/29244-fa0.docx for PDI, Forwarding Parameters, Create/Update FAR,
+// Created PDR, Remove PDR, and Remove FAR. Do not invent instance numbers for
+// PFCP grouped children.
 package ie
 
 import (
@@ -11,49 +22,51 @@ import (
 	"net/netip"
 )
 
-// IE type codes per TS 29.244 Rel-15 Table 8.1-1.
+// IE type codes per TS 29.244 Rel-15 Table 8.1.2-1.
 //
 // Node-level IE types — confirmed by re-audit against TS 29.244 V15.10.0:
 const (
-	TypeCause              uint16 = 19  // Table 8.1-1 row: Cause
-	TypeUPFunctionFeatures uint16 = 43  // Table 8.1-1 row: UP Function Features
-	TypeCPFunctionFeatures uint16 = 89  // Table 8.1-1 row: CP Function Features (NOT 54; 54 = Overload Control Information)
-	TypeNodeID             uint16 = 60  // Table 8.1-1 row: Node ID
-	TypeRecoveryTimeStamp  uint16 = 96  // Table 8.1-1 row: Recovery Time Stamp
+	TypeCause              uint16 = 19 // Table 8.1.2-1 row: Cause
+	TypeUPFunctionFeatures uint16 = 43 // Table 8.1.2-1 row: UP Function Features
+	TypeCPFunctionFeatures uint16 = 89 // Table 8.1.2-1 row: CP Function Features (NOT 54; 54 = Overload Control Information)
+	TypeNodeID             uint16 = 60 // Table 8.1.2-1 row: Node ID
+	TypeRecoveryTimeStamp  uint16 = 96 // Table 8.1.2-1 row: Recovery Time Stamp
 )
 
-// Session-level IE types per TS 29.244 Rel-15 Table 8.1-1
+// Session-level IE types per TS 29.244 Rel-15 Table 8.1.2-1
 // (extracted from docs/specs/29244-fa0.docx, Table 75).
 const (
-	TypeCreatePDR                  uint16 = 1   // Table 8.1-1 row: "1 | Create PDR | Extendable / Table 7.5.2.2-1"
-	TypePDI                        uint16 = 2   // Table 8.1-1 row: "2 | PDI | Extendable / Table 7.5.2.2-2"
-	TypeCreateFAR                  uint16 = 3   // Table 8.1-1 row: "3 | Create FAR | Extendable / Table 7.5.2.3-1"
-	TypeForwardingParameters       uint16 = 4   // Table 8.1-1 row: "4 | Forwarding Parameters | Extendable / Table 7.5.2.3-2"
-	TypeCreateQER                  uint16 = 7   // Table 8.1-1 row: "7 | Create QER | Extendable / Table 7.5.2.5-1"
-	TypeCreatedPDR                 uint16 = 8   // Table 8.1-1 row: "8 | Created PDR | Extendable / Table 7.5.3.2-1"
-	TypeUpdateFAR                  uint16 = 10  // Table 8.1-1 row: "10 | Update FAR | Extendable / Table 7.5.4.3-1"
-	TypeUpdateForwardingParameters uint16 = 11  // Table 8.1-1 row: "11 | Update Forwarding Parameters | Extendable / Table 7.5.4.3-2"
+	TypeCreatePDR                  uint16 = 1  // Table 8.1.2-1 row: "1 | Create PDR | Extendable / Table 7.5.2.2-1"
+	TypePDI                        uint16 = 2  // Table 8.1.2-1 row: "2 | PDI | Extendable / Table 7.5.2.2-2"
+	TypeCreateFAR                  uint16 = 3  // Table 8.1.2-1 row: "3 | Create FAR | Extendable / Table 7.5.2.3-1"
+	TypeForwardingParameters       uint16 = 4  // Table 8.1.2-1 row: "4 | Forwarding Parameters | Extendable / Table 7.5.2.3-2"
+	TypeCreateQER                  uint16 = 7  // Table 8.1.2-1 row: "7 | Create QER | Extendable / Table 7.5.2.5-1"
+	TypeCreatedPDR                 uint16 = 8  // Table 8.1.2-1 row: "8 | Created PDR | Extendable / Table 7.5.3.2-1"
+	TypeUpdatePDR                  uint16 = 9  // Table 8.1.2-1 row: "9 | Update PDR | Extendable / Table 7.5.4.2-1"
+	TypeUpdateFAR                  uint16 = 10 // Table 8.1.2-1 row: "10 | Update FAR | Extendable / Table 7.5.4.3-1"
+	TypeUpdateForwardingParameters uint16 = 11 // Table 8.1.2-1 row: "11 | Update Forwarding Parameters | Extendable / Table 7.5.4.3-2"
 	// Remove PDR/FAR per TS 29.244 Table 75 (docs/specs/29244-fa0.docx):
 	// Table 50: "Remove PDR IE Type = 15 (decimal)"
 	// Table 51: "Remove FAR IE Type = 16 (decimal)"
-	TypeRemovePDR                  uint16 = 15  // Table 8.1-1 row: "15 | Remove PDR | Extendable / Table 7.5.4.6"
-	TypeRemoveFAR                  uint16 = 16  // Table 8.1-1 row: "16 | Remove FAR | Extendable / Table 7.5.4.7"
-	TypeSourceInterface            uint16 = 20  // Table 8.1-1 row: "20 | Source Interface | Extendable / Clause 8.2.2"
-	TypeFTEID                      uint16 = 21  // Table 8.1-1 row: "21 | F-TEID | Extendable / Clause 8.2.3"
-	TypeNetworkInstance            uint16 = 22  // Table 8.1-1 row: "22 | Network Instance | Variable Length / Clause 8.2.4"
-	TypePrecedence                 uint16 = 29  // Table 8.1-1 row: "29 | Precedence | Extendable / Clause 8.2.11"
-	TypeDestinationInterface       uint16 = 42  // Table 8.1-1 row: "42 | Destination Interface | Extendable / Clause 8.2.24"
-	TypeApplyAction                uint16 = 44  // Table 8.1-1 row: "44 | Apply Action | Extendable / Clause 8.2.26"
-	TypePDRID                      uint16 = 56  // Table 8.1-1 row: "56 | PDR ID | Extendable / Clause 8.2 36"
-	TypeFSEID                      uint16 = 57  // Table 8.1-1 row: "57 | F-SEID | Extendable / Clause 8.2 37"
-	TypeOuterHeaderCreation        uint16 = 84  // Table 8.1-1 row: "84 | Outer Header Creation | Extendable / Clause 8.2.56"
-	TypeFARID                      uint16 = 108 // Table 8.1-1 row: "108 | FAR ID | Extendable / Clause 8.2.74"
-	TypeQERID                      uint16 = 109 // Table 8.1-1 row: "109 | QER ID | Extendable / Clause 8.2.75"
-	// TypeActivatePredefinedRules: Table 8.1-1 row: "106 | Activate Predefined Rules | Variable Length / Clause 8.2.72 | Not Applicable"
-	TypeActivatePredefinedRules    uint16 = 106 // Table 8.1-1: "106 | Activate Predefined Rules"
+	TypeRemovePDR            uint16 = 15  // Table 8.1.2-1 row: "15 | Remove PDR | Extendable / Table 7.5.4.6"
+	TypeRemoveFAR            uint16 = 16  // Table 8.1.2-1 row: "16 | Remove FAR | Extendable / Table 7.5.4.7"
+	TypeSourceInterface      uint16 = 20  // Table 8.1.2-1 row: "20 | Source Interface | Extendable / Clause 8.2.2"
+	TypeFTEID                uint16 = 21  // Table 8.1.2-1 row: "21 | F-TEID | Extendable / Clause 8.2.3"
+	TypeNetworkInstance      uint16 = 22  // Table 8.1.2-1 row: "22 | Network Instance | Variable Length / Clause 8.2.4"
+	TypePrecedence           uint16 = 29  // Table 8.1.2-1 row: "29 | Precedence | Extendable / Clause 8.2.11"
+	TypeDestinationInterface uint16 = 42  // Table 8.1.2-1 row: "42 | Destination Interface | Extendable / Clause 8.2.24"
+	TypeApplyAction          uint16 = 44  // Table 8.1.2-1 row: "44 | Apply Action | Extendable / Clause 8.2.26"
+	TypePDRID                uint16 = 56  // Table 8.1.2-1 row: "56 | PDR ID | Extendable / Clause 8.2 36"
+	TypeFSEID                uint16 = 57  // Table 8.1.2-1 row: "57 | F-SEID | Extendable / Clause 8.2 37"
+	TypeOuterHeaderCreation  uint16 = 84  // Table 8.1.2-1 row: "84 | Outer Header Creation | Extendable / Clause 8.2.56"
+	TypeOuterHeaderRemoval   uint16 = 95  // Table 8.1.2-1 row: "95 | Outer Header Removal | Extendable / Clause 8.2.64"
+	TypeFARID                uint16 = 108 // Table 8.1.2-1 row: "108 | FAR ID | Extendable / Clause 8.2.74"
+	TypeQERID                uint16 = 109 // Table 8.1.2-1 row: "109 | QER ID | Extendable / Clause 8.2.75"
+	// TypeActivatePredefinedRules: Table 8.1.2-1 row: "106 | Activate Predefined Rules | Variable Length / Clause 8.2.72 | Not Applicable"
+	TypeActivatePredefinedRules uint16 = 106 // Table 8.1.2-1: "106 | Activate Predefined Rules"
 )
 
-// Phase 11 — Node Report and Association Release IE type codes per TS 29.244 Rel-15 Table 8.1-1
+// Phase 11 — Node Report and Association Release IE type codes per TS 29.244 Rel-15 Table 8.1.2-1
 // (extracted from docs/specs/29244-fa0.docx, doc table indices 20/21/22):
 //
 //	§8.2.69: "101 | Node Report Type | Extendable / Clause 8.2.69"
@@ -106,20 +119,23 @@ const (
 
 // Cause values per TS 29.244 Rel-15 §8.2.1 Table 8.2.1-1
 // (extracted from docs/specs/29244-fa0.docx).
-//   "1  — Request accepted (success)"
-//   "64 — Request rejected (reason not specified)"
-//   "65 — Session context not found"
-//   "72 — No established PFCP Association"
-//   "73 — Rule creation/modification Failure"
+//
+//	"1  — Request accepted (success)"
+//	"64 — Request rejected (reason not specified)"
+//	"65 — Session context not found"
+//	"72 — No established PFCP Association"
+//	"73 — Rule creation/modification Failure"
 const (
-	CauseRequestAccepted         uint8 = 1  // Table 8.2.1-1: "Request accepted (success)"
-	CauseRequestRejected         uint8 = 64 // Table 8.2.1-1: "Request rejected (reason not specified)"
-	CauseSessionContextNotFound  uint8 = 65 // Table 8.2.1-1: "Session context not found"
+	CauseRequestAccepted          uint8 = 1  // Table 8.2.1-1: "Request accepted (success)"
+	CauseRequestRejected          uint8 = 64 // Table 8.2.1-1: "Request rejected (reason not specified)"
+	CauseSessionContextNotFound   uint8 = 65 // Table 8.2.1-1: "Session context not found"
 	CauseNoEstablishedAssociation uint8 = 72 // Table 8.2.1-1: "No established PFCP Association"
-	CauseRuleCreationFailure     uint8 = 73 // Table 8.2.1-1: "Rule creation/modification Failure"
+	CauseRuleCreationFailure      uint8 = 73 // Table 8.2.1-1: "Rule creation/modification Failure"
 )
 
-// Node ID type byte values per TS 29.244 Rel-15 §8.2.8.
+// Node ID type byte values per TS 29.244 Rel-15 §8.2.38 Table 8.2.38-2.
+// FIXED 2026-06-23: was cited §8.2.8, which is actually the "MBR" clause per
+// Table 8.1.2-1. Values were already correct: "0|IPv4 address, 1|IPv6 address, 2|FQDN".
 const (
 	NodeIDTypeIPv4 uint8 = 0x00
 	NodeIDTypeIPv6 uint8 = 0x01
@@ -146,10 +162,11 @@ const (
 
 // Apply Action bit flags per TS 29.244 Rel-15 §8.2.26 (extracted from docs/specs/29244-fa0.docx).
 // Figure 8.2.26-1 octet 5:
-//   "Bit 1 – DROP (Drop)"                → 0x01
-//   "Bit 2 – FORW (Forward)"             → 0x02
-//   "Bit 3 – BUFF (Buffer)"              → 0x04
-//   "Bit 4 – NOCP (Notify the CP function)" → 0x08
+//
+//	"Bit 1 – DROP (Drop)"                → 0x01
+//	"Bit 2 – FORW (Forward)"             → 0x02
+//	"Bit 3 – BUFF (Buffer)"              → 0x04
+//	"Bit 4 – NOCP (Notify the CP function)" → 0x08
 const (
 	ApplyActionDROP uint8 = 0x01 // §8.2.26: "Bit 1 – DROP (Drop)"
 	ApplyActionFORW uint8 = 0x02 // §8.2.26: "Bit 2 – FORW (Forward)"
@@ -175,13 +192,20 @@ const (
 	OHCDescGTPUUDPIPv4 uint16 = 0x0100
 )
 
+// Outer Header Removal Description values per TS 29.244 Rel-15 §8.2.64.
+const (
+	OHRDescGTPUUDPIPv4 uint8 = 0
+)
+
 // PFCP F-TEID flag bits per TS 29.244 Rel-15 §8.2.3 (extracted from docs/specs/29244-fa0.docx).
 // Octet 5 of F-TEID IE value, per Figure 8.2.3-1:
-//   "Bit 1 – V4"              → 0x01
-//   "Bit 2 – V6"              → 0x02
-//   "Bit 3 – CH (CHOOSE)"     → 0x04
-//   "Bit 4 – CHID (CHOOSE ID)"→ 0x08
-//   Bits 5-8: Spare
+//
+//	"Bit 1 – V4"              → 0x01
+//	"Bit 2 – V6"              → 0x02
+//	"Bit 3 – CH (CHOOSE)"     → 0x04
+//	"Bit 4 – CHID (CHOOSE ID)"→ 0x08
+//	Bits 5-8: Spare
+//
 // R15-001 FIX: prior code had CH=0x08, CHID=0x04 — reversed. Now corrected per spec.
 const (
 	FTEIDFlagV4   uint8 = 0x01 // §8.2.3 bit 1: "Bit 1 – V4"
@@ -192,8 +216,9 @@ const (
 
 // PFCP F-SEID flag bits per TS 29.244 Rel-15 §8.2.37 Figure 8.2.37-1
 // (extracted from docs/specs/29244-fa0.docx para 2346-2347):
-//   "Bit 1 – V6: If this bit is set to '1', then IPv6 address field shall be present"
-//   "Bit 2 – V4: If this bit is set to '1', then IPv4 address field shall be present"
+//
+//	"Bit 1 – V6: If this bit is set to '1', then IPv6 address field shall be present"
+//	"Bit 2 – V4: If this bit is set to '1', then IPv4 address field shall be present"
 const (
 	FSEIDFlagV6 uint8 = 0x01 // §8.2.37 Figure 8.2.37-1: "Bit 1 – V6"
 	FSEIDFlagV4 uint8 = 0x02 // §8.2.37 Figure 8.2.37-1: "Bit 2 – V4"
@@ -445,7 +470,7 @@ func (ie *IE) FTEIDPFCPValue() (FTEIDPFCP, bool, error) {
 	return f, false, nil
 }
 
-// NewPDRID builds a PDR ID IE per TS 29.244 Rel-15 §8.2.36, type=56 (Table 8.1-1), 2-byte unsigned.
+// NewPDRID builds a PDR ID IE per TS 29.244 Rel-15 §8.2.36, type=56 (Table 8.1.2-1), 2-byte unsigned.
 func NewPDRID(id uint16) *IE {
 	val := make([]byte, 2)
 	binary.BigEndian.PutUint16(val, id)
@@ -463,7 +488,7 @@ func (ie *IE) PDRIDValue() (uint16, error) {
 	return binary.BigEndian.Uint16(ie.Value[0:2]), nil
 }
 
-// NewFARID builds a FAR ID IE per TS 29.244 Rel-15 §8.2.74, type=108 (Table 8.1-1), 4-byte unsigned.
+// NewFARID builds a FAR ID IE per TS 29.244 Rel-15 §8.2.74, type=108 (Table 8.1.2-1), 4-byte unsigned.
 func NewFARID(id uint32) *IE {
 	val := make([]byte, 4)
 	binary.BigEndian.PutUint32(val, id)
@@ -481,7 +506,7 @@ func (ie *IE) FARIDValue() (uint32, error) {
 	return binary.BigEndian.Uint32(ie.Value[0:4]), nil
 }
 
-// NewQERID builds a QER ID IE per TS 29.244 Rel-15 §8.2.75, type=109 (Table 8.1-1), 4-byte unsigned.
+// NewQERID builds a QER ID IE per TS 29.244 Rel-15 §8.2.75, type=109 (Table 8.1.2-1), 4-byte unsigned.
 func NewQERID(id uint32) *IE {
 	val := make([]byte, 4)
 	binary.BigEndian.PutUint32(val, id)
@@ -499,7 +524,7 @@ func (ie *IE) QERIDValue() (uint32, error) {
 	return binary.BigEndian.Uint32(ie.Value[0:4]), nil
 }
 
-// NewPrecedence builds a Precedence IE per TS 29.244 Rel-15 §8.2.11, type=29 (Table 8.1-1), 4-byte unsigned.
+// NewPrecedence builds a Precedence IE per TS 29.244 Rel-15 §8.2.11, type=29 (Table 8.1.2-1), 4-byte unsigned.
 // Lower value = higher priority.
 func NewPrecedence(p uint32) *IE {
 	val := make([]byte, 4)
@@ -507,7 +532,7 @@ func NewPrecedence(p uint32) *IE {
 	return &IE{Type: TypePrecedence, Value: val}
 }
 
-// NewSourceInterface builds a Source Interface IE per TS 29.244 Rel-15 §8.2.2, type=20 (Table 8.1-1).
+// NewSourceInterface builds a Source Interface IE per TS 29.244 Rel-15 §8.2.2, type=20 (Table 8.1.2-1).
 // value: 4-bit interface type in bits 1-4 (lower nibble); use SourceInterface* constants.
 func NewSourceInterface(iface uint8) *IE {
 	return &IE{Type: TypeSourceInterface, Value: []byte{iface & 0x0F}}
@@ -524,7 +549,7 @@ func (ie *IE) SourceInterfaceValue() (uint8, error) {
 	return ie.Value[0] & 0x0F, nil
 }
 
-// NewDestinationInterface builds a Destination Interface IE per TS 29.244 Rel-15 §8.2.24, type=42 (Table 8.1-1).
+// NewDestinationInterface builds a Destination Interface IE per TS 29.244 Rel-15 §8.2.24, type=42 (Table 8.1.2-1).
 // value: 4-bit interface type in bits 1-4 (lower nibble); use DestInterface* constants.
 func NewDestinationInterface(iface uint8) *IE {
 	return &IE{Type: TypeDestinationInterface, Value: []byte{iface & 0x0F}}
@@ -541,7 +566,7 @@ func (ie *IE) DestinationInterfaceValue() (uint8, error) {
 	return ie.Value[0] & 0x0F, nil
 }
 
-// NewApplyAction builds an Apply Action IE per TS 29.244 Rel-15 §8.2.26, type=44 (Table 8.1-1).
+// NewApplyAction builds an Apply Action IE per TS 29.244 Rel-15 §8.2.26, type=44 (Table 8.1.2-1).
 // flags: OR of ApplyActionDROP, ApplyActionFORW, ApplyActionBUFF, etc.
 func NewApplyAction(flags uint8) *IE {
 	return &IE{Type: TypeApplyAction, Value: []byte{flags}}
@@ -559,7 +584,7 @@ func (ie *IE) ApplyActionValue() (uint8, error) {
 }
 
 // NewUPFunctionFeatures builds a UP Function Features IE per TS 29.244 Rel-15 §8.2.25.
-// Type=43 (Table 8.1-1). Wire: 1-byte bitmask; bits defined in Table 8.2.25-1.
+// Type=43 (Table 8.1.2-1). Wire: 1-byte bitmask; bits defined in Table 8.2.25-1.
 // Pass UPFunctionFeaturesFTUP to advertise F-TEID allocation support.
 func NewUPFunctionFeatures(flags uint8) *IE {
 	return &IE{Type: TypeUPFunctionFeatures, Value: []byte{flags}}
@@ -583,7 +608,7 @@ type OuterHeaderCreation struct {
 	IPv4        netip.Addr
 }
 
-// NewOuterHeaderCreation builds an Outer Header Creation IE per TS 29.244 Rel-15 §8.2.56, type=84 (Table 8.1-1).
+// NewOuterHeaderCreation builds an Outer Header Creation IE per TS 29.244 Rel-15 §8.2.56, type=84 (Table 8.1.2-1).
 // For GTP-U/UDP/IPv4: description=OHCDescGTPUUDPIPv4, TEID and IPv4 required.
 // Wire format: Description(2) | TEID(4) | IPv4(4) for GTP-U/UDP/IPv4.
 func NewOuterHeaderCreation(desc uint16, teid uint32, v4 netip.Addr) *IE {
@@ -618,63 +643,83 @@ func (ie *IE) OuterHeaderCreationValue() (OuterHeaderCreation, error) {
 	return ohc, nil
 }
 
+// NewOuterHeaderRemoval builds an Outer Header Removal IE per TS 29.244 Rel-15 §8.2.64.
+func NewOuterHeaderRemoval(desc uint8) *IE {
+	return &IE{Type: TypeOuterHeaderRemoval, Value: []byte{desc}}
+}
+
 // ── Grouped IE constructors ──────────────────────────────────────────────────
 
-// NewPDI builds a PDI grouped IE per TS 29.244 Rel-15 §7.5.2.2.1, type=2 (Table 8.1-1).
-// Contains Source Interface (M) and optionally F-TEID, Network Instance, UE IP Address.
+// NewPDI builds a PDI grouped IE per TS 29.244 Rel-15 Table 7.5.2.2-2, type=2 (Table 8.1.2-1).
+// Children include Source Interface (M) and optional F-TEID, Network Instance, UE IP Address.
+// PFCP has no child IE instance numbers; children are encoded as Type|Length|Value only.
 func NewPDI(children ...*IE) *IE {
 	return newGrouped(TypePDI, children...)
 }
 
-// NewForwardingParameters builds a Forwarding Parameters grouped IE per TS 29.244 §7.5.2.4, type=4 (Table 8.1-1).
-// Contains Destination Interface (M) and optionally Outer Header Creation, Network Instance.
+// NewForwardingParameters builds a Forwarding Parameters grouped IE per TS 29.244 Rel-15 Table 7.5.2.3-2, type=4 (Table 8.1.2-1).
+// Children include Destination Interface (M) and optional Outer Header Creation, Network Instance.
+// PFCP has no child IE instance numbers; children are encoded as Type|Length|Value only.
 func NewForwardingParameters(children ...*IE) *IE {
 	return newGrouped(TypeForwardingParameters, children...)
 }
 
-// NewUpdateForwardingParameters builds an Update Forwarding Parameters grouped IE per TS 29.244 §7.5.4, type=11 (Table 8.1-1).
+// NewUpdateForwardingParameters builds an Update Forwarding Parameters grouped IE per TS 29.244 Rel-15 Table 7.5.4.3-2, type=11 (Table 8.1.2-1).
+// PFCP has no child IE instance numbers; children are encoded as Type|Length|Value only.
 func NewUpdateForwardingParameters(children ...*IE) *IE {
 	return newGrouped(TypeUpdateForwardingParameters, children...)
 }
 
-// NewCreatePDR builds a Create PDR grouped IE per TS 29.244 Rel-15 Table 7.5.2.2-1, type=1 (Table 8.1-1).
+// NewCreatePDR builds a Create PDR grouped IE per TS 29.244 Rel-15 Table 7.5.2.2-1, type=1 (Table 8.1.2-1).
 // M-IEs: PDR ID, Precedence, PDI. FAR ID is C per Table 7.5.2.2-1: "present if the PDR is not linked to a predefined rule".
+// PFCP has no child IE instance numbers; children are encoded as Type|Length|Value only.
 func NewCreatePDR(children ...*IE) *IE {
 	return newGrouped(TypeCreatePDR, children...)
 }
 
-// NewCreateFAR builds a Create FAR grouped IE per TS 29.244 Rel-15 Table 7.5.2.3-1, type=3 (Table 8.1-1).
+// NewCreateFAR builds a Create FAR grouped IE per TS 29.244 Rel-15 Table 7.5.2.3-1, type=3 (Table 8.1.2-1).
 // M-IEs: FAR ID, Apply Action. Forwarding Parameters is C per Table 7.5.2.3-1: "present if the Action is 'Forward'".
+// PFCP has no child IE instance numbers; children are encoded as Type|Length|Value only.
 func NewCreateFAR(children ...*IE) *IE {
 	return newGrouped(TypeCreateFAR, children...)
 }
 
-// NewCreateQER builds a Create QER grouped IE per TS 29.244 Rel-15 Table 7.5.2.7-1, type=7 (Table 8.1-1).
-// Minimal: QER ID (M). MBR and GBR are C/CO.
+// NewCreateQER builds a Create QER grouped IE per TS 29.244 Rel-15 Table 7.5.2.5-1, type=7 (Table 8.1.2-1).
+// M-IEs include QER ID and Gate Status. MBR and GBR are conditional.
+// PFCP has no child IE instance numbers; children are encoded as Type|Length|Value only.
 func NewCreateQER(children ...*IE) *IE {
 	return newGrouped(TypeCreateQER, children...)
 }
 
-// NewCreatedPDR builds a Created PDR grouped IE per TS 29.244 Rel-15 Table 7.5.3.1-2, type=8 (Table 8.1-1).
+// NewCreatedPDR builds a Created PDR grouped IE per TS 29.244 Rel-15 Table 7.5.3.2-1, type=8 (Table 8.1.2-1).
 // M: PDR ID. C: F-TEID (present when CHOOSE was set in Create PDR F-TEID).
+// PFCP has no child IE instance numbers; children are encoded as Type|Length|Value only.
 func NewCreatedPDR(children ...*IE) *IE {
 	return newGrouped(TypeCreatedPDR, children...)
 }
 
-// NewUpdateFAR builds an Update FAR grouped IE per TS 29.244 Rel-15 Table 7.5.4.1-2, type=10 (Table 8.1-1).
+// NewUpdateFAR builds an Update FAR grouped IE per TS 29.244 Rel-15 Table 7.5.4.3-1, type=10 (Table 8.1.2-1).
 // M: FAR ID. C: Apply Action, Update Forwarding Parameters.
+// PFCP has no child IE instance numbers; children are encoded as Type|Length|Value only.
 func NewUpdateFAR(children ...*IE) *IE {
 	return newGrouped(TypeUpdateFAR, children...)
 }
 
-// NewRemovePDR builds a Remove PDR grouped IE per TS 29.244 Rel-15 Table 7.5.4.6-1, type=15 (Table 8.1-1).
+// NewUpdatePDR builds an Update PDR grouped IE per TS 29.244 Rel-15 Table 7.5.4.2-1, type=9.
+func NewUpdatePDR(children ...*IE) *IE {
+	return newGrouped(TypeUpdatePDR, children...)
+}
+
+// NewRemovePDR builds a Remove PDR grouped IE per TS 29.244 Rel-15 Table 7.5.4.6-1, type=15 (Table 8.1.2-1).
 // M: PDR ID. Instructs the UP function to remove a PDR from the session.
+// PFCP has no child IE instance numbers; children are encoded as Type|Length|Value only.
 func NewRemovePDR(children ...*IE) *IE {
 	return newGrouped(TypeRemovePDR, children...)
 }
 
-// NewRemoveFAR builds a Remove FAR grouped IE per TS 29.244 Rel-15 Table 7.5.4.7-1, type=16 (Table 8.1-1).
+// NewRemoveFAR builds a Remove FAR grouped IE per TS 29.244 Rel-15 Table 7.5.4.7-1, type=16 (Table 8.1.2-1).
 // M: FAR ID. Instructs the UP function to remove a FAR from the session.
+// PFCP has no child IE instance numbers; children are encoded as Type|Length|Value only.
 func NewRemoveFAR(children ...*IE) *IE {
 	return newGrouped(TypeRemoveFAR, children...)
 }

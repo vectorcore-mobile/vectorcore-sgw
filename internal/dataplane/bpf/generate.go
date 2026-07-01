@@ -1,4 +1,4 @@
-// Package bpf holds the TC-BPF GTP-U dataplane program for SGW-U.
+// Package bpf holds the XDP GTP-U dataplane program for SGW-U.
 // Run `go generate` from this directory to compile the BPF object and
 // regenerate the Go bindings (requires clang and libbpf-dev).
 package bpf

@@ -387,20 +387,20 @@ func TestForwarderEchoResponseNotifiesProber(t *testing.T) {
 // Seed corpus entries are taken from the golden wire vectors in header_test.go.
 
 // FuzzParse fuzzes the GTP-U header parser Parse() per C20.
-// Seeds: all message-type golden vectors from header_test.go (§5.1 Table 0 derived).
+// Seeds: all message-type golden vectors from header_test.go (§5.1 Figure 5.1-1 derived).
 func FuzzParse(f *testing.F) {
 	// G-PDU no-flags (§5.1: E=0,S=0,PN=0 → octet0=0x30)
 	f.Add([]byte{0x30, 0xFF, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01})
-	// Echo Request (S=1, TEID=0, SeqNum=0x42) — Table 13: "1 | Echo Request"
+	// Echo Request (S=1, TEID=0, SeqNum=0x42) — Table 6.1-1: "1 | Echo Request"
 	f.Add([]byte{0x32, 0x01, 0x00, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x42, 0x00, 0x00})
-	// Echo Response with Recovery IE — Table 13: "2 | Echo Response"
+	// Echo Response with Recovery IE — Table 6.1-1: "2 | Echo Response"
 	f.Add([]byte{0x32, 0x02, 0x00, 0x06, 0x00, 0x00, 0x00, 0x00, 0x00, 0x42, 0x00, 0x00, 0x0E, 0x00})
-	// Error Indication (S=1, TEID=0) — Table 13: "26 | Error Indication"
+	// Error Indication (S=1, TEID=0) — Table 6.1-1: "26 | Error Indication"
 	f.Add([]byte{0x32, 0x1A, 0x00, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
 		0x10, 0x00, 0x00, 0x00, 0x07, // TEID Data I IE (type=16, TEID=7)
 		0x85, 0x00, 0x04, 0x0A, 0x00, 0x00, 0x01, // Peer Address IE (type=133, IPv4)
 	})
-	// End Marker (S=0, TEID=5) — Table 13: "254 | End Marker"
+	// End Marker (S=0, TEID=5) — Table 6.1-1: "254 | End Marker"
 	f.Add([]byte{0x30, 0xFE, 0x00, 0x00, 0x00, 0x00, 0x00, 0x05})
 	// E-flag with extension header chain (§5.2 derived)
 	f.Add([]byte{

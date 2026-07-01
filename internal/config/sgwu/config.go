@@ -2,6 +2,8 @@ package sgwuconfig
 
 import (
 	"fmt"
+	"net"
+	"net/netip"
 	"os"
 
 	"gopkg.in/yaml.v3"
@@ -10,14 +12,15 @@ import (
 const DefaultPath = "/etc/vectorcore/sgw/sgw-u.yaml"
 
 type Config struct {
-	SGWU     SGWUConfig     `yaml:"sgwu"`
-	PFCP     PFCPConfig     `yaml:"pfcp"`
-	GTPU     GTPUConfig     `yaml:"gtpu"`
-	Dataplane DataplaneConfig `yaml:"dataplane"`
-	Logging  LoggingConfig  `yaml:"logging"`
-	API      APIConfig      `yaml:"api"`
-	Metrics  MetricsConfig  `yaml:"metrics"`
-	Shutdown ShutdownConfig `yaml:"shutdown"`
+	SGWU       SGWUConfig      `yaml:"sgwu"`
+	PFCP       PFCPConfig      `yaml:"pfcp"`
+	Interfaces InterfaceConfig `yaml:"interfaces"`
+	GTPU       GTPUConfig      `yaml:"gtpu"`
+	Dataplane  DataplaneConfig `yaml:"dataplane"`
+	Logging    LoggingConfig   `yaml:"logging"`
+	API        APIConfig       `yaml:"api"`
+	Metrics    MetricsConfig   `yaml:"metrics"`
+	Shutdown   ShutdownConfig  `yaml:"shutdown"`
 }
 
 type SGWUConfig struct {
@@ -29,32 +32,35 @@ type PFCPConfig struct {
 	AllowedSGWC []string `yaml:"allowed_sgwc"`
 }
 
-type GTPUConfig struct {
-	// Listen is the UDP address for the GTP-U userspace forwarder, default "0.0.0.0:2152".
-	// Port 2152 is mandated by TS 29.281 §4.4.2.1:
-	// "The port number for GTP-U request messages is 2152."
-	// Only used when dataplane.mode = "userspace".
-	Listen string       `yaml:"listen"`
-	Access GTPUIfConfig `yaml:"access"`
-	Core   GTPUIfConfig `yaml:"core"`
+type InterfaceConfig struct {
+	User map[string]UserInterfaceConfig `yaml:"user"`
 }
 
-type GTPUIfConfig struct {
-	Ifname    string `yaml:"ifname"`
-	LocalAddr string `yaml:"local_addr"`
+type UserInterfaceConfig struct {
+	Ifname string `yaml:"ifname"`
+	Listen string `yaml:"listen"`
+}
+
+type GTPUConfig struct {
+	S1U GTPULogical `yaml:"s1u"`
+	S5U GTPULogical `yaml:"s5u"`
+}
+
+type GTPULogical struct {
+	Bind string `yaml:"bind"`
 }
 
 type DataplaneConfig struct {
-	// Mode is "tc-bpf" or "userspace". Default "tc-bpf".
-	Mode string `yaml:"mode"`
+	// DriverMode selects the XDP attach mode: xdp-generic, xdp-native, or xdp-offload.
+	DriverMode string `yaml:"driver_mode"`
 	// UnknownTEID controls unknown-TEID behavior: "punt" or "drop". Default "punt".
 	UnknownTEID string `yaml:"unknown_teid"`
 	// AttachOnStart programs TC hooks at startup when true. Default true.
 	AttachOnStart bool `yaml:"attach_on_start"`
 	// CleanupOnExit removes TC hooks on shutdown when true. Default true.
 	CleanupOnExit bool `yaml:"cleanup_on_exit"`
-	// BPFMapMaxEntries is the max entries per BPF forwarding map. Default 65536.
-	BPFMapMaxEntries int `yaml:"bpf_map_max_entries"`
+	// MapMaxEntries is the operator-facing eBPF map capacity setting.
+	MapMaxEntries int `yaml:"map_max_entries"`
 }
 
 type LoggingConfig struct {
@@ -76,21 +82,18 @@ type ShutdownConfig struct {
 
 func Default() *Config {
 	return &Config{
-		GTPU: GTPUConfig{
-			Listen: "0.0.0.0:2152",
-		},
 		Dataplane: DataplaneConfig{
-			Mode:             "tc-bpf",
-			UnknownTEID:      "punt",
-			AttachOnStart:    true,
-			CleanupOnExit:    true,
-			BPFMapMaxEntries: 65536,
+			DriverMode:    "xdp-generic",
+			UnknownTEID:   "punt",
+			AttachOnStart: true,
+			CleanupOnExit: true,
+			MapMaxEntries: 65536,
 		},
-		Logging:  LoggingConfig{Level: "info"},
+		Logging: LoggingConfig{Level: "info"},
 		// AUD-06: default to loopback so management interfaces are not exposed
 		// on all interfaces without explicit operator configuration.
-		API:     APIConfig{Listen: "127.0.0.1:8081"},
-		Metrics: MetricsConfig{Listen: "127.0.0.1:9091"},
+		API:      APIConfig{Listen: "127.0.0.1:8081"},
+		Metrics:  MetricsConfig{Listen: "127.0.0.1:9091"},
 		Shutdown: ShutdownConfig{TimeoutSeconds: 5},
 	}
 }
@@ -115,4 +118,36 @@ func Load(path string) (*Config, error) {
 		return nil, fmt.Errorf("invalid config: %w", err)
 	}
 	return cfg, nil
+}
+
+func (c *Config) S1UInterface() UserInterfaceConfig {
+	return c.Interfaces.User[c.GTPU.S1U.Bind]
+}
+
+func (c *Config) S5UInterface() UserInterfaceConfig {
+	return c.Interfaces.User[c.GTPU.S5U.Bind]
+}
+
+func (c *Config) GTPUListen() string {
+	return c.S1UInterface().Listen
+}
+
+func (c *Config) S1ULocalAddr() (netip.Addr, error) {
+	return listenHostAddr(c.S1UInterface().Listen)
+}
+
+func (c *Config) S5ULocalAddr() (netip.Addr, error) {
+	return listenHostAddr(c.S5UInterface().Listen)
+}
+
+func listenHostAddr(listen string) (netip.Addr, error) {
+	host, _, err := net.SplitHostPort(listen)
+	if err != nil {
+		return netip.Addr{}, fmt.Errorf("split listen address %q: %w", listen, err)
+	}
+	addr, err := netip.ParseAddr(host)
+	if err != nil {
+		return netip.Addr{}, fmt.Errorf("parse listen host %q: %w", host, err)
+	}
+	return addr.Unmap(), nil
 }

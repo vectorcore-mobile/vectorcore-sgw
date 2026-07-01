@@ -6,15 +6,15 @@ import (
 	"net/netip"
 )
 
-// GTP-U IE type values per TS 29.281 Table 19 (Table 8.1-1 in §8):
+// GTP-U IE type values per TS 29.281 Table 8.1-1:
 //
 //	"14  | TV  | Recovery                          | 8.2"
 //	"16  | TV  | Tunnel Endpoint Identifier Data I | 8.3"
 //	"133 | TLV | GSN Address (GTP-U Peer Address)  | 8.4"
 const (
-	IETypeRecovery        uint8 = 14  // Table 19: "14  | TV  | Recovery | 8.2"
-	IETypeTEIDDataI       uint8 = 16  // Table 19: "16  | TV  | Tunnel Endpoint Identifier Data I | 8.3"
-	IETypeGTPUPeerAddress uint8 = 133 // Table 19: "133 | TLV | GSN Address (GTP-U Peer Address) | 8.4"
+	IETypeRecovery        uint8 = 14  // Table 8.1-1: "14  | TV  | Recovery | 8.2"
+	IETypeTEIDDataI       uint8 = 16  // Table 8.1-1: "16  | TV  | Tunnel Endpoint Identifier Data I | 8.3"
+	IETypeGTPUPeerAddress uint8 = 133 // Table 8.1-1: "133 | TLV | GSN Address (GTP-U Peer Address) | 8.4"
 )
 
 // BuildRecovery builds a Recovery IE per TS 29.281 §8.2.
@@ -53,7 +53,7 @@ func BuildGTPUPeerAddressIPv4(ip netip.Addr) ([]byte, error) {
 }
 
 // ParseIEs parses GTP-U signalling message IEs from b and returns a map of IE type → value bytes.
-// Supports TV (type < 128) and TLV (type >= 128) formats per §8.1 and Table 19.
+// Supports TV (type < 128) and TLV (type >= 128) formats per §8.1 and Table 8.1-1.
 // Unknown TV IE lengths halt parsing; unknown TLV IEs are skipped via their length field.
 func ParseIEs(b []byte) map[uint8][]byte {
 	result := make(map[uint8][]byte)
@@ -74,7 +74,7 @@ func ParseIEs(b []byte) map[uint8][]byte {
 			result[t] = b[i : i+l]
 			i += l
 		} else {
-			// TV format: fixed length determined by type per Table 19.
+			// TV format: fixed length determined by type per Table 8.1-1.
 			var vlen int
 			switch t {
 			case IETypeRecovery:

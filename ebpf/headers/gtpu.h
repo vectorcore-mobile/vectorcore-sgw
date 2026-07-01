@@ -1,12 +1,12 @@
-/* GTP-U header structures and constants for TC-BPF programs.
+/* GTP-U header structures and constants for BPF dataplane programs.
  *
  * All constants extracted from TS 29.281 V15.7.0 (docs/specs/29281-f70.docx):
  *   §4.4.2.1 P310: UDP port 2152
- *   §5.1 Table 0 (Figure 5.1-1): octet 1 flag bit positions
+ *   §5.1 Figure 5.1-1: octet 1 flag bit positions
  *   §5.1 P353: "version number shall be set to '1'"
  *   §5.1 P354: "GTP (when PT is '1')"
  *   §5.1 NOTE 0 P371: spare bit "receiver shall not evaluate this bit"
- *   Table 13: message type codes
+ *   Table 6.1-1: message type codes
  *   §5.2.1 P380/P384: extension header length in 4-octet units
  */
 #pragma once
@@ -18,7 +18,7 @@
 #define GTP_UDP_PORT  2152u
 
 /*
- * Octet 1 flag bit masks per TS 29.281 §5.1 Table 0 (Figure 5.1-1).
+ * Octet 1 flag bit masks per TS 29.281 §5.1 Figure 5.1-1.
  * 3GPP bit numbering: bit 8 = MSB.
  *
  *   Bits 8-6: Version (3 bits)
@@ -48,7 +48,7 @@
 #define GTP_VPTMASK  0xF0u  /* bits 8-5: version(3b) + PT(1b) */
 #define GTP_VPTVAL   0x30u  /* version=1 (0x20) | PT=1 (0x10) */
 
-/* Message type codes per TS 29.281 Table 13:
+/* Message type codes per TS 29.281 Table 6.1-1:
  *   "1   | Echo Request       | GTP-U: X"
  *   "2   | Echo Response      | GTP-U: X"
  *   "26  | Error Indication   | GTP-U: X"
@@ -69,7 +69,7 @@
  */
 struct gtpuhdr {
     __u8   flags;           /* octet 1: version|PT|spare|E|S|PN */
-    __u8   message_type;    /* octet 2: message type (Table 13) */
+    __u8   message_type;    /* octet 2: message type (Table 6.1-1) */
     __be16 message_length;  /* octets 3-4: payload length after mandatory 8-byte header */
     __be32 teid;            /* octets 5-8: Tunnel Endpoint Identifier */
 } __attribute__((packed));

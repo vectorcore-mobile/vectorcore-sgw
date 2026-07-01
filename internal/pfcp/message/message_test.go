@@ -174,13 +174,13 @@ func TestPFCPSessionHeaderWire(t *testing.T) {
 }
 
 // TestCPFunctionFeaturesType verifies the CP Function Features IE type is 89
-// per TS 29.244 Rel-15 Table 8.1-1 (not 54 which is Overload Control Information).
+// per TS 29.244 Rel-15 Table 8.1.2-1 (not 54 which is Overload Control Information).
 func TestCPFunctionFeaturesType(t *testing.T) {
 	if ie.TypeCPFunctionFeatures != 89 {
-		t.Errorf("TypeCPFunctionFeatures = %d; want 89 (Table 8.1-1)", ie.TypeCPFunctionFeatures)
+		t.Errorf("TypeCPFunctionFeatures = %d; want 89 (Table 8.1.2-1)", ie.TypeCPFunctionFeatures)
 	}
 	if ie.TypeUPFunctionFeatures != 43 {
-		t.Errorf("TypeUPFunctionFeatures = %d; want 43 (Table 8.1-1)", ie.TypeUPFunctionFeatures)
+		t.Errorf("TypeUPFunctionFeatures = %d; want 43 (Table 8.1.2-1)", ie.TypeUPFunctionFeatures)
 	}
 }
 
@@ -248,7 +248,7 @@ func TestHeartbeatResponseRejectsMissingTS(t *testing.T) {
 // ── Session-level message tests (Phase 5) ────────────────────────────────────
 
 // TestSessionEstablishmentRequestRoundTrip verifies SER marshal+parse per §7.5.2/Table 7.5.2.2-1.
-// Message type 50 per docs/specs/29244-fa0.docx Table 7.1-1: "50 | PFCP Session Establishment Request | X".
+// Message type 50 per docs/specs/29244-fa0.docx Table 7.3-1: "50 | PFCP Session Establishment Request | X".
 // Session-level (S=1), SEID=0 on initial per §7.5.2.
 func TestSessionEstablishmentRequestRoundTrip(t *testing.T) {
 	nodeIDIE := ie.NewNodeIDIPv4(net.IP{10, 0, 0, 1})
@@ -829,7 +829,7 @@ func FuzzParseSessionDeletionResponse(f *testing.F) {
 func TestAssociationReleaseRequestWire(t *testing.T) {
 	hdr := message.Header{
 		Version:        1,
-		MessageType:    message.MsgTypeAssociationReleaseRequest, // 9 per Table 7.1-1
+		MessageType:    message.MsgTypeAssociationReleaseRequest, // 9 per Table 7.3-1
 		SequenceNumber: 1,
 	}
 	nodeID := ie.NewNodeIDIPv4(net.ParseIP("10.0.0.1"))
@@ -868,7 +868,7 @@ func TestAssociationReleaseRequestWire(t *testing.T) {
 func TestNodeReportRequestWire(t *testing.T) {
 	hdr := message.Header{
 		Version:        1,
-		MessageType:    message.MsgTypeNodeReportRequest, // 12 per Table 7.1-1
+		MessageType:    message.MsgTypeNodeReportRequest, // 12 per Table 7.3-1
 		SequenceNumber: 1,
 	}
 	failedPeer := ie.NewRemoteGTPUPeerIPv4(net.ParseIP("10.0.1.1"))

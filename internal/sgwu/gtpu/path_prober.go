@@ -214,13 +214,13 @@ func (p *PathProber) nextSeqLocked() uint16 {
 // sendEchoLocked sends a GTP-U Echo Request to peer:port with the given Sequence Number.
 // Must be called with p.mu held.
 // Per §5.1: S=1, TEID=0 for Echo Request.
-// Per §7.2.1: MsgType=1 (Table 13: "1 | Echo Request | GTP-U: X").
+// Per §7.2.1: MsgType=1 (Table 6.1-1: "1 | Echo Request | GTP-U: X").
 func (p *PathProber) sendEchoLocked(peer netip.Addr, seq uint16) {
 	hdr := Header{
 		Version: 1,
 		PT:      true,
 		S:       true,              // §5.1: "For the Echo Request...S flag shall be set to '1'"
-		MsgType: MsgTypeEchoRequest, // Table 13: "1 | Echo Request | GTP-U: X"
+		MsgType: MsgTypeEchoRequest, // Table 6.1-1: "1 | Echo Request | GTP-U: X"
 		TEID:    0,                 // §5.1: TEID=0 for Echo Request
 		SeqNum:  seq,
 	}

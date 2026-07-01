@@ -67,6 +67,7 @@ func (c *Compiler) syncRules(sess *session.Session, remove bool) error {
 	}
 
 	var firstErr error
+	var added, updated, removed, unchanged int
 	for i := range sess.PDRs {
 		pdr := &sess.PDRs[i]
 		if pdr.LocalTEID == 0 {
@@ -85,12 +86,27 @@ func (c *Compiler) syncRules(sess *session.Session, remove bool) error {
 		}
 
 		if remove {
+			_, exists, lookupErr := c.dp.LookupRule(key)
+			if lookupErr != nil {
+				c.log.Warn("BPF compiler: rule lookup failed before remove",
+					"cp_seid", sess.CPSEID, "pdr_id", pdr.ID, "teid", pdr.LocalTEID, "error", lookupErr)
+				if firstErr == nil {
+					firstErr = lookupErr
+				}
+				continue
+			}
 			if err := c.dp.RemoveRule(key); err != nil {
 				c.log.Warn("BPF compiler: rule remove failed",
 					"cp_seid", sess.CPSEID, "pdr_id", pdr.ID, "teid", pdr.LocalTEID, "error", err)
 				if firstErr == nil {
 					firstErr = err
 				}
+			} else if exists {
+				removed++
+				c.log.Debug("BPF compiler: rule removed",
+					"cp_seid", sess.CPSEID, "pdr_id", pdr.ID, "teid", pdr.LocalTEID)
+			} else {
+				unchanged++
 			}
 			if err := c.dp.RemoveStats(pdr.LocalTEID); err != nil {
 				c.log.Warn("BPF compiler: stats remove failed",
@@ -104,7 +120,11 @@ func (c *Compiler) syncRules(sess *session.Session, remove bool) error {
 			c.log.Warn("BPF compiler: PDR references unknown FAR — installing DROP rule",
 				"cp_seid", sess.CPSEID, "pdr_id", pdr.ID, "far_id", pdr.FARID)
 			val := TcSgwGtpuSgwRuleValue{Action: actionDrop, CounterId: pdr.LocalTEID}
-			if err := c.dp.InstallRule(key, val); err != nil && firstErr == nil {
+			ruleAdded, ruleUpdated, ruleUnchanged, err := c.installRuleIfChanged(sess, pdr, key, val)
+			added += ruleAdded
+			updated += ruleUpdated
+			unchanged += ruleUnchanged
+			if err != nil && firstErr == nil {
 				firstErr = err
 			}
 			continue
@@ -120,19 +140,69 @@ func (c *Compiler) syncRules(sess *session.Session, remove bool) error {
 			continue
 		}
 
-		if err := c.dp.InstallRule(key, val); err != nil {
-			c.log.Warn("BPF compiler: rule install failed",
-				"cp_seid", sess.CPSEID, "pdr_id", pdr.ID, "teid", pdr.LocalTEID, "error", err)
+		// Only the ACTION_FORWARD path in ebpf/tc_sgw_gtpu.c reads/increments
+		// sgw_rule_stats; the map entry must exist before traffic arrives
+		// (PERCPU_HASH lookup does not auto-create — see InitStats). A stats
+		// map failure (e.g. a full sgw_rule_stats map) must not block the
+		// forwarding rule itself from being installed: traffic forwarding is
+		// the core function, counters are observability-only, and the BPF
+		// program tolerates a missing stats entry by simply skipping the
+		// increment (no impact on forwarding correctness).
+		if val.Action == actionForward {
+			if err := c.dp.InitStats(val.CounterId); err != nil {
+				c.log.Warn("BPF compiler: stats init failed — rule will still be installed without counters",
+					"cp_seid", sess.CPSEID, "pdr_id", pdr.ID, "counter_id", val.CounterId, "error", err)
+			}
+		}
+
+		ruleAdded, ruleUpdated, ruleUnchanged, err := c.installRuleIfChanged(sess, pdr, key, val)
+		added += ruleAdded
+		updated += ruleUpdated
+		unchanged += ruleUnchanged
+		if err != nil {
 			if firstErr == nil {
 				firstErr = err
 			}
 			continue
 		}
-		c.log.Debug("BPF compiler: rule installed",
+	}
+	c.log.Debug("BPF compiler: sync summary",
+		"cp_seid", sess.CPSEID,
+		"remove", remove,
+		"rules_added", added,
+		"rules_updated", updated,
+		"rules_removed", removed,
+		"rules_unchanged", unchanged,
+	)
+	return firstErr
+}
+
+func (c *Compiler) installRuleIfChanged(sess *session.Session, pdr *session.PDR, key TcSgwGtpuSgwRuleKey, val TcSgwGtpuSgwRuleValue) (added, updated, unchanged int, err error) {
+	current, exists, err := c.dp.LookupRule(key)
+	if err != nil {
+		c.log.Warn("BPF compiler: rule lookup failed",
+			"cp_seid", sess.CPSEID, "pdr_id", pdr.ID, "teid", pdr.LocalTEID, "error", err)
+		return 0, 0, 0, err
+	}
+	if exists && current == val {
+		return 0, 0, 1, nil
+	}
+
+	if err := c.dp.InstallRule(key, val); err != nil {
+		c.log.Warn("BPF compiler: rule install failed",
+			"cp_seid", sess.CPSEID, "pdr_id", pdr.ID, "teid", pdr.LocalTEID, "error", err)
+		return 0, 0, 0, err
+	}
+	if exists {
+		c.log.Debug("BPF compiler: rule updated",
 			"cp_seid", sess.CPSEID, "pdr_id", pdr.ID, "teid", pdr.LocalTEID,
 			"action", val.Action, "egress", val.EgressIfindex)
+		return 0, 1, 0, nil
 	}
-	return firstErr
+	c.log.Debug("BPF compiler: rule added",
+		"cp_seid", sess.CPSEID, "pdr_id", pdr.ID, "teid", pdr.LocalTEID,
+		"action", val.Action, "egress", val.EgressIfindex)
+	return 1, 0, 0, nil
 }
 
 // buildKey constructs the BPF map key for a PDR.
@@ -215,3 +285,20 @@ const (
 	actionDrop    uint8 = 2
 	actionPunt    uint8 = 3
 )
+
+// ActionName returns a human-readable name for a BPF rule action code, for
+// debug/inspection APIs. Unrecognized values are not expected — the kernel
+// program only ever stores values written by this package — but are
+// rendered rather than panicking.
+func ActionName(action uint8) string {
+	switch action {
+	case actionForward:
+		return "FORWARD"
+	case actionDrop:
+		return "DROP"
+	case actionPunt:
+		return "PUNT"
+	default:
+		return fmt.Sprintf("UNKNOWN(%d)", action)
+	}
+}

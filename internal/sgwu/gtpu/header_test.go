@@ -1,12 +1,12 @@
 // Wire tests for GTP-U header encoding/parsing per TS 29.281 V15.7.0.
 //
-// C14: every golden byte vector is derived from the spec figure (§5.1 Table 0),
+// C14: every golden byte vector is derived from the spec figure (§5.1 Figure 5.1-1),
 //      not from encoder output.
 // C17: all defined flag states for E, S, PN are exercised — both 0 and 1 for each bit.
 //      The spec defines three independent flag bits; we test every combination that is
 //      used in practice plus the all-set case to verify bit encoding.
 //
-// Octet 1 composition (from §5.1 Table 0):
+// Octet 1 composition (from §5.1 Figure 5.1-1):
 //   Version=1 → bits 8-6 = 001 → 0x20 in the byte
 //   PT=1      → bit 5 = 1     → 0x10 in the byte
 //   E flag    → bit 3         → 0x04
@@ -30,11 +30,11 @@ import (
 
 // TestGPDUNoFlagsWire verifies the minimal 8-byte GTP-U G-PDU header (E=0,S=0,PN=0).
 // C17 flag state: E=0, S=0, PN=0 → octet 0 = Version(0x20)|PT(0x10) = 0x30
-// Derived from §5.1 Table 0 and §5.1 "minimum length is 8 bytes".
+// Derived from §5.1 Figure 5.1-1 and §5.1 "minimum length is 8 bytes".
 func TestGPDUNoFlagsWire(t *testing.T) {
 	// Golden vector (spec-derived):
 	//   [0] 0x30 = Version(0x20)|PT(0x10)|E(0)|S(0)|PN(0)
-	//   [1] 0xFF = MsgType G-PDU (Table 13: "255 | G-PDU | GTP-U: X")
+	//   [1] 0xFF = MsgType G-PDU (Table 6.1-1: "255 | G-PDU | GTP-U: X")
 	//   [2..3] 0x00 0x00 = Length=0 (no payload, no optional fields)
 	//   [4..7] 0x00 0x00 0x00 0x01 = TEID=1
 	want := []byte{0x30, 0xFF, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01}
@@ -59,11 +59,11 @@ func TestGPDUNoFlagsWire(t *testing.T) {
 
 // TestEchoRequestWire verifies the Echo Request header with S=1, TEID=0, SeqNum=0x0042.
 // C17 flag state: E=0, S=1, PN=0 → octet 0 = 0x30|0x02 = 0x32
-// Derived from §5.1 Table 0; S=1 required per §5.1: "For the Echo Request...S flag shall be set to '1'".
+// Derived from §5.1 Figure 5.1-1; S=1 required per §5.1: "For the Echo Request...S flag shall be set to '1'".
 func TestEchoRequestWire(t *testing.T) {
 	// Golden vector (spec-derived):
 	//   [0]    0x32 = 0x20|0x10|0x02 (Version|PT|S)
-	//   [1]    0x01 = MsgType Echo Request (Table 13)
+	//   [1]    0x01 = MsgType Echo Request (Table 6.1-1)
 	//   [2..3] 0x00 0x04 = Length=4 (optional fields only; §5.1 NOTE 4)
 	//   [4..7] 0x00 0x00 0x00 0x00 = TEID=0 (§5.1: TEID=0 for Echo)
 	//   [8..9] 0x00 0x42 = SeqNum=0x0042
@@ -91,11 +91,11 @@ func TestEchoRequestWire(t *testing.T) {
 
 // TestEchoResponseWire verifies the Echo Response wire format (MsgType=2, S=1).
 // C17 flag state: S=1 (same octet1 pattern as Echo Request = 0x32).
-// Derived from Table 13: "2 | Echo Response | GTP-U: X".
+// Derived from Table 6.1-1: "2 | Echo Response | GTP-U: X".
 func TestEchoResponseWire(t *testing.T) {
 	// Golden vector (spec-derived):
 	//   [0]    0x32 = 0x20|0x10|0x02 (Version|PT|S)
-	//   [1]    0x02 = MsgType Echo Response (Table 13)
+	//   [1]    0x02 = MsgType Echo Response (Table 6.1-1)
 	//   [2..3] 0x00 0x06 = Length = 4 (optional fields) + 2 (Recovery IE) = 6
 	//   [4..7] 0x00 0x00 0x00 0x00 = TEID=0
 	//   [8..9] 0x00 0x42 = SeqNum=0x0042 (echoed from request)
@@ -116,7 +116,7 @@ func TestEchoResponseWire(t *testing.T) {
 
 // TestEFlagWire verifies E=1 flag encoding in octet 0 with optional fields present.
 // C17 flag state: E=1, S=0, PN=0 → octet 0 = 0x30|0x04 = 0x34
-// Derived from §5.1 Table 0: "Bit 3: E (Extension Header flag)".
+// Derived from §5.1 Figure 5.1-1: "Bit 3: E (Extension Header flag)".
 func TestEFlagWire(t *testing.T) {
 	// Golden vector (spec-derived):
 	//   [0]    0x34 = 0x20|0x10|0x04 (Version|PT|E)
@@ -148,7 +148,7 @@ func TestEFlagWire(t *testing.T) {
 
 // TestPNFlagWire verifies PN=1 flag encoding with NPDUNum=7.
 // C17 flag state: E=0, S=0, PN=1 → octet 0 = 0x30|0x01 = 0x31
-// Derived from §5.1 Table 0: "Bit 1: PN (N-PDU Number flag)".
+// Derived from §5.1 Figure 5.1-1: "Bit 1: PN (N-PDU Number flag)".
 func TestPNFlagWire(t *testing.T) {
 	// Golden vector (spec-derived):
 	//   [0]    0x31 = 0x20|0x10|0x01 (Version|PT|PN)
@@ -180,7 +180,7 @@ func TestPNFlagWire(t *testing.T) {
 
 // TestAllFlagsWire verifies all three flags E=1, S=1, PN=1 simultaneously.
 // C17 flag state: E=1, S=1, PN=1 → octet 0 = 0x30|0x04|0x02|0x01 = 0x37
-// Derived from §5.1 Table 0: all three flag bits set at once.
+// Derived from §5.1 Figure 5.1-1: all three flag bits set at once.
 func TestAllFlagsWire(t *testing.T) {
 	// Golden vector (spec-derived):
 	//   [0]    0x37 = 0x20|0x10|0x04|0x02|0x01 (Version|PT|E|S|PN)
@@ -256,7 +256,7 @@ func TestGTPUPeerAddressIPv4Wire(t *testing.T) {
 }
 
 // TestEndMarkerWire verifies EndMarker message type constant (254) encoding.
-// C17 message-type coverage: test EndMarker=254 (Table 13: "254 | End Marker | GTP-U: X").
+// C17 message-type coverage: test EndMarker=254 (Table 6.1-1: "254 | End Marker | GTP-U: X").
 func TestEndMarkerWire(t *testing.T) {
 	// Golden vector:
 	//   [0]    0x30 = Version|PT, no flags
@@ -272,13 +272,13 @@ func TestEndMarkerWire(t *testing.T) {
 }
 
 // TestErrorIndicationHeaderWire verifies the Error Indication header (MsgType=26, S=1, TEID=0).
-// C17 message-type coverage: test ErrorIndication=26 (Table 13: "26 | Error Indication | GTP-U: X").
+// C17 message-type coverage: test ErrorIndication=26 (Table 6.1-1: "26 | Error Indication | GTP-U: X").
 // Per §5.1: "Error Indication...the S flag shall be set to '1'".
 // Per §5.1: TEID=0 for Error Indication.
 func TestErrorIndicationHeaderWire(t *testing.T) {
 	// Golden vector:
 	//   [0]    0x32 = 0x20|0x10|0x02 (Version|PT|S)
-	//   [1]    0x1A = MsgType 26 = Error Indication (Table 13)
+	//   [1]    0x1A = MsgType 26 = Error Indication (Table 6.1-1)
 	//   [2..3] 0x00 0x0C = Length = 4 (opt) + 5 (TEID IE) + 7 (peer addr IE) = 16? no wait:
 	//          Length = OptFieldsLen(4) + TEIDDataI(5) + PeerAddr(7) = 16 → 0x00 0x10
 	// Actually let me calculate: with SeqNum=0, no payload passed to Marshal(h, len(payload)):
@@ -341,7 +341,7 @@ func TestParseRejectsDeclaredLengthExceedsBuffer(t *testing.T) {
 //
 // Test encodes one extension header (4 bytes) terminating with Next Type = 0x00.
 func TestParseExtensionHeaderChain(t *testing.T) {
-	// Golden vector (spec-derived from §5.1 Table 0 and §5.2):
+	// Golden vector (spec-derived from §5.1 Figure 5.1-1 and §5.2):
 	//   Bytes 0-7: mandatory header
 	//     [0]    0x34 = Version(0x20)|PT(0x10)|E(0x04) — E=1, NextExtHdr will be non-zero
 	//     [1]    0xFF = G-PDU

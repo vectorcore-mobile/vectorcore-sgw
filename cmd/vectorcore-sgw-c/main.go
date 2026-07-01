@@ -16,6 +16,8 @@ import (
 
 	"vectorcore-sgw/internal/api"
 	sgwcconfig "vectorcore-sgw/internal/config/sgwc"
+	"vectorcore-sgw/internal/gtpv2/message"
+	"vectorcore-sgw/internal/gtpv2/transport"
 	"vectorcore-sgw/internal/log"
 	"vectorcore-sgw/internal/metrics"
 	"vectorcore-sgw/internal/sgwc/pfcpclient"
@@ -72,6 +74,13 @@ func main() {
 		"mnc", cfg.SGWC.PLMN.MNC,
 		"version", version,
 		"build_date", buildDate,
+		"config", cfgPath,
+		"s11", cfg.S11Listen(),
+		"s5c", cfg.S5CListen(),
+		"pfcp", cfg.PFCP.LocalAddr,
+		"sgwu_peers", len(cfg.PFCP.SGWU),
+		"api", cfg.API.Listen,
+		"metrics", cfg.Metrics.Listen,
 	)
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -118,17 +127,34 @@ func main() {
 		}
 	}()
 
-	s5cClient, err := s5c.New(cfg, controlIP, rc, logger.Logger)
-	if err != nil {
-		logger.Error("S5/S8-C listener failed to start", "error", err)
-		os.Exit(1)
-	}
-	// C9: start the S5/S8-C receive loop so Send() calls can receive PGW responses.
-	go func() {
-		if err := s5cClient.Serve(ctx); err != nil {
-			logger.Error("S5/S8-C serve error", "error", err)
+	sharedControl := cfg.GTPC.S11.Bind == cfg.GTPC.S5C.Bind
+	var sharedGTPC *transport.Conn
+	var s5cClient *s5c.Client
+	if sharedControl {
+		sharedGTPC, err = transport.Listen(
+			cfg.S11Listen(),
+			cfg.S11.T3ResponseSeconds,
+			cfg.S11.N3Requests,
+			logger.Logger,
+		)
+		if err != nil {
+			logger.Error("shared S11/S5/S8-C listener failed to start", "error", err)
+			os.Exit(1)
 		}
-	}()
+		s5cClient = s5c.NewWithConn(sharedGTPC, controlIP, rc, logger.Logger)
+	} else {
+		s5cClient, err = s5c.New(cfg, controlIP, rc, logger.Logger)
+		if err != nil {
+			logger.Error("S5/S8-C listener failed to start", "error", err)
+			os.Exit(1)
+		}
+		// C9: start the S5/S8-C receive loop so Send() calls can receive PGW responses.
+		go func() {
+			if err := s5cClient.Serve(ctx); err != nil {
+				logger.Error("S5/S8-C serve error", "error", err)
+			}
+		}()
+	}
 
 	metricsSrv := metrics.NewServer(cfg.Metrics.Listen, logger.Logger)
 	if err := metricsSrv.Start(ctx); err != nil {
@@ -140,9 +166,25 @@ func main() {
 	pfcpMetrics := metrics.NewPFCPMetrics(metricsSrv.Registry())
 	pfcpClient.SetPeerStateCallback(func(peerName, peerAddr string, state pfcpclient.PeerState) {
 		pfcpMetrics.OnPeerStateChange(peerName, peerAddr, string(state))
+		if state == pfcpclient.PeerStateDown {
+			invalidated := sessions.InvalidatePFCPBindingsForPeer(peerName, peerAddr)
+			logger.Warn("PFCP peer down; invalidated stale SGW-U session bindings",
+				"peer", peerName,
+				"addr", peerAddr,
+				"sessions", invalidated)
+		}
+	})
+	pfcpClient.SetPeerRestartCallback(func(peerName, peerAddr string, oldTS, newTS uint32) {
+		invalidated := sessions.InvalidatePFCPBindingsForPeer(peerName, peerAddr)
+		logger.Warn("PFCP peer restart detected; invalidated stale SGW-U session bindings",
+			"peer", peerName,
+			"addr", peerAddr,
+			"old_recovery_ts", oldTS,
+			"new_recovery_ts", newTS,
+			"sessions", invalidated)
 	})
 
-	apiSrv := api.NewServer(cfg.API.Listen, api.BuildInfo{Version: version, BuildDate: buildDate}, logger.Logger)
+	apiSrv := api.NewServer(cfg.API.Listen, api.BuildInfo{Component: "SGW-C", Version: version, BuildDate: buildDate}, logger.Logger)
 	api.RegisterSGWCRoutes(apiSrv.HumaAPI(), sessions)
 	api.RegisterPFCPRoutes(apiSrv.HumaAPI(), pfcpClient)
 	if err := apiSrv.Start(ctx); err != nil {
@@ -150,24 +192,40 @@ func main() {
 		os.Exit(1)
 	}
 
-	s11Handler, err := s11.New(cfg, sessions, rc, s5cClient, pfcpClient, controlIP, logger.Logger)
-	if err != nil {
-		logger.Error("S11 listener failed to start", "error", err)
-		os.Exit(1)
+	var s11Handler *s11.Handler
+	if sharedControl {
+		s11Handler = s11.NewWithConn(cfg, sharedGTPC, sessions, rc, s5cClient, pfcpClient, controlIP, logger.Logger)
+	} else {
+		s11Handler, err = s11.New(cfg, sessions, rc, s5cClient, pfcpClient, controlIP, logger.Logger)
+		if err != nil {
+			logger.Error("S11 listener failed to start", "error", err)
+			os.Exit(1)
+		}
 	}
 	// Register handler for PGW-initiated bearer procedures (CBReq, UBReq, DBReq).
 	// Must be set before any session can be established so requests are never dropped.
 	// Per TS 29.274 §7.2.3/§7.2.9.2/§7.2.15: PGW initiates these after session creation.
-	s5cClient.SetRequestHandler(s11Handler.HandleS5CInbound)
-	go func() {
-		if err := s11Handler.Serve(ctx); err != nil {
-			logger.Error("S11 serve error", "error", err)
-		}
-	}()
+	if sharedControl {
+		sharedGTPC.SetHandler(sharedGTPCHandler(s11Handler))
+		go func() {
+			logger.Info("shared S11/S5/S8-C listening", "addr", sharedGTPC.LocalAddr())
+			if err := sharedGTPC.Serve(ctx); err != nil {
+				logger.Error("shared S11/S5/S8-C serve error", "error", err)
+			}
+		}()
+	} else {
+		s5cClient.SetRequestHandler(s11Handler.HandleS5CInbound)
+		go func() {
+			if err := s11Handler.Serve(ctx); err != nil {
+				logger.Error("S11 serve error", "error", err)
+			}
+		}()
+	}
 
 	logger.Info("VectorCore SGW-C ready",
-		"s11", cfg.S11.Listen,
-		"s5c", cfg.S5C.LocalAddr,
+		"s11", cfg.S11Listen(),
+		"s5c", cfg.S5CListen(),
+		"shared_control", sharedControl,
 		"control_ip", controlIP,
 		"pfcp", cfg.PFCP.LocalAddr,
 		"api", cfg.API.Listen,
@@ -179,13 +237,38 @@ func main() {
 	shutdownTimeout := time.Duration(cfg.Shutdown.TimeoutSeconds) * time.Second
 	logger.Info("VectorCore SGW-C shutting down", "timeout", shutdownTimeout)
 
-	waitComponent(logger, "s11", shutdownTimeout, s11Handler.Close)
-	waitComponent(logger, "s5c", shutdownTimeout, s5cClient.Close)
+	if sharedControl {
+		waitComponent(logger, "gtpc", shutdownTimeout, sharedGTPC.Close)
+	} else {
+		waitComponent(logger, "s11", shutdownTimeout, s11Handler.Close)
+		waitComponent(logger, "s5c", shutdownTimeout, s5cClient.Close)
+	}
 	waitComponent(logger, "pfcp", shutdownTimeout, pfcpClient.Close)
 	waitComponent(logger, "api", shutdownTimeout, apiSrv.Stop)
 	waitComponent(logger, "metrics", shutdownTimeout, metricsSrv.Stop)
 
 	logger.Info("VectorCore SGW-C stopped")
+}
+
+func sharedGTPCHandler(h *s11.Handler) transport.Handler {
+	return func(conn *transport.Conn, addr *net.UDPAddr, hdr message.Header, raw []byte) {
+		if isPGWInitiatedBearerRequest(hdr.MessageType) {
+			h.HandleS5CInbound(conn, addr, hdr, raw)
+			return
+		}
+		h.Handle(conn, addr, hdr, raw)
+	}
+}
+
+func isPGWInitiatedBearerRequest(msgType uint8) bool {
+	switch msgType {
+	case message.MsgTypeCreateBearerRequest,
+		message.MsgTypeUpdateBearerRequest,
+		message.MsgTypeDeleteBearerRequest:
+		return true
+	default:
+		return false
+	}
 }
 
 func waitComponent(logger *log.Logger, component string, timeout time.Duration, stop func() error) {
@@ -203,7 +286,7 @@ func waitComponent(logger *log.Logger, component string, timeout time.Duration, 
 
 // resolveControlIP determines the SGW-C control-plane IP to use in F-TEID IEs.
 // Per TS 29.274 §8.22, F-TEID IEs carry the actual IP; 0.0.0.0 binds are invalid.
-// Priority: (1) cfg.SGWC.ControlPlaneIP, (2) IP from cfg.S5C.LocalAddr if not 0.0.0.0.
+// Priority: (1) cfg.SGWC.ControlPlaneIP, (2) IP from the S5/S8-C control binding if not 0.0.0.0.
 func resolveControlIP(cfg *sgwcconfig.Config) netip.Addr {
 	if cfg.SGWC.ControlPlaneIP != "" {
 		if addr, err := netip.ParseAddr(cfg.SGWC.ControlPlaneIP); err == nil {
@@ -211,7 +294,7 @@ func resolveControlIP(cfg *sgwcconfig.Config) netip.Addr {
 		}
 	}
 	// Fall back to S5C local addr if it has a specific IP.
-	if ua, err := net.ResolveUDPAddr("udp4", cfg.S5C.LocalAddr); err == nil {
+	if ua, err := net.ResolveUDPAddr("udp4", cfg.S5CListen()); err == nil {
 		if ip4 := ua.IP.To4(); ip4 != nil {
 			addr := netip.AddrFrom4([4]byte(ip4))
 			if !addr.IsUnspecified() {

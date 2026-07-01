@@ -13,6 +13,7 @@ import (
 )
 
 type BuildInfo struct {
+	Component string
 	Version   string
 	BuildDate string
 }
@@ -20,6 +21,7 @@ type BuildInfo struct {
 type HealthOutput struct {
 	Body struct {
 		Status    string `json:"status" doc:"Always \"ok\" when the process is running"`
+		Component string `json:"component" doc:"API component name, e.g. SGW-C or SGW-U"`
 		Version   string `json:"version"`
 		BuildDate string `json:"build_date"`
 	}
@@ -39,9 +41,14 @@ func NewServer(listen string, info BuildInfo, log *slog.Logger) *Server {
 	e.HideBanner = true
 	e.HidePort = true
 
-	cfg := huma.DefaultConfig("VectorCore SGW API", "0.1.0")
+	component := info.Component
+	if component == "" {
+		component = "SGW"
+	}
+	cfg := huma.DefaultConfig(fmt.Sprintf("VectorCore %s API", component), "0.1.0")
 	humaAPI := humaecho.New(e, cfg)
 
+	info.Component = component
 	s := &Server{listen: listen, info: info, e: e, api: humaAPI, log: log}
 	s.registerRoutes()
 	return s
@@ -56,6 +63,7 @@ func (s *Server) registerRoutes() {
 	}, func(ctx context.Context, _ *struct{}) (*HealthOutput, error) {
 		out := &HealthOutput{}
 		out.Body.Status = "ok"
+		out.Body.Component = s.info.Component
 		out.Body.Version = s.info.Version
 		out.Body.BuildDate = s.info.BuildDate
 		return out, nil
