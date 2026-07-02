@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"vectorcore-sgw/internal/sgwc/bearer"
+	"vectorcore-sgw/internal/sgwc/collision"
 	"vectorcore-sgw/internal/sgwc/teid"
 )
 
@@ -103,6 +104,7 @@ func (m *Manager) Create(p CreateParams) (sess *SGWSession, evicted *SGWSession,
 		SGWS11FTEID:     sgwFTEID,
 		DefaultBearerID: p.DefaultEBI,
 		Bearers:         map[uint8]*bearer.Bearer{p.DefaultEBI: defaultBearer},
+		Procedures:      collision.NewTracker(),
 		State:           StatePending,
 		CreatedAt:       time.Now(),
 		UpdatedAt:       time.Now(),

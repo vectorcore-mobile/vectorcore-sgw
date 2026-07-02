@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"vectorcore-sgw/internal/sgwc/bearer"
+	"vectorcore-sgw/internal/sgwc/collision"
 )
 
 // SessionState is the lifecycle state of an SGW-C session.
@@ -67,8 +68,9 @@ type SGWSession struct {
 	UEIPv4          netip.Addr // assigned by PGW in PAA (set in Phase 3)
 	DefaultBearerID uint8
 
-	Bearers map[uint8]*bearer.Bearer // keyed by EBI
-	PFCP    PFCPSessionBinding
+	Bearers    map[uint8]*bearer.Bearer // keyed by EBI
+	PFCP       PFCPSessionBinding
+	Procedures *collision.Tracker
 
 	State     SessionState
 	CreatedAt time.Time
@@ -112,6 +114,15 @@ func (s *SGWSession) GetState() SessionState {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.State
+}
+
+func (s *SGWSession) ProcedureTracker() *collision.Tracker {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.Procedures == nil {
+		s.Procedures = collision.NewTracker()
+	}
+	return s.Procedures
 }
 
 // PFCPBinding returns a snapshot of the current PFCP binding.

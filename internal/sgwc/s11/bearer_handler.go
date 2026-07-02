@@ -24,6 +24,7 @@ import (
 	"vectorcore-sgw/internal/gtpv2/transport"
 	pfcpie "vectorcore-sgw/internal/pfcp/ie"
 	"vectorcore-sgw/internal/sgwc/bearer"
+	"vectorcore-sgw/internal/sgwc/collision"
 	pfcpclient "vectorcore-sgw/internal/sgwc/pfcpclient"
 	"vectorcore-sgw/internal/sgwc/session"
 )
@@ -196,6 +197,7 @@ type preparedCreateBearerRelay struct {
 	cbReq       *message.CreateBearerRequest
 	sess        *session.SGWSession
 	txn         *createBearerTxnState
+	activeProc  collision.ActiveProcedure
 	bearerProvs []bearerProvisioning
 	s11Raw      []byte
 	s11Seq      uint32
@@ -233,6 +235,17 @@ func (h *Handler) prepareCreateBearerRelay(pgwAddr *net.UDPAddr, hdr message.Hea
 		h.replyCreateBearerRetryGuardFailure(pgwAddr, hdr, cbReq, sess, failure)
 		return nil, false
 	}
+	activeProc, ok := h.beginProcedure(sess, pgwProcedureRequest(collision.ProcedureCreateBearer, pgwAddr, hdr.TEID, hdr.SequenceNumber, []uint8{lbi}))
+	if !ok {
+		h.replyBearerError(pgwAddr, hdr, message.MsgTypeCreateBearerResponse, sess.PGWControlFTEID.TEID, ie.CauseRequestRejected)
+		return nil, false
+	}
+	releaseProc := true
+	defer func() {
+		if releaseProc {
+			finishProcedure(sess, activeProc)
+		}
+	}()
 	txn, txnAction := h.beginCreateBearerTxnWithFingerprint(pgwAddr, hdr, raw, sess, fp)
 	switch txnAction {
 	case createBearerTxnActionCached:
@@ -370,12 +383,14 @@ func (h *Handler) prepareCreateBearerRelay(pgwAddr *net.UDPAddr, hdr message.Hea
 		h.replyCreateBearerTxnError(txn.key, pgwAddr, hdr, cbReq, sess.PGWControlFTEID.TEID, ie.CauseSystemFailure)
 		return nil, false
 	}
+	releaseProc = false
 	return &preparedCreateBearerRelay{
 		pgwAddr:     pgwAddr,
 		hdr:         hdr,
 		cbReq:       cbReq,
 		sess:        sess,
 		txn:         txn,
+		activeProc:  activeProc,
 		bearerProvs: bearerProvs,
 		s11Raw:      s11CBReqRaw,
 		s11Seq:      s11Seq,
@@ -396,6 +411,7 @@ func (h *Handler) registerPendingS11CreateBearer(mmeAddr *net.UDPAddr, csrspSeq 
 		cbReq:       prep.cbReq,
 		sess:        prep.sess,
 		txn:         prep.txn,
+		activeProc:  prep.activeProc,
 		bearerProvs: prep.bearerProvs,
 		csrspSeq:    csrspSeq,
 		s11Seq:      prep.s11Seq,
@@ -436,6 +452,7 @@ func (h *Handler) expirePendingS11CreateBearer(key s11CreateBearerResponseKey, t
 	if pending == nil {
 		return
 	}
+	finishProcedure(pending.sess, pending.activeProc)
 
 	h.log.Warn("S11: piggybacked Create Bearer transaction timed out waiting for MME response",
 		"session_id", pending.sess.SessionID,
@@ -472,6 +489,7 @@ func (h *Handler) handlePiggybackCreateBearerResponse(conn *transport.Conn, mmeA
 }
 
 func (h *Handler) completeCreateBearerFromS11Response(pending *pendingS11CreateBearer, raw []byte) {
+	defer finishProcedure(pending.sess, pending.activeProc)
 	cbResp, err := message.ParseCreateBearerResponse(raw)
 	if err != nil {
 		h.log.Error("S5C: Create Bearer — parse piggybacked S11 CBResp failed", "error", err)
@@ -675,6 +693,12 @@ func (h *Handler) handleCreateBearer(pgwAddr *net.UDPAddr, hdr message.Header, r
 		h.replyCreateBearerRetryGuardFailure(pgwAddr, hdr, cbReq, sess, failure)
 		return
 	}
+	activeProc, ok := h.beginProcedure(sess, pgwProcedureRequest(collision.ProcedureCreateBearer, pgwAddr, hdr.TEID, hdr.SequenceNumber, []uint8{lbi}))
+	if !ok {
+		h.replyBearerError(pgwAddr, hdr, message.MsgTypeCreateBearerResponse, sess.PGWControlFTEID.TEID, ie.CauseRequestRejected)
+		return
+	}
+	defer finishProcedure(sess, activeProc)
 	txn, txnAction := h.beginCreateBearerTxnWithFingerprint(pgwAddr, hdr, raw, sess, fp)
 	h.logCreateBearerTxnDecision(txn, txnAction, hdr)
 	switch txnAction {
@@ -1182,6 +1206,12 @@ func (h *Handler) handleUpdateBearer(pgwAddr *net.UDPAddr, hdr message.Header, r
 		h.replyBearerError(pgwAddr, hdr, message.MsgTypeUpdateBearerResponse, 0, ie.CauseContextNotFound)
 		return
 	}
+	ubProc, ok := h.beginProcedure(sess, pgwProcedureRequest(collision.ProcedureUpdateBearer, pgwAddr, hdr.TEID, hdr.SequenceNumber, bearerContextEBIs(ubReq.BearerContexts)))
+	if !ok {
+		h.replyBearerError(pgwAddr, hdr, message.MsgTypeUpdateBearerResponse, sess.PGWControlFTEID.TEID, ie.CauseRequestRejected)
+		return
+	}
+	defer finishProcedure(sess, ubProc)
 
 	// Relay Update Bearer Request to MME verbatim.
 	// Per Table 7.2.15-1 (S11): Bearer Contexts and AMBR are M; forwarded as-is.
@@ -1308,6 +1338,18 @@ func (h *Handler) handleDeleteBearer(pgwAddr *net.UDPAddr, hdr message.Header, r
 		h.replyBearerError(pgwAddr, hdr, message.MsgTypeDeleteBearerResponse, 0, ie.CauseContextNotFound)
 		return
 	}
+	dbEBIs := ebiIEsToValues(dbReq.EBIs)
+	if dbReq.LBI != nil {
+		if lbi, err := dbReq.LBI.EBIValue(); err == nil {
+			dbEBIs = append(dbEBIs, lbi)
+		}
+	}
+	dbProc, ok := h.beginProcedure(sess, pgwProcedureRequest(collision.ProcedureDeleteBearer, pgwAddr, hdr.TEID, hdr.SequenceNumber, dbEBIs))
+	if !ok {
+		h.replyBearerError(pgwAddr, hdr, message.MsgTypeDeleteBearerResponse, sess.PGWControlFTEID.TEID, ie.CauseRequestRejected)
+		return
+	}
+	defer finishProcedure(sess, dbProc)
 
 	// Relay DBReq to MME verbatim.
 	var s11Ies []*ie.IE

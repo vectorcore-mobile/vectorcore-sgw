@@ -51,6 +51,7 @@ type GTPCConfig struct {
 	S11                    GTPCLogical                  `yaml:"s11"`
 	S5C                    GTPCLogical                  `yaml:"s5c"`
 	CreateBearerRetryGuard CreateBearerRetryGuardConfig `yaml:"create_bearer_retry_guard"`
+	TransactionCollision   TransactionCollisionConfig   `yaml:"transaction_collision"`
 }
 
 type GTPCLogical struct {
@@ -59,6 +60,15 @@ type GTPCLogical struct {
 
 type CreateBearerRetryGuardConfig struct {
 	Enabled bool `yaml:"enabled"`
+}
+
+type TransactionCollisionConfig struct {
+	// Mode controls GTPv2-C active procedure collision handling.
+	// strict keeps conservative carrier-safe behavior.
+	// permissive allows bearer-scoped overlaps only when one request has no decoded EBI scope.
+	Mode string `yaml:"mode"`
+	// ActiveProcedureTimeoutSeconds bounds stale in-flight procedure state.
+	ActiveProcedureTimeoutSeconds int `yaml:"active_procedure_timeout_seconds"`
 }
 
 type S11Config struct {
@@ -128,6 +138,10 @@ func Default() *Config {
 		GTPC: GTPCConfig{
 			CreateBearerRetryGuard: CreateBearerRetryGuardConfig{
 				Enabled: true,
+			},
+			TransactionCollision: TransactionCollisionConfig{
+				Mode:                          "strict",
+				ActiveProcedureTimeoutSeconds: 120,
 			},
 		},
 		QoS: QoSConfig{

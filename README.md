@@ -26,6 +26,8 @@ dataplane.
 - Piggybacked GTPv2-C message handling.
 - Multi-PDN and multi-UE bearer ownership isolation by S11 context and EBI.
 - GTPv2-C retransmission response caching.
+- GTPv2-C transaction collision handling with configurable strict/permissive
+  policy.
 - Recovery counter support.
 - JSON API listeners for SGW-C and SGW-U runtime state.
 - Prometheus metrics listeners.
@@ -169,6 +171,9 @@ gtpc:
     bind: "sgwinterface"
   create_bearer_retry_guard:
     enabled: true
+  transaction_collision:
+    mode: "strict"
+    active_procedure_timeout_seconds: 120
 
 s11:
   t3_response_seconds: 3
@@ -220,6 +225,8 @@ SGW-C options:
 | `gtpc.s11.bind` | Named control interface used for S11. |
 | `gtpc.s5c.bind` | Named control interface used for S5/S8-C. |
 | `gtpc.create_bearer_retry_guard.enabled` | Enables repeated Create Bearer retry guard. |
+| `gtpc.transaction_collision.mode` | GTPv2-C transaction collision policy. `strict` rejects unsafe overlaps. `permissive` only relaxes bearer-scoped overlaps when one side has no decoded EBI scope. |
+| `gtpc.transaction_collision.active_procedure_timeout_seconds` | Timeout for stale active GTPv2-C procedure state. Default 120. |
 | `s11.t3_response_seconds` | GTPv2-C retransmission timeout. |
 | `s11.n3_requests` | GTPv2-C retransmission count. |
 | `pfcp.local_addr` | SGW-C PFCP local address. |
@@ -242,6 +249,17 @@ SGW-C options:
 Required SGW-C fields include `sgwc.node_id`, `sgwc.plmn.mcc`,
 `sgwc.plmn.mnc`, `gtpc.s11.bind`, `gtpc.s5c.bind`, `pfcp.local_addr`, and at
 least one `pfcp.sgwu` entry.
+
+SGW-C exports the following GTPv2-C transaction collision metrics on its
+Prometheus listener:
+
+| Metric | Purpose |
+| --- | --- |
+| `sgwc_gtpv2c_collision_rejections_total` | Count of rejected overlapping GTPv2-C procedures by action, policy, active procedure, new procedure, and owner. |
+| `sgwc_gtpv2c_collision_stale_expired_total` | Count of stale active-procedure records expired before a new collision decision. |
+
+Additional transaction collision behavior and validation notes are in
+`docs/gtpv2c-transaction-collision.md`.
 
 ## SGW-U Configuration
 

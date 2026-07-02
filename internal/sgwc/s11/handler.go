@@ -17,6 +17,7 @@ import (
 	"vectorcore-sgw/internal/gtpv2/transport"
 	pfcpie "vectorcore-sgw/internal/pfcp/ie"
 	"vectorcore-sgw/internal/sgwc/bearer"
+	"vectorcore-sgw/internal/sgwc/collision"
 	"vectorcore-sgw/internal/sgwc/pfcpclient"
 	"vectorcore-sgw/internal/sgwc/recovery"
 	"vectorcore-sgw/internal/sgwc/s5c"
@@ -25,15 +26,18 @@ import (
 
 // Handler processes inbound S11 messages from the MME.
 type Handler struct {
-	cfg      *sgwcconfig.Config
-	conn     gtpcConn
-	log      *slog.Logger
-	sessions *session.Manager
-	recovery *recovery.Counter
-	s5c      s5cClient
-	pfcp     pfcpClient
-	localIP  netip.Addr // SGW-C S11 control-plane IP for Sender F-TEID IEs
-	peerSeen sync.Map   // addr string → uint8; last restart counter advertised to each MME peer
+	cfg              *sgwcconfig.Config
+	conn             gtpcConn
+	log              *slog.Logger
+	sessions         *session.Manager
+	recovery         *recovery.Counter
+	s5c              s5cClient
+	pfcp             pfcpClient
+	collisionMetrics collisionMetrics
+	collisionMode    collision.Mode
+	collisionTimeout time.Duration
+	localIP          netip.Addr // SGW-C S11 control-plane IP for Sender F-TEID IEs
+	peerSeen         sync.Map   // addr string → uint8; last restart counter advertised to each MME peer
 
 	cbTxnMu        sync.Mutex
 	cbTxns         map[createBearerTxnKey]*createBearerTxnState
@@ -82,6 +86,7 @@ type pendingS11CreateBearer struct {
 	cbReq       *message.CreateBearerRequest
 	sess        *session.SGWSession
 	txn         *createBearerTxnState
+	activeProc  collision.ActiveProcedure
 	bearerProvs []bearerProvisioning
 	csrspSeq    uint32
 	s11Seq      uint32
@@ -110,18 +115,20 @@ func New(cfg *sgwcconfig.Config, sessions *session.Manager, rc *recovery.Counter
 		}
 	}
 	h := &Handler{
-		cfg:            cfg,
-		conn:           conn,
-		log:            log,
-		sessions:       sessions,
-		recovery:       rc,
-		s5c:            s5cClient,
-		pfcp:           pfcpClient,
-		localIP:        localIP,
-		cbTxns:         make(map[createBearerTxnKey]*createBearerTxnState),
-		cbFPs:          make(map[createBearerFingerprintKey]*createBearerTxnState),
-		cbS11:          make(map[s11CreateBearerResponseKey]*pendingS11CreateBearer),
-		cbProcFailures: make(map[createBearerProcedureKey]*createBearerProcedureFailure),
+		cfg:              cfg,
+		conn:             conn,
+		log:              log,
+		sessions:         sessions,
+		recovery:         rc,
+		s5c:              s5cClient,
+		pfcp:             pfcpClient,
+		collisionMode:    collisionModeFromConfig(cfg),
+		collisionTimeout: collisionTimeoutFromConfig(cfg),
+		localIP:          localIP,
+		cbTxns:           make(map[createBearerTxnKey]*createBearerTxnState),
+		cbFPs:            make(map[createBearerFingerprintKey]*createBearerTxnState),
+		cbS11:            make(map[s11CreateBearerResponseKey]*pendingS11CreateBearer),
+		cbProcFailures:   make(map[createBearerProcedureKey]*createBearerProcedureFailure),
 	}
 	conn.SetHandler(h.handle)
 	return h, nil
@@ -131,18 +138,20 @@ func New(cfg *sgwcconfig.Config, sessions *session.Manager, rc *recovery.Counter
 // This is used when S11 and S5/S8-C share one configured control binding.
 func NewWithConn(cfg *sgwcconfig.Config, conn *transport.Conn, sessions *session.Manager, rc *recovery.Counter, s5cClient *s5c.Client, pfcpClient *pfcpclient.Client, localIP netip.Addr, log *slog.Logger) *Handler {
 	h := &Handler{
-		cfg:            cfg,
-		conn:           conn,
-		log:            log,
-		sessions:       sessions,
-		recovery:       rc,
-		s5c:            s5cClient,
-		pfcp:           pfcpClient,
-		localIP:        localIP,
-		cbTxns:         make(map[createBearerTxnKey]*createBearerTxnState),
-		cbFPs:          make(map[createBearerFingerprintKey]*createBearerTxnState),
-		cbS11:          make(map[s11CreateBearerResponseKey]*pendingS11CreateBearer),
-		cbProcFailures: make(map[createBearerProcedureKey]*createBearerProcedureFailure),
+		cfg:              cfg,
+		conn:             conn,
+		log:              log,
+		sessions:         sessions,
+		recovery:         rc,
+		s5c:              s5cClient,
+		pfcp:             pfcpClient,
+		collisionMode:    collisionModeFromConfig(cfg),
+		collisionTimeout: collisionTimeoutFromConfig(cfg),
+		localIP:          localIP,
+		cbTxns:           make(map[createBearerTxnKey]*createBearerTxnState),
+		cbFPs:            make(map[createBearerFingerprintKey]*createBearerTxnState),
+		cbS11:            make(map[s11CreateBearerResponseKey]*pendingS11CreateBearer),
+		cbProcFailures:   make(map[createBearerProcedureKey]*createBearerProcedureFailure),
 	}
 	return h
 }
@@ -664,6 +673,14 @@ func (h *Handler) handleModifyBearerRequest(conn *transport.Conn, addr *net.UDPA
 		return
 	}
 	mmeTEID := defaultSess.MMEControlFTEID.TEID
+	mbEBIs := bearerContextEBIs(req.BearerContexts)
+	mbProc, ok := h.beginProcedure(defaultSess, mmeProcedureRequest(collision.ProcedureModifyBearer, addr, hdr.TEID, hdr.SequenceNumber, mbEBIs))
+	if !ok {
+		resp, _ := message.MarshalModifyBearerResponse(req, mmeTEID, ie.CauseRequestRejected)
+		conn.Reply(addr, resp) //nolint:errcheck
+		return
+	}
+	defer finishProcedure(defaultSess, mbProc)
 
 	// Process each bearer context and record the per-bearer outcome.
 	// Per TS 29.274 Rel-15 Tables 7.2.8-1/7.2.8-2: MBResp must include a Bearer
@@ -886,6 +903,19 @@ func (h *Handler) handleDeleteSessionRequest(conn *transport.Conn, addr *net.UDP
 	}
 
 	mmeTEID := sess.MMEControlFTEID.TEID
+	var dsEBIs []uint8
+	if req.EBI != nil {
+		if deleteEBI, eErr := req.EBI.EBIValue(); eErr == nil {
+			dsEBIs = []uint8{deleteEBI}
+		}
+	}
+	dsProc, ok := h.beginProcedure(sess, mmeProcedureRequest(collision.ProcedureDeleteSession, addr, hdr.TEID, hdr.SequenceNumber, dsEBIs))
+	if !ok {
+		resp, _ := message.MarshalDeleteSessionResponse(req, mmeTEID, ie.CauseRequestRejected)
+		conn.Reply(addr, resp) //nolint:errcheck
+		return
+	}
+	defer finishProcedure(sess, dsProc)
 	sess.Transition(session.StateDeleting)
 
 	// Propagate Delete Session Request to PGW on S5/S8-C if a PGW session exists.
@@ -998,6 +1028,13 @@ func (h *Handler) handleReleaseAccessBearersRequest(conn *transport.Conn, addr *
 		conn.Reply(addr, resp) //nolint:errcheck
 		return
 	}
+	rabProc, ok := h.beginProcedure(sess, mmeProcedureRequest(collision.ProcedureReleaseAccessBearers, addr, hdr.TEID, hdr.SequenceNumber, nil))
+	if !ok {
+		resp, _ := message.MarshalReleaseAccessBearersResponse(req, sess.MMEControlFTEID.TEID, ie.CauseRequestRejected)
+		conn.Reply(addr, resp) //nolint:errcheck
+		return
+	}
+	defer finishProcedure(sess, rabProc)
 
 	// R15-005 FIX: update SGW-U forwarding state before responding to the MME.
 	// Per TS 23.401 Rel-15 §5.3.5: "The SGW shall [...] store the packet(s) that

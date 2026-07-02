@@ -17,6 +17,7 @@ import (
 	"vectorcore-sgw/internal/gtpv2/message"
 	pfcpie "vectorcore-sgw/internal/pfcp/ie"
 	"vectorcore-sgw/internal/sgwc/bearer"
+	"vectorcore-sgw/internal/sgwc/collision"
 	"vectorcore-sgw/internal/sgwc/pfcpclient"
 	"vectorcore-sgw/internal/sgwc/s5c"
 	"vectorcore-sgw/internal/sgwc/session"
@@ -129,6 +130,230 @@ func (f *fakePFCPClient) RemoveBearerRulesOnPeer(context.Context, string, uint64
 }
 func (f *fakePFCPClient) DeleteSessionOnPeer(context.Context, string, uint64, uint64) error {
 	return nil
+}
+
+func TestHandleS5CUpdateBearerRejectsTransactionCollision(t *testing.T) {
+	mgr, sess := testCollisionSession(t)
+	s5cFake := &fakeS5CClient{}
+	gtpc := &fakeGTPCConn{}
+	h := &Handler{
+		conn:     gtpc,
+		log:      slog.Default(),
+		sessions: mgr,
+		s5c:      s5cFake,
+		pfcp:     &fakePFCPClient{},
+	}
+	if _, dec := sess.ProcedureTracker().Begin(collision.Request{
+		Procedure: collision.ProcedureDeleteSession,
+		Owner:     collision.OwnerMME,
+		EBIs:      []uint8{5},
+	}); dec.Action != collision.ActionAllow {
+		t.Fatalf("seed collision procedure decision = %s, want allow", dec.Action)
+	}
+
+	pgwAddr := &net.UDPAddr{IP: net.ParseIP("10.90.250.92"), Port: 2123}
+	hdr := message.Header{
+		Version:        2,
+		HasTEID:        true,
+		MessageType:    message.MsgTypeUpdateBearerRequest,
+		TEID:           sess.SGWS5CFTEID.TEID,
+		SequenceNumber: 0x10203,
+	}
+	raw, err := message.MarshalUpdateBearerRequest(
+		hdr.TEID,
+		hdr.SequenceNumber,
+		ie.NewBearerContext(0, ie.NewEBI(5), ie.NewBearerQoS(9, 9, 0, 9, 0, 0, 0, 0)),
+		ie.NewAMBR(256000, 256000),
+	)
+	if err != nil {
+		t.Fatalf("Marshal Update Bearer Request: %v", err)
+	}
+
+	h.HandleS5CInbound(nil, pgwAddr, hdr, raw)
+
+	assertBearerCauseResponse(t, s5cFake.replies, message.MsgTypeUpdateBearerResponse, sess.PGWControlFTEID.TEID, hdr.SequenceNumber, ie.CauseRequestRejected)
+	if len(gtpc.sends) != 0 {
+		t.Fatalf("S11 sends after collided Update Bearer = %d; want 0", len(gtpc.sends))
+	}
+}
+
+func TestHandleS5CDeleteBearerRejectsTransactionCollision(t *testing.T) {
+	mgr, sess := testCollisionSession(t)
+	s5cFake := &fakeS5CClient{}
+	gtpc := &fakeGTPCConn{}
+	h := &Handler{
+		conn:     gtpc,
+		log:      slog.Default(),
+		sessions: mgr,
+		s5c:      s5cFake,
+		pfcp:     &fakePFCPClient{},
+	}
+	if _, dec := sess.ProcedureTracker().Begin(collision.Request{
+		Procedure: collision.ProcedureModifyBearer,
+		Owner:     collision.OwnerMME,
+		EBIs:      []uint8{5},
+	}); dec.Action != collision.ActionAllow {
+		t.Fatalf("seed collision procedure decision = %s, want allow", dec.Action)
+	}
+
+	pgwAddr := &net.UDPAddr{IP: net.ParseIP("10.90.250.92"), Port: 2123}
+	hdr := message.Header{
+		Version:        2,
+		HasTEID:        true,
+		MessageType:    message.MsgTypeDeleteBearerRequest,
+		TEID:           sess.SGWS5CFTEID.TEID,
+		SequenceNumber: 0x10204,
+	}
+	raw, err := message.MarshalDeleteBearerRequest(hdr.TEID, hdr.SequenceNumber, ie.NewEBI(5))
+	if err != nil {
+		t.Fatalf("Marshal Delete Bearer Request: %v", err)
+	}
+
+	h.HandleS5CInbound(nil, pgwAddr, hdr, raw)
+
+	assertBearerCauseResponse(t, s5cFake.replies, message.MsgTypeDeleteBearerResponse, sess.PGWControlFTEID.TEID, hdr.SequenceNumber, ie.CauseRequestRejected)
+	if len(gtpc.sends) != 0 {
+		t.Fatalf("S11 sends after collided Delete Bearer = %d; want 0", len(gtpc.sends))
+	}
+}
+
+func TestBeginProcedureRejectsS11SessionWideCollision(t *testing.T) {
+	_, sess := testCollisionSession(t)
+	metrics := &fakeCollisionMetrics{}
+	h := &Handler{log: slog.Default()}
+	h.SetCollisionMetrics(metrics)
+	active, dec := sess.ProcedureTracker().Begin(collision.Request{
+		Procedure: collision.ProcedureCreateBearer,
+		Owner:     collision.OwnerPGW,
+		EBIs:      []uint8{5},
+	})
+	if dec.Action != collision.ActionAllow {
+		t.Fatalf("seed collision procedure decision = %s, want allow", dec.Action)
+	}
+	addr := &net.UDPAddr{IP: net.ParseIP("10.90.250.77"), Port: 2123}
+	proc, ok := h.beginProcedure(sess, mmeProcedureRequest(collision.ProcedureDeleteSession, addr, sess.SGWS11FTEID.TEID, 0x10205, []uint8{5}))
+	if ok {
+		t.Fatalf("beginProcedure returned ok with proc %+v; want collision rejection", proc)
+	}
+	activeNow := sess.ProcedureTracker().Active()
+	if len(activeNow) != 1 || activeNow[0].ID != active.ID {
+		t.Fatalf("active procedures after S11 collision = %+v; want original proc only", activeNow)
+	}
+	if metrics.decisions != 1 {
+		t.Fatalf("collision metric decisions = %d; want 1", metrics.decisions)
+	}
+	if metrics.lastDecision.Action != collision.ActionRejectNew {
+		t.Fatalf("collision metric action = %s; want %s", metrics.lastDecision.Action, collision.ActionRejectNew)
+	}
+	if metrics.lastActive.ID != active.ID {
+		t.Fatalf("collision metric active ID = %d; want %d", metrics.lastActive.ID, active.ID)
+	}
+}
+
+func TestBeginProcedurePermissiveModeAllowsUnknownBearerScope(t *testing.T) {
+	_, sess := testCollisionSession(t)
+	h := &Handler{
+		log:              slog.Default(),
+		collisionMode:    collision.ModePermissive,
+		collisionTimeout: collision.DefaultActiveProcedureTimeout,
+	}
+	_, dec := sess.ProcedureTracker().Begin(collision.Request{
+		Procedure: collision.ProcedureUpdateBearer,
+		Owner:     collision.OwnerPGW,
+	})
+	if dec.Action != collision.ActionAllow {
+		t.Fatalf("seed collision procedure decision = %s, want allow", dec.Action)
+	}
+	addr := &net.UDPAddr{IP: net.ParseIP("10.90.250.77"), Port: 2123}
+	proc, ok := h.beginProcedure(sess, mmeProcedureRequest(collision.ProcedureModifyBearer, addr, sess.SGWS11FTEID.TEID, 0x10206, []uint8{7}))
+	if !ok {
+		t.Fatal("beginProcedure rejected unknown-scope bearer overlap in permissive mode")
+	}
+	defer finishProcedure(sess, proc)
+	if got := sess.ProcedureTracker().Active(); len(got) != 2 {
+		t.Fatalf("active procedures after permissive overlap = %d; want 2", len(got))
+	}
+}
+
+type fakeCollisionMetrics struct {
+	decisions    int
+	staleExpired int
+	lastActive   collision.ActiveProcedure
+	lastReq      collision.Request
+	lastDecision collision.Decision
+}
+
+func (f *fakeCollisionMetrics) OnDecision(active collision.ActiveProcedure, req collision.Request, decision collision.Decision) {
+	f.decisions++
+	f.lastActive = active
+	f.lastReq = req
+	f.lastDecision = decision
+}
+
+func (f *fakeCollisionMetrics) OnStaleExpired(_ collision.Request, expired int) {
+	f.staleExpired += expired
+}
+
+func testCollisionSession(t *testing.T) (*session.Manager, *session.SGWSession) {
+	t.Helper()
+	mgr := session.NewManager()
+	sess, _, err := mgr.Create(session.CreateParams{
+		IMSI:            "311435000070570",
+		APN:             "internet.mnc435.mcc311.gprs",
+		RATType:         6,
+		ServingNetwork:  "311-435",
+		MMEControlFTEID: session.FTEID{TEID: 0x800FE004, IPv4: netip.MustParseAddr("10.90.250.77")},
+		DefaultEBI:      5,
+		QCI:             9,
+		ARP:             bearer.ARP{PriorityLevel: 9},
+		MBRUplink:       256000,
+		MBRDownlink:     256000,
+	})
+	if err != nil {
+		t.Fatalf("Create session: %v", err)
+	}
+	sess.State = session.StateActive
+	sess.SGWS5CFTEID = session.FTEID{TEID: 0x16BCBA4E, IPv4: netip.MustParseAddr("10.90.250.59")}
+	sess.PGWControlFTEID = session.FTEID{TEID: 0x80190008, IPv4: netip.MustParseAddr("10.90.250.92")}
+	sess.PFCP = session.PFCPSessionBinding{
+		LocalFSEID:  session.FSEID{SEID: 2, IPv4: netip.MustParseAddr("10.90.250.59")},
+		SGWUFSEID:   session.FSEID{SEID: 3, IPv4: netip.MustParseAddr("127.0.0.2")},
+		SGWUAddr:    "127.0.0.2:8805",
+		Established: true,
+	}
+	mgr.RegisterS5CTEID(sess.SessionID, sess.SGWS5CFTEID.TEID)
+	return mgr, sess
+}
+
+func assertBearerCauseResponse(t *testing.T, replies [][]byte, wantType uint8, wantTEID, wantSeq uint32, wantCause uint8) {
+	t.Helper()
+	if len(replies) != 1 {
+		t.Fatalf("S5C replies = %d; want 1", len(replies))
+	}
+	hdr, ies, err := message.Parse(replies[0])
+	if err != nil {
+		t.Fatalf("Parse S5C response: %v", err)
+	}
+	if hdr.MessageType != wantType {
+		t.Fatalf("S5C response type = %d; want %d", hdr.MessageType, wantType)
+	}
+	if hdr.TEID != wantTEID {
+		t.Fatalf("S5C response TEID = 0x%08X; want 0x%08X", hdr.TEID, wantTEID)
+	}
+	if hdr.SequenceNumber != wantSeq {
+		t.Fatalf("S5C response seq = %d; want %d", hdr.SequenceNumber, wantSeq)
+	}
+	causeIE := ie.FindFirst(ies, ie.TypeCause)
+	if causeIE == nil {
+		t.Fatal("S5C response missing Cause IE")
+	}
+	cause, err := causeIE.CauseValue()
+	if err != nil {
+		t.Fatalf("CauseValue: %v", err)
+	}
+	if cause != wantCause {
+		t.Fatalf("S5C response cause = %d; want %d", cause, wantCause)
+	}
 }
 
 func TestBuildS11CreateSessionResponseIEsMatchesCiscoPrimaryShape(t *testing.T) {

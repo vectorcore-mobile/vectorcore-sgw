@@ -49,6 +49,14 @@ func (c *Config) Validate() error {
 	if c.S11.N3Requests <= 0 {
 		return fmt.Errorf("s11.n3_requests must be positive")
 	}
+	switch c.GTPC.TransactionCollision.Mode {
+	case "strict", "permissive":
+	default:
+		return fmt.Errorf("gtpc.transaction_collision.mode must be strict or permissive, got %q", c.GTPC.TransactionCollision.Mode)
+	}
+	if c.GTPC.TransactionCollision.ActiveProcedureTimeoutSeconds <= 0 {
+		return fmt.Errorf("gtpc.transaction_collision.active_procedure_timeout_seconds must be positive")
+	}
 	if err := validateDSCP("qos.outer_marking.gtpc.dscp", c.QoS.OuterMarking.GTPC.DSCP); err != nil {
 		return err
 	}

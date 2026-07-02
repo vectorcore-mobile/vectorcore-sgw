@@ -20,6 +20,10 @@ gtpc:
     bind: "sgwinterface"
   create_bearer_retry_guard:
     enabled: true
+  transaction_collision:
+    # strict: reject unsafe overlaps; permissive: allow bearer-scoped unknown-EBI overlaps.
+    mode: "strict"
+    active_procedure_timeout_seconds: 120
 
 s11:
   t3_response_seconds: 3

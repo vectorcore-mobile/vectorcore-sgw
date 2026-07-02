@@ -107,6 +107,38 @@ func TestDefaultCreateBearerRetryGuardEnabled(t *testing.T) {
 	}
 }
 
+func TestDefaultTransactionCollisionPolicy(t *testing.T) {
+	cfg := Default()
+	if cfg.GTPC.TransactionCollision.Mode != "strict" {
+		t.Fatalf("default transaction collision mode = %q; want strict", cfg.GTPC.TransactionCollision.Mode)
+	}
+	if cfg.GTPC.TransactionCollision.ActiveProcedureTimeoutSeconds != 120 {
+		t.Fatalf("default transaction collision timeout = %d; want 120", cfg.GTPC.TransactionCollision.ActiveProcedureTimeoutSeconds)
+	}
+}
+
+func TestValidateRejectsInvalidTransactionCollisionPolicy(t *testing.T) {
+	cfg := validTestConfig()
+	cfg.GTPC.TransactionCollision.Mode = "off"
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("Validate succeeded with invalid transaction collision mode")
+	}
+
+	cfg = validTestConfig()
+	cfg.GTPC.TransactionCollision.ActiveProcedureTimeoutSeconds = 0
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("Validate succeeded with invalid transaction collision timeout")
+	}
+}
+
+func TestValidateAcceptsPermissiveTransactionCollisionPolicy(t *testing.T) {
+	cfg := validTestConfig()
+	cfg.GTPC.TransactionCollision.Mode = "permissive"
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate rejected permissive transaction collision mode: %v", err)
+	}
+}
+
 func TestDefaultQoSOuterMarking(t *testing.T) {
 	cfg := Default()
 	if !cfg.QoS.OuterMarking.Enabled {
