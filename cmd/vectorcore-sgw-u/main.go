@@ -83,6 +83,12 @@ func main() {
 		"pfcp_enabled", cfg.QoS.OuterMarking.PFCP.Enabled,
 		"pfcp_dscp", cfg.QoS.OuterMarking.PFCP.DSCP,
 	)
+	logger.Info("SGW-U QCI marking configured",
+		"enabled", cfg.QoS.QCIMarking.Enabled,
+		"override_default_gtpu", cfg.QoS.QCIMarking.OverrideDefaultGTPU,
+		"default_gtpu_dscp", cfg.QoS.QCIMarking.DefaultGTPUDSCP,
+		"qci_mappings", len(cfg.QoS.QCIMarking.QCIToDSCP),
+	)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	sigCh := make(chan os.Signal, 1)
@@ -134,9 +140,11 @@ func main() {
 			os.Exit(1)
 		}
 		if err := xdpDp.ConfigureQoSOuterMarking(bpf.QoSOuterMarkingConfig{
-			Enabled:     cfg.QoS.OuterMarking.Enabled,
-			GTPUEnabled: cfg.QoS.OuterMarking.GTPU.Enabled,
-			GTPUDSCP:    uint8(cfg.QoS.OuterMarking.GTPU.DSCP),
+			Enabled:        cfg.QoS.OuterMarking.Enabled,
+			GTPUEnabled:    cfg.QoS.OuterMarking.GTPU.Enabled,
+			GTPUDSCP:       uint8(cfg.QoS.OuterMarking.GTPU.DSCP),
+			QCIEnabled:     cfg.QoS.QCIMarking.Enabled && cfg.QoS.QCIMarking.OverrideDefaultGTPU,
+			QCIDefaultDSCP: uint8(cfg.QoS.QCIMarking.DefaultGTPUDSCP),
 		}); err != nil {
 			logger.Error("XDP-BPF QoS outer marking map load failed", "error", err)
 			os.Exit(1)
@@ -144,8 +152,15 @@ func main() {
 		logger.Info("SGW-U eBPF QoS outer marking map loaded",
 			"gtpu_enabled", cfg.QoS.OuterMarking.Enabled && cfg.QoS.OuterMarking.GTPU.Enabled,
 			"gtpu_dscp", cfg.QoS.OuterMarking.GTPU.DSCP,
+			"qci_enabled", cfg.QoS.QCIMarking.Enabled && cfg.QoS.QCIMarking.OverrideDefaultGTPU,
+			"qci_default_dscp", cfg.QoS.QCIMarking.DefaultGTPUDSCP,
 		)
-		compiler := bpf.NewCompiler(xdpDp, s1uLocalIP, s5uLocalIP, logger.Logger)
+		compiler := bpf.NewCompiler(xdpDp, s1uLocalIP, s5uLocalIP, logger.Logger, bpf.QCIMarkingConfig{
+			Enabled:             cfg.QoS.QCIMarking.Enabled,
+			OverrideDefaultGTPU: cfg.QoS.QCIMarking.OverrideDefaultGTPU,
+			DefaultGTPUDSCP:     uint8(cfg.QoS.QCIMarking.DefaultGTPUDSCP),
+			QCIToDSCP:           qciToDSCPMap(cfg.QoS.QCIMarking.QCIToDSCP),
+		})
 		pfcpSrv.SetBPFInstaller(compiler)
 		logger.Info("XDP-BPF GTP-U fast path active",
 			"s1u_iface", s1u.Ifname,
@@ -244,4 +259,12 @@ func waitComponent(logger *log.Logger, component string, timeout time.Duration, 
 	case <-time.After(timeout):
 		logger.Error("shutdown timeout", "component", component, "waited", timeout)
 	}
+}
+
+func qciToDSCPMap(in map[int]int) map[uint8]uint8 {
+	out := make(map[uint8]uint8, len(in))
+	for qci, dscp := range in {
+		out[uint8(qci)] = uint8(dscp)
+	}
+	return out
 }

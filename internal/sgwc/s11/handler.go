@@ -326,7 +326,7 @@ func (h *Handler) handleCreateSessionRequest(conn *transport.Conn, addr *net.UDP
 	// which must be included in the S5/S8-C CSReq bearer context so the PGW-U can send
 	// downlink traffic to the correct SGW-U tunnel endpoint.
 	// FAR 1 starts as DROP; it is upgraded to FORW (with PGW-U OHC) after PGW CSResp.
-	pfcpResult, pfcpErr := h.establishProvisionalPFCPSession(context.TODO())
+	pfcpResult, pfcpErr := h.establishProvisionalPFCPSession(context.TODO(), sess)
 	if pfcpErr != nil {
 		h.log.Error("S11: PFCP provisional session failed — aborting CSReq",
 			"session_id", sess.SessionID, "error", pfcpErr)
@@ -1084,8 +1084,24 @@ type pfcpSessionResult struct {
 //
 //	FAR 1: Access→Core DROP (provisional) — upgraded to FORW after PGW CSResp
 //	FAR 2: Core→Access DROP — upgraded to FORW on Modify Bearer Request
-func (h *Handler) establishProvisionalPFCPSession(ctx context.Context) (*pfcpSessionResult, error) {
+func (h *Handler) establishProvisionalPFCPSession(ctx context.Context, sess *session.SGWSession) (*pfcpSessionResult, error) {
 	cpSEID := h.pfcp.AllocCPSEID()
+	defaultBearer := sess.GetBearer(sess.DefaultBearerID)
+	qosIE := pfcpie.NewVectorCoreQoSMarking(sess.DefaultBearerID, 0, false)
+	if defaultBearer != nil && defaultBearer.QCI != 0 {
+		qosIE = pfcpie.NewVectorCoreQoSMarking(defaultBearer.EBI, defaultBearer.QCI, true)
+		h.log.Info("SGW-C: bearer QoS state updated",
+			"imsi", sess.IMSI,
+			"apn", sess.APN,
+			"ebi", defaultBearer.EBI,
+			"qci", defaultBearer.QCI,
+			"arp_pl", defaultBearer.ARP.PriorityLevel,
+			"gbr_ul", defaultBearer.GBRUplink,
+			"gbr_dl", defaultBearer.GBRDownlink,
+			"mbr_ul", defaultBearer.MBRUplink,
+			"mbr_dl", defaultBearer.MBRDownlink,
+		)
+	}
 
 	// PDR 1: Access (S1-U) → Core (S5/S8), uplink direction.
 	// F-TEID with CHOOSE=1 so SGW-U allocates the S1-U TEID.
@@ -1098,6 +1114,7 @@ func (h *Handler) establishProvisionalPFCPSession(ctx context.Context) (*pfcpSes
 		pfcpie.NewPrecedence(100),
 		pdi1,
 		pfcpie.NewFARID(1),
+		qosIE,
 	)
 
 	// PDR 2: Core (S5/S8) → Access (S1-U), downlink direction.
@@ -1111,6 +1128,7 @@ func (h *Handler) establishProvisionalPFCPSession(ctx context.Context) (*pfcpSes
 		pfcpie.NewPrecedence(200),
 		pdi2,
 		pfcpie.NewFARID(2),
+		qosIE,
 	)
 
 	// FAR 1: DROP (uplink, provisional). Upgraded to FORW after PGW CSResp provides PGW-U TEID.

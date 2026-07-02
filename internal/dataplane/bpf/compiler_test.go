@@ -140,6 +140,95 @@ func TestBuildValueFORWUplink(t *testing.T) {
 	}
 }
 
+func TestBuildValueAppliesQCIDSCP(t *testing.T) {
+	c := &Compiler{
+		dp:         &XDPDataplane{s1uIfindex: 10, s5uIfindex: 20},
+		s1uLocalIP: netip.MustParseAddr("10.0.0.1"),
+		s5uLocalIP: netip.MustParseAddr("10.0.1.2"),
+		log:        newTestLogger(t),
+		qos: QCIMarkingConfig{
+			Enabled:             true,
+			OverrideDefaultGTPU: true,
+			DefaultGTPUDSCP:     0,
+			QCIToDSCP:           map[uint8]uint8{1: 46, 5: 40, 9: 0},
+		},
+	}
+	far := &session.FAR{
+		ID:          1,
+		ApplyAction: pfcpie.ApplyActionFORW,
+		OuterTEID:   0xAABBCCDD,
+		OuterIP:     netip.MustParseAddr("192.168.2.1"),
+	}
+	tests := []struct {
+		name string
+		qci  uint8
+		want uint8
+	}{
+		{name: "voice QCI 1 EF", qci: 1, want: 46},
+		{name: "IMS signalling QCI 5 CS5", qci: 5, want: 40},
+		{name: "internet QCI 9 CS0", qci: 9, want: 0},
+		{name: "unmapped QCI default", qci: 70, want: 0},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			pdr := &session.PDR{
+				ID:              1,
+				LocalTEID:       100,
+				SourceInterface: pfcpie.SourceInterfaceAccess,
+				EBI:             7,
+				QCI:             tc.qci,
+				QoSValid:        true,
+			}
+			val, err := c.buildValue(pdr, far)
+			if err != nil {
+				t.Fatalf("buildValue: %v", err)
+			}
+			if val.QosValid != 1 || val.Qci != tc.qci || val.Ebi != 7 {
+				t.Fatalf("QoS metadata = valid:%d qci:%d ebi:%d; want valid:1 qci:%d ebi:7",
+					val.QosValid, val.Qci, val.Ebi, tc.qci)
+			}
+			if val.OuterDscp != tc.want {
+				t.Fatalf("OuterDscp = %d, want %d", val.OuterDscp, tc.want)
+			}
+		})
+	}
+}
+
+func TestBuildValueQCIMarkingDisabledLeavesRuleQoSInvalid(t *testing.T) {
+	c := &Compiler{
+		dp:         &XDPDataplane{s1uIfindex: 10, s5uIfindex: 20},
+		s1uLocalIP: netip.MustParseAddr("10.0.0.1"),
+		s5uLocalIP: netip.MustParseAddr("10.0.1.2"),
+		qos: QCIMarkingConfig{
+			Enabled:             false,
+			OverrideDefaultGTPU: true,
+			DefaultGTPUDSCP:     0,
+			QCIToDSCP:           map[uint8]uint8{1: 46},
+		},
+	}
+	pdr := &session.PDR{
+		ID:              1,
+		LocalTEID:       100,
+		SourceInterface: pfcpie.SourceInterfaceAccess,
+		EBI:             7,
+		QCI:             1,
+		QoSValid:        true,
+	}
+	far := &session.FAR{
+		ID:          1,
+		ApplyAction: pfcpie.ApplyActionFORW,
+		OuterTEID:   0xAABBCCDD,
+		OuterIP:     netip.MustParseAddr("192.168.2.1"),
+	}
+	val, err := c.buildValue(pdr, far)
+	if err != nil {
+		t.Fatalf("buildValue: %v", err)
+	}
+	if val.QosValid != 0 || val.OuterDscp != 0 {
+		t.Fatalf("QoS metadata = valid:%d outer_dscp:%d; want zeroed when disabled", val.QosValid, val.OuterDscp)
+	}
+}
+
 // TestBuildValueFORWDownlink verifies that a downlink FORW FAR produces:
 //   - outer_src_ip = S1-U local IP (SGW-U egress for downlink)
 //   - outer_dst_ip = FAR.OuterIP (eNB IP)

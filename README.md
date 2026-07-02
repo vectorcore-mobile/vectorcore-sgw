@@ -183,6 +183,16 @@ pfcp:
       node_id: "sgw-u-1"
       addr: "127.0.0.2:8805"
 
+qos:
+  outer_marking:
+    enabled: true
+    gtpc:
+      enabled: true
+      dscp: 40
+    pfcp:
+      enabled: true
+      dscp: 40
+
 logging:
   level: info
   file: /var/log/vectorcore/sgw/sgw-c.log
@@ -218,6 +228,11 @@ SGW-C options:
 | `pfcp.sgwu[].name` | SGW-U peer name. |
 | `pfcp.sgwu[].node_id` | SGW-U peer node ID. |
 | `pfcp.sgwu[].addr` | SGW-U PFCP address. |
+| `qos.outer_marking.enabled` | Enables outer IP DSCP marking. |
+| `qos.outer_marking.gtpc.enabled` | Enables DSCP marking on SGW-C GTP-C sockets. |
+| `qos.outer_marking.gtpc.dscp` | GTP-C DSCP value, range 0-63. Default 40. |
+| `qos.outer_marking.pfcp.enabled` | Enables DSCP marking on SGW-C PFCP sockets. |
+| `qos.outer_marking.pfcp.dscp` | PFCP DSCP value, range 0-63. Default 40. |
 | `logging.level` | Log level. |
 | `logging.file` | Log file path. |
 | `api.listen` | SGW-C HTTP API listen address. |
@@ -255,6 +270,32 @@ gtpu:
   s5u:
     bind: "sgwinterface"
 
+qos:
+  outer_marking:
+    enabled: true
+    gtpu:
+      enabled: true
+      dscp: 0
+    pfcp:
+      enabled: true
+      dscp: 40
+  qci_marking:
+    enabled: true
+    override_default_gtpu: true
+    default_gtpu_dscp: 0
+    unknown_teid_dscp: 0
+    trust_inner_dscp: false
+    qci_to_dscp:
+      1: 46
+      2: 34
+      3: 26
+      4: 26
+      5: 40
+      6: 18
+      7: 26
+      8: 0
+      9: 0
+
 dataplane:
   driver_mode: "xdp-generic"
   unknown_teid: "punt"
@@ -287,6 +328,17 @@ SGW-U options:
 | `interfaces.user.<name>.listen` | GTP-U local address for that named user-plane interface. |
 | `gtpu.s1u.bind` | Named user-plane interface used for S1-U. |
 | `gtpu.s5u.bind` | Named user-plane interface used for S5/S8-U. |
+| `qos.outer_marking.enabled` | Enables outer IP DSCP marking. |
+| `qos.outer_marking.gtpu.enabled` | Enables DSCP marking on forwarded GTP-U outer IPv4 headers. |
+| `qos.outer_marking.gtpu.dscp` | GTP-U outer DSCP value, range 0-63. Default 0. |
+| `qos.outer_marking.pfcp.enabled` | Enables DSCP marking on SGW-U PFCP sockets. |
+| `qos.outer_marking.pfcp.dscp` | PFCP DSCP value, range 0-63. Default 40. |
+| `qos.qci_marking.enabled` | Enables QCI-aware GTP-U outer DSCP marking for known bearer rules. |
+| `qos.qci_marking.override_default_gtpu` | Uses QCI mapping instead of `outer_marking.gtpu.dscp` when bearer QCI metadata is available. |
+| `qos.qci_marking.default_gtpu_dscp` | DSCP used when QCI marking is enabled but bearer QCI is missing or unmapped. |
+| `qos.qci_marking.unknown_teid_dscp` | Reserved fallback DSCP setting for unknown TEID handling. |
+| `qos.qci_marking.trust_inner_dscp` | Must be `false`; copying UE inner DSCP is not supported. |
+| `qos.qci_marking.qci_to_dscp` | Operator QCI-to-DSCP map. QCI range 1-255, DSCP range 0-63. Defaults include QCI 1 to DSCP 46, QCI 5 to DSCP 40, QCI 9 to DSCP 0. |
 | `dataplane.driver_mode` | XDP attach mode: `xdp-generic`, `xdp-native`, or `xdp-offload`. |
 | `dataplane.unknown_teid` | Unknown TEID action: `punt` or `drop`. |
 | `dataplane.attach_on_start` | Attach the eBPF dataplane during startup. |

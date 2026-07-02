@@ -253,6 +253,10 @@ func ipv4Checksum(b []byte) uint16 {
 // already-tested Phase 6 encoder) so this harness does not re-derive any
 // GTP-U wire-format constant from memory.
 func buildGPDUFrame(srcMAC, dstMAC net.HardwareAddr, srcIP, dstIP net.IP, srcPort uint16, teid uint32, payload []byte) []byte {
+	return buildGPDUFrameWithTOS(srcMAC, dstMAC, srcIP, dstIP, srcPort, teid, 0, payload)
+}
+
+func buildGPDUFrameWithTOS(srcMAC, dstMAC net.HardwareAddr, srcIP, dstIP net.IP, srcPort uint16, teid uint32, tos uint8, payload []byte) []byte {
 	gtpHdr := sgwugtpu.Marshal(sgwugtpu.Header{
 		Version: 1,
 		PT:      true,
@@ -272,7 +276,7 @@ func buildGPDUFrame(srcMAC, dstMAC net.HardwareAddr, srcIP, dstIP net.IP, srcPor
 	ipLen := 20 + len(udp)
 	ip := make([]byte, 20)
 	ip[0] = 0x45 // version=4, IHL=5 (no options)
-	ip[1] = 0    // DSCP/ECN
+	ip[1] = tos  // DSCP/ECN
 	binary.BigEndian.PutUint16(ip[2:4], uint16(ipLen))
 	binary.BigEndian.PutUint16(ip[4:6], 0) // identification
 	binary.BigEndian.PutUint16(ip[6:8], 0) // flags/fragment offset
@@ -299,6 +303,7 @@ func buildGPDUFrame(srcMAC, dstMAC net.HardwareAddr, srcIP, dstIP net.IP, srcPor
 type parsedFrame struct {
 	srcIP, dstIP net.IP
 	teid         uint32
+	tos          uint8
 	payload      []byte
 	raw          []byte
 }
@@ -344,6 +349,7 @@ func parseGPDUFrame(b []byte) (parsedFrame, error) {
 	return parsedFrame{
 		srcIP:   net.IP(append([]byte{}, b[ipStart+12:ipStart+16]...)),
 		dstIP:   net.IP(append([]byte{}, b[ipStart+16:ipStart+20]...)),
+		tos:     b[ipStart+1],
 		teid:    hdr.TEID,
 		payload: append([]byte{}, b[gtpStart+hdrLen:]...),
 	}, nil

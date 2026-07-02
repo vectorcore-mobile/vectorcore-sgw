@@ -26,16 +26,25 @@ type Compiler struct {
 	s1uLocalIP netip.Addr // SGW-U S1-U local GTP-U IP (used as outer_src_ip for downlink)
 	s5uLocalIP netip.Addr // SGW-U S5/S8-U local GTP-U IP (used as outer_src_ip for uplink)
 	log        *slog.Logger
+	qos        QCIMarkingConfig
+}
+
+type QCIMarkingConfig struct {
+	Enabled             bool
+	OverrideDefaultGTPU bool
+	DefaultGTPUDSCP     uint8
+	QCIToDSCP           map[uint8]uint8
 }
 
 // NewCompiler creates a rule compiler for the given XDPDataplane.
 // s1uLocalIP and s5uLocalIP are the SGW-U's own GTP-U addresses on each side.
-func NewCompiler(dp *XDPDataplane, s1uLocalIP, s5uLocalIP netip.Addr, log *slog.Logger) *Compiler {
+func NewCompiler(dp *XDPDataplane, s1uLocalIP, s5uLocalIP netip.Addr, log *slog.Logger, qos QCIMarkingConfig) *Compiler {
 	return &Compiler{
 		dp:         dp,
 		s1uLocalIP: s1uLocalIP,
 		s5uLocalIP: s5uLocalIP,
 		log:        log,
+		qos:        qos,
 	}
 }
 
@@ -196,12 +205,14 @@ func (c *Compiler) installRuleIfChanged(sess *session.Session, pdr *session.PDR,
 	if exists {
 		c.log.Debug("BPF compiler: rule updated",
 			"cp_seid", sess.CPSEID, "pdr_id", pdr.ID, "teid", pdr.LocalTEID,
-			"action", val.Action, "egress", val.EgressIfindex)
+			"action", val.Action, "egress", val.EgressIfindex,
+			"ebi", val.Ebi, "qci", val.Qci, "outer_dscp", val.OuterDscp, "qos_valid", val.QosValid)
 		return 0, 1, 0, nil
 	}
 	c.log.Debug("BPF compiler: rule added",
 		"cp_seid", sess.CPSEID, "pdr_id", pdr.ID, "teid", pdr.LocalTEID,
-		"action", val.Action, "egress", val.EgressIfindex)
+		"action", val.Action, "egress", val.EgressIfindex,
+		"ebi", val.Ebi, "qci", val.Qci, "outer_dscp", val.OuterDscp, "qos_valid", val.QosValid)
 	return 1, 0, 0, nil
 }
 
@@ -265,6 +276,7 @@ func (c *Compiler) buildValue(pdr *session.PDR, far *session.FAR) (XdpSgwGtpuSgw
 			copy(val.OuterSrcIp[:], srcIP[:])
 			val.EgressIfindex = c.dp.S1UIfindex()
 		}
+		c.applyQoSMetadata(pdr, &val)
 
 	case far.ApplyAction&pfcpie.ApplyActionDROP != 0:
 		// DROP per TS 29.244 Figure 8.2.26-1: "Bit 1 DROP=0x01"
@@ -276,6 +288,41 @@ func (c *Compiler) buildValue(pdr *session.PDR, far *session.FAR) (XdpSgwGtpuSgw
 	}
 
 	return val, nil
+}
+
+func (c *Compiler) applyQoSMetadata(pdr *session.PDR, val *XdpSgwGtpuSgwRuleValue) {
+	if !c.qos.Enabled || !c.qos.OverrideDefaultGTPU || !pdr.QoSValid || pdr.QCI == 0 {
+		return
+	}
+	val.Ebi = pdr.EBI
+	val.Qci = pdr.QCI
+	val.QosValid = 1
+	if dscp, ok := c.qos.QCIToDSCP[pdr.QCI]; ok {
+		val.OuterDscp = dscp
+	} else {
+		val.OuterDscp = c.qos.DefaultGTPUDSCP
+		c.log.Warn("SGW-U: QCI unmapped, using default GTP-U DSCP",
+			"teid", fmt.Sprintf("0x%08X", pdr.LocalTEID),
+			"qci", pdr.QCI,
+			"default_gtpu_dscp", c.qos.DefaultGTPUDSCP)
+	}
+	c.log.Info("SGW-U: GTP-U QoS marking rule installed",
+		"teid", fmt.Sprintf("0x%08X", pdr.LocalTEID),
+		"direction", sourceInterfaceDirection(pdr.SourceInterface),
+		"ebi", pdr.EBI,
+		"qci", pdr.QCI,
+		"outer_dscp", val.OuterDscp)
+}
+
+func sourceInterfaceDirection(sourceInterface uint8) string {
+	switch sourceInterface {
+	case pfcpie.SourceInterfaceAccess:
+		return "uplink"
+	case pfcpie.SourceInterfaceCore:
+		return "downlink"
+	default:
+		return "unknown"
+	}
 }
 
 // BPF action code constants (project-internal, from project §6.3).

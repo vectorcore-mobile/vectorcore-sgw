@@ -23,6 +23,9 @@ type PDR struct {
 	LocalTEID       uint32     // allocated TEID (when CHOOSE was set in F-TEID IE)
 	LocalIP         netip.Addr // SGW-U GTP-U IP for this PDR
 	FARID           uint32     // FAR ID to apply on match
+	EBI             uint8      // EPS Bearer ID carried by VectorCore PFCP metadata
+	QCI             uint8      // EPS bearer QCI carried by VectorCore PFCP metadata
+	QoSValid        bool       // true when EBI/QCI metadata was supplied by SGW-C
 }
 
 // FAR is a Forwarding Action Rule per TS 29.244 Rel-15 §5.2.1.

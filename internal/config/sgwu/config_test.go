@@ -134,6 +134,19 @@ func TestDefaultQoSOuterMarking(t *testing.T) {
 		t.Fatalf("default PFCP QoS = enabled:%v dscp:%d; want enabled:true dscp:40",
 			cfg.QoS.OuterMarking.PFCP.Enabled, cfg.QoS.OuterMarking.PFCP.DSCP)
 	}
+	if !cfg.QoS.QCIMarking.Enabled || !cfg.QoS.QCIMarking.OverrideDefaultGTPU {
+		t.Fatalf("default QCI marking enabled/override = %v/%v; want true/true",
+			cfg.QoS.QCIMarking.Enabled, cfg.QoS.QCIMarking.OverrideDefaultGTPU)
+	}
+	if got := cfg.QoS.QCIMarking.QCIToDSCP[1]; got != 46 {
+		t.Fatalf("default QCI 1 DSCP = %d; want 46", got)
+	}
+	if got := cfg.QoS.QCIMarking.QCIToDSCP[5]; got != 40 {
+		t.Fatalf("default QCI 5 DSCP = %d; want 40", got)
+	}
+	if got := cfg.QoS.QCIMarking.QCIToDSCP[9]; got != 0 {
+		t.Fatalf("default QCI 9 DSCP = %d; want 0", got)
+	}
 }
 
 func TestValidateRejectsInvalidQoSDSCP(t *testing.T) {
@@ -147,6 +160,32 @@ func TestValidateRejectsInvalidQoSDSCP(t *testing.T) {
 	cfg.QoS.OuterMarking.PFCP.DSCP = 64
 	if err := cfg.Validate(); err == nil {
 		t.Fatal("Validate succeeded with qos.outer_marking.pfcp.dscp=64")
+	}
+
+	cfg = validTestConfig()
+	cfg.QoS.QCIMarking.QCIToDSCP[1] = 64
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("Validate succeeded with qos.qci_marking.qci_to_dscp[1]=64")
+	}
+
+	cfg = validTestConfig()
+	cfg.QoS.QCIMarking.DefaultGTPUDSCP = 64
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("Validate succeeded with qos.qci_marking.default_gtpu_dscp=64")
+	}
+}
+
+func TestValidateRejectsInvalidQCIMarking(t *testing.T) {
+	cfg := validTestConfig()
+	cfg.QoS.QCIMarking.QCIToDSCP[0] = 46
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("Validate succeeded with qos.qci_marking.qci_to_dscp[0]")
+	}
+
+	cfg = validTestConfig()
+	cfg.QoS.QCIMarking.TrustInnerDSCP = true
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("Validate succeeded with trust_inner_dscp=true")
 	}
 }
 

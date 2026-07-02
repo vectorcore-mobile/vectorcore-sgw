@@ -66,6 +66,13 @@ const (
 	TypeActivatePredefinedRules uint16 = 106 // Table 8.1.2-1: "106 | Activate Predefined Rules"
 )
 
+// VectorCore private PFCP IE types. These are used only between VectorCore
+// SGW-C and SGW-U peers to carry internal dataplane metadata that Rel-15 PFCP
+// does not encode directly, such as EPC bearer QCI for DSCP marking.
+const (
+	TypeVectorCoreQoSMarking uint16 = 32768
+)
+
 // Phase 11 — Node Report and Association Release IE type codes per TS 29.244 Rel-15 Table 8.1.2-1
 // (extracted from docs/specs/29244-fa0.docx, doc table indices 20/21/22):
 //
@@ -522,6 +529,29 @@ func (ie *IE) QERIDValue() (uint32, error) {
 		return 0, fmt.Errorf("QER ID IE too short")
 	}
 	return binary.BigEndian.Uint32(ie.Value[0:4]), nil
+}
+
+// NewVectorCoreQoSMarking carries VectorCore-private PDR QoS metadata.
+// Value format: version(1), flags(1), EBI(1), QCI(1). flags bit 0 = valid.
+func NewVectorCoreQoSMarking(ebi, qci uint8, valid bool) *IE {
+	flags := uint8(0)
+	if valid {
+		flags = 0x01
+	}
+	return &IE{Type: TypeVectorCoreQoSMarking, Value: []byte{1, flags, ebi, qci}}
+}
+
+func (ie *IE) VectorCoreQoSMarkingValue() (ebi, qci uint8, valid bool, err error) {
+	if ie.Type != TypeVectorCoreQoSMarking {
+		return 0, 0, false, fmt.Errorf("IE type %d is not VectorCore QoS Marking (%d)", ie.Type, TypeVectorCoreQoSMarking)
+	}
+	if len(ie.Value) < 4 {
+		return 0, 0, false, fmt.Errorf("VectorCore QoS Marking IE too short")
+	}
+	if ie.Value[0] != 1 {
+		return 0, 0, false, fmt.Errorf("unsupported VectorCore QoS Marking version %d", ie.Value[0])
+	}
+	return ie.Value[2], ie.Value[3], ie.Value[1]&0x01 != 0, nil
 }
 
 // NewPrecedence builds a Precedence IE per TS 29.244 Rel-15 §8.2.11, type=29 (Table 8.1.2-1), 4-byte unsigned.

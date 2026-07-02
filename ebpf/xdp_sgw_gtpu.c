@@ -33,19 +33,25 @@ struct sgw_rule_key {
 
 struct sgw_rule_value {
     __u8  action;
-    __u8  _pad[3];
+    __u8  ebi;
+    __u8  qci;
+    __u8  qos_valid;
     __u32 egress_ifindex;
     __u8  outer_src_ip[4];
     __u8  outer_dst_ip[4];
     __u32 new_teid;
     __u32 counter_id;
+    __u8  outer_dscp;
+    __u8  _pad[3];
 };
 
 struct qos_outer_marking_config {
     __u8 enabled;
     __u8 gtpu_enabled;
     __u8 gtpu_dscp;
-    __u8 reserved;
+    __u8 qci_enabled;
+    __u8 qci_default_dscp;
+    __u8 reserved[3];
 };
 
 struct {
@@ -69,14 +75,24 @@ struct {
     __uint(max_entries, 1);
 } qos_outer_config_map SEC(".maps");
 
-static __always_inline void apply_outer_dscp_marking(struct iphdr *ip)
+static __always_inline void apply_outer_dscp_marking(struct iphdr *ip, struct sgw_rule_value *val)
 {
     __u32 key = 0;
     struct qos_outer_marking_config *cfg = bpf_map_lookup_elem(&qos_outer_config_map, &key);
-    if (!cfg || !cfg->enabled || !cfg->gtpu_enabled)
+    if (!cfg || !cfg->enabled)
         return;
 
-    __u8 dscp = cfg->gtpu_dscp & 0x3f;
+    __u8 dscp;
+    if (cfg->qci_enabled) {
+        if (val->qos_valid)
+            dscp = val->outer_dscp & 0x3f;
+        else
+            dscp = cfg->qci_default_dscp & 0x3f;
+    } else if (cfg->gtpu_enabled) {
+        dscp = cfg->gtpu_dscp & 0x3f;
+    } else {
+        return;
+    }
     __u8 ecn = ip->tos & 0x03;
     ip->tos = (dscp << 2) | ecn;
 }
@@ -93,7 +109,7 @@ static __always_inline int rewrite_l3_l4(struct xdp_md *ctx, struct ethhdr *eth,
 
     ip->saddr = new_saddr;
     ip->daddr = new_daddr;
-    apply_outer_dscp_marking(ip);
+    apply_outer_dscp_marking(ip, val);
     ip->check = 0;
     ip->check = ipv4_csum(ip, ip_hdr_len);
 

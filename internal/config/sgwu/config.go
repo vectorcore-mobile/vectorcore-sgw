@@ -66,6 +66,7 @@ type DataplaneConfig struct {
 
 type QoSConfig struct {
 	OuterMarking OuterMarkingConfig `yaml:"outer_marking"`
+	QCIMarking   QCIMarkingConfig   `yaml:"qci_marking"`
 }
 
 type OuterMarkingConfig struct {
@@ -77,6 +78,15 @@ type OuterMarkingConfig struct {
 type ProtocolMarkingConfig struct {
 	Enabled bool `yaml:"enabled"`
 	DSCP    int  `yaml:"dscp"`
+}
+
+type QCIMarkingConfig struct {
+	Enabled             bool        `yaml:"enabled"`
+	OverrideDefaultGTPU bool        `yaml:"override_default_gtpu"`
+	DefaultGTPUDSCP     int         `yaml:"default_gtpu_dscp"`
+	UnknownTEIDDSCP     int         `yaml:"unknown_teid_dscp"`
+	TrustInnerDSCP      bool        `yaml:"trust_inner_dscp"`
+	QCIToDSCP           map[int]int `yaml:"qci_to_dscp"`
 }
 
 type LoggingConfig struct {
@@ -110,6 +120,24 @@ func Default() *Config {
 				Enabled: true,
 				GTPU:    ProtocolMarkingConfig{Enabled: true, DSCP: 0},
 				PFCP:    ProtocolMarkingConfig{Enabled: true, DSCP: 40},
+			},
+			QCIMarking: QCIMarkingConfig{
+				Enabled:             true,
+				OverrideDefaultGTPU: true,
+				DefaultGTPUDSCP:     0,
+				UnknownTEIDDSCP:     0,
+				TrustInnerDSCP:      false,
+				QCIToDSCP: map[int]int{
+					1: 46,
+					2: 34,
+					3: 26,
+					4: 26,
+					5: 40,
+					6: 18,
+					7: 26,
+					8: 0,
+					9: 0,
+				},
 			},
 		},
 		Logging: LoggingConfig{Level: "info"},

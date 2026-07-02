@@ -14,11 +14,13 @@ import (
 )
 
 type XdpSgwGtpuQosOuterMarkingConfig struct {
-	_           structs.HostLayout
-	Enabled     uint8
-	GtpuEnabled uint8
-	GtpuDscp    uint8
-	Reserved    uint8
+	_              structs.HostLayout
+	Enabled        uint8
+	GtpuEnabled    uint8
+	GtpuDscp       uint8
+	QciEnabled     uint8
+	QciDefaultDscp uint8
+	Reserved       [3]uint8
 }
 
 type XdpSgwGtpuSgwRuleKey struct {
@@ -36,12 +38,16 @@ type XdpSgwGtpuSgwRuleStats struct {
 type XdpSgwGtpuSgwRuleValue struct {
 	_             structs.HostLayout
 	Action        uint8
-	Pad           [3]uint8
+	Ebi           uint8
+	Qci           uint8
+	QosValid      uint8
 	EgressIfindex uint32
 	OuterSrcIp    [4]uint8
 	OuterDstIp    [4]uint8
 	NewTeid       uint32
 	CounterId     uint32
+	OuterDscp     uint8
+	Pad           [3]uint8
 }
 
 // LoadXdpSgwGtpu returns the embedded CollectionSpec for XdpSgwGtpu.

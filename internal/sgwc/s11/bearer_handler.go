@@ -291,17 +291,21 @@ func (h *Handler) prepareCreateBearerRelay(pgwAddr *net.UDPAddr, hdr message.Hea
 
 	var createPDRs, createFARs []*pfcpie.IE
 	for _, prov := range bearerProvs {
+		qci := qciFromBearerQoSIE(prov.qosIE)
+		qosIE := pfcpie.NewVectorCoreQoSMarking(0, qci, qci != 0)
 		createPDRs = append(createPDRs, pfcpie.NewCreatePDR(
 			pfcpie.NewPDRID(prov.pdrUL),
 			pfcpie.NewPrecedence(100),
 			pfcpie.NewPDI(pfcpie.NewSourceInterface(pfcpie.SourceInterfaceAccess), pfcpie.NewFTEIDChoose()),
 			pfcpie.NewFARID(prov.farUL),
+			qosIE,
 		))
 		createPDRs = append(createPDRs, pfcpie.NewCreatePDR(
 			pfcpie.NewPDRID(prov.pdrDL),
 			pfcpie.NewPrecedence(200),
 			pfcpie.NewPDI(pfcpie.NewSourceInterface(pfcpie.SourceInterfaceCore), pfcpie.NewFTEIDChoose()),
 			pfcpie.NewFARID(prov.farDL),
+			qosIE,
 		))
 		createFARs = append(createFARs, pfcpie.NewCreateFAR(
 			pfcpie.NewFARID(prov.farUL),
@@ -797,6 +801,8 @@ func (h *Handler) handleCreateBearer(pgwAddr *net.UDPAddr, hdr message.Header, r
 	// FAR DL: DROP initially; updated to FORW with eNB TEID after CBResp.
 	var createPDRs, createFARs []*pfcpie.IE
 	for _, prov := range bearerProvs {
+		qci := qciFromBearerQoSIE(prov.qosIE)
+		qosIE := pfcpie.NewVectorCoreQoSMarking(0, qci, qci != 0)
 		pdi := pfcpie.NewPDI(
 			pfcpie.NewSourceInterface(pfcpie.SourceInterfaceAccess),
 			pfcpie.NewFTEIDChoose(),
@@ -806,6 +812,7 @@ func (h *Handler) handleCreateBearer(pgwAddr *net.UDPAddr, hdr message.Header, r
 			pfcpie.NewPrecedence(100),
 			pdi,
 			pfcpie.NewFARID(prov.farUL),
+			qosIE,
 		))
 
 		pdi2 := pfcpie.NewPDI(
@@ -817,6 +824,7 @@ func (h *Handler) handleCreateBearer(pgwAddr *net.UDPAddr, hdr message.Header, r
 			pfcpie.NewPrecedence(200),
 			pdi2,
 			pfcpie.NewFARID(prov.farDL),
+			qosIE,
 		))
 
 		// FAR UL: FORW to PGW-U with OHC if PGW-U TEID is known; else DROP.
@@ -2050,6 +2058,13 @@ func gtpcCauseText(cause uint8) string {
 	default:
 		return "Unknown cause"
 	}
+}
+
+func qciFromBearerQoSIE(qosIE *ie.IE) uint8 {
+	if qosIE == nil || len(qosIE.Value) < 2 {
+		return 0
+	}
+	return qosIE.Value[1]
 }
 
 func gtpcIEName(ieType uint8) string {

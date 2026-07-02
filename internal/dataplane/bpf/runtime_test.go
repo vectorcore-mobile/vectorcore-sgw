@@ -145,6 +145,71 @@ func TestBPFForwardUplink(t *testing.T) {
 	}
 }
 
+func TestBPFQCIOuterDSCPMarkingPreservesECNAndInnerDSCP(t *testing.T) {
+	h := newHarness(t)
+	dp, err := New(h.s1u.name, h.s5u.name, 1024)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	t.Cleanup(func() { dp.Close() })
+	if err := dp.ConfigureQoSOuterMarking(QoSOuterMarkingConfig{
+		Enabled:        true,
+		GTPUEnabled:    true,
+		GTPUDSCP:       0,
+		QCIEnabled:     true,
+		QCIDefaultDSCP: 0,
+	}); err != nil {
+		t.Fatalf("ConfigureQoSOuterMarking: %v", err)
+	}
+
+	const (
+		localTEID = 0x1100
+		newTEID   = 0x2200
+		counterID = 11
+	)
+	key := XdpSgwGtpuSgwRuleKey{Teid: localTEID, Ifindex: dp.S1UIfindex()}
+	val := XdpSgwGtpuSgwRuleValue{
+		Action:        actionForward,
+		EgressIfindex: dp.S5UIfindex(),
+		NewTeid:       newTEID,
+		CounterId:     counterID,
+		Ebi:           7,
+		Qci:           1,
+		QosValid:      1,
+		OuterDscp:     46,
+	}
+	copy(val.OuterSrcIp[:], h.s5u.ip.To4())
+	copy(val.OuterDstIp[:], h.s5uPeer.ip.To4())
+	if err := dp.InitStats(counterID); err != nil {
+		t.Fatalf("InitStats: %v", err)
+	}
+	if err := dp.InstallRule(key, val); err != nil {
+		t.Fatalf("InstallRule: %v", err)
+	}
+
+	inner := make([]byte, 20)
+	inner[0] = 0x45
+	inner[1] = 0x00
+	frame := buildGPDUFrameWithTOS(h.s1uPeer.mac, h.s1u.mac, h.s1uPeer.ip, h.s1u.ip, 33003, localTEID, 0x03, inner)
+
+	captureFd := openRawSocket(t, h.s5uPeer.ifindex, unix.ETH_P_ALL, testTimeout)
+	injectFd := openRawSocket(t, h.s1uPeer.ifindex, unix.ETH_P_ALL, 0)
+	if err := unix.Send(injectFd, frame, 0); err != nil {
+		t.Fatalf("inject: %v", err)
+	}
+
+	got, ok := captureGPDU(captureFd)
+	if !ok {
+		t.Fatalf("capture on %s: no G-PDU arrived within %s", h.s5uPeer.name, testTimeout)
+	}
+	if got.tos != 0xbb {
+		t.Fatalf("outer TOS = %#02x, want 0xbb", got.tos)
+	}
+	if len(got.payload) < 2 || got.payload[1] != 0x00 {
+		t.Fatalf("inner DSCP/ECN changed: payload[1]=%#02x, want 0x00", got.payload[1])
+	}
+}
+
 // TestBPFForwardDownlink mirrors TestBPFForwardUplink in the opposite
 // direction (S5/S8-U ingress -> S1-U egress) — Phase 7 acceptance:
 // "Downlink traffic is forwarded by BPF".

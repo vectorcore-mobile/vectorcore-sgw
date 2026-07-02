@@ -74,12 +74,37 @@ func (c *Config) Validate() error {
 	if err := validateDSCP("qos.outer_marking.pfcp.dscp", c.QoS.OuterMarking.PFCP.DSCP); err != nil {
 		return err
 	}
+	if err := c.validateQCIMarking(); err != nil {
+		return err
+	}
 	return nil
 }
 
 func validateDSCP(path string, dscp int) error {
 	if dscp < 0 || dscp > 63 {
 		return fmt.Errorf("%s must be in range 0-63, got %d", path, dscp)
+	}
+	return nil
+}
+
+func (c *Config) validateQCIMarking() error {
+	qci := c.QoS.QCIMarking
+	if qci.TrustInnerDSCP {
+		return fmt.Errorf("qos.qci_marking.trust_inner_dscp is not supported in Phase 2")
+	}
+	if err := validateDSCP("qos.qci_marking.default_gtpu_dscp", qci.DefaultGTPUDSCP); err != nil {
+		return err
+	}
+	if err := validateDSCP("qos.qci_marking.unknown_teid_dscp", qci.UnknownTEIDDSCP); err != nil {
+		return err
+	}
+	for qciValue, dscp := range qci.QCIToDSCP {
+		if qciValue < 1 || qciValue > 255 {
+			return fmt.Errorf("qos.qci_marking.qci_to_dscp QCI must be in range 1-255, got %d", qciValue)
+		}
+		if err := validateDSCP(fmt.Sprintf("qos.qci_marking.qci_to_dscp[%d]", qciValue), dscp); err != nil {
+			return err
+		}
 	}
 	return nil
 }

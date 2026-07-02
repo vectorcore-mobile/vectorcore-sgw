@@ -28,16 +28,20 @@ type XDPDataplane struct {
 
 // QoSOuterMarkingConfig is the SGW-U XDP default outer DSCP marking policy.
 type QoSOuterMarkingConfig struct {
-	Enabled     bool
-	GTPUEnabled bool
-	GTPUDSCP    uint8
+	Enabled        bool
+	GTPUEnabled    bool
+	GTPUDSCP       uint8
+	QCIEnabled     bool
+	QCIDefaultDSCP uint8
 }
 
 type qosOuterMarkingMapValue struct {
-	Enabled     uint8
-	GTPUEnabled uint8
-	GTPUDSCP    uint8
-	Reserved    uint8
+	Enabled        uint8
+	GTPUEnabled    uint8
+	GTPUDSCP       uint8
+	QCIEnabled     uint8
+	QCIDefaultDSCP uint8
+	Reserved       [3]uint8
 }
 
 // New loads the XDP GTP-U program in xdp-generic mode. maxEntries controls
@@ -143,13 +147,18 @@ func (d *XDPDataplane) ConfigureQoSOuterMarking(cfg QoSOuterMarkingConfig) error
 	if cfg.GTPUDSCP > 63 {
 		return fmt.Errorf("bpf: GTP-U DSCP must be in range 0-63, got %d", cfg.GTPUDSCP)
 	}
+	if cfg.QCIDefaultDSCP > 63 {
+		return fmt.Errorf("bpf: QCI default DSCP must be in range 0-63, got %d", cfg.QCIDefaultDSCP)
+	}
 	if d.objs.QosOuterConfigMap == nil {
 		return fmt.Errorf("bpf: qos_outer_config_map is not loaded")
 	}
 	val := qosOuterMarkingMapValue{
-		Enabled:     boolToU8(cfg.Enabled),
-		GTPUEnabled: boolToU8(cfg.GTPUEnabled),
-		GTPUDSCP:    cfg.GTPUDSCP,
+		Enabled:        boolToU8(cfg.Enabled),
+		GTPUEnabled:    boolToU8(cfg.GTPUEnabled),
+		GTPUDSCP:       cfg.GTPUDSCP,
+		QCIEnabled:     boolToU8(cfg.QCIEnabled),
+		QCIDefaultDSCP: cfg.QCIDefaultDSCP,
 	}
 	var key uint32
 	if err := d.objs.QosOuterConfigMap.Update(key, val, ebpf.UpdateAny); err != nil {

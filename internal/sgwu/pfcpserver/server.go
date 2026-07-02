@@ -569,6 +569,17 @@ func (s *Server) handleSessionEstablishment(conn *pfcptransport.Conn, addr *net.
 			SourceInterface: srcIface,
 			FARID:           farID,
 		}
+		if qosIE := pfcpie.Find(children, pfcpie.TypeVectorCoreQoSMarking); qosIE != nil {
+			ebi, qci, valid, qosErr := qosIE.VectorCoreQoSMarkingValue()
+			if qosErr != nil {
+				s.log.Warn("PFCP SER: VectorCore QoS metadata invalid — rejecting whole request", "error", qosErr)
+				s.replySessionEstRuleFailure(conn, addr, hdr)
+				return
+			}
+			pdr.EBI = ebi
+			pdr.QCI = qci
+			pdr.QoSValid = valid
+		}
 		if precIE != nil && len(precIE.Value) >= 4 {
 			pdr.Precedence = (uint32(precIE.Value[0]) << 24) | (uint32(precIE.Value[1]) << 16) |
 				(uint32(precIE.Value[2]) << 8) | uint32(precIE.Value[3])
@@ -1020,6 +1031,15 @@ func parseCreatePDR(cpdrIE *pfcpie.IE) (sgwusession.PDR, bool, error) {
 	}
 	srcIface, _ := srcIfaceIE.SourceInterfaceValue()
 	pdr := sgwusession.PDR{ID: pdrID, FARID: farID, SourceInterface: srcIface}
+	if qosIE := pfcpie.Find(children, pfcpie.TypeVectorCoreQoSMarking); qosIE != nil {
+		ebi, qci, valid, err := qosIE.VectorCoreQoSMarkingValue()
+		if err != nil {
+			return sgwusession.PDR{}, false, fmt.Errorf("VectorCore QoS metadata: %w", err)
+		}
+		pdr.EBI = ebi
+		pdr.QCI = qci
+		pdr.QoSValid = valid
+	}
 	if len(precIE.Value) >= 4 {
 		pdr.Precedence = (uint32(precIE.Value[0]) << 24) | (uint32(precIE.Value[1]) << 16) |
 			(uint32(precIE.Value[2]) << 8) | uint32(precIE.Value[3])
