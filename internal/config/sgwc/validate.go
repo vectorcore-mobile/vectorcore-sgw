@@ -49,5 +49,18 @@ func (c *Config) Validate() error {
 	if c.S11.N3Requests <= 0 {
 		return fmt.Errorf("s11.n3_requests must be positive")
 	}
+	if err := validateDSCP("qos.outer_marking.gtpc.dscp", c.QoS.OuterMarking.GTPC.DSCP); err != nil {
+		return err
+	}
+	if err := validateDSCP("qos.outer_marking.pfcp.dscp", c.QoS.OuterMarking.PFCP.DSCP); err != nil {
+		return err
+	}
+	return nil
+}
+
+func validateDSCP(path string, dscp int) error {
+	if dscp < 0 || dscp > 63 {
+		return fmt.Errorf("%s must be in range 0-63, got %d", path, dscp)
+	}
 	return nil
 }

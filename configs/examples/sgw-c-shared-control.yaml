@@ -32,6 +32,16 @@ pfcp:
       node_id: "sgw-u-1"
       addr: "127.0.0.2:8805"
 
+qos:
+  outer_marking:
+    enabled: true
+    gtpc:
+      enabled: true
+      dscp: 40
+    pfcp:
+      enabled: true
+      dscp: 40
+
 logging:
   level: info
   file: /var/log/vectorcore/sgw/sgw-c.log

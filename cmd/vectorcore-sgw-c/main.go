@@ -82,6 +82,13 @@ func main() {
 		"api", cfg.API.Listen,
 		"metrics", cfg.Metrics.Listen,
 	)
+	logger.Info("SGW-C QoS outer marking configured",
+		"enabled", cfg.QoS.OuterMarking.Enabled,
+		"gtpc_enabled", cfg.QoS.OuterMarking.GTPC.Enabled,
+		"gtpc_dscp", cfg.QoS.OuterMarking.GTPC.DSCP,
+		"pfcp_enabled", cfg.QoS.OuterMarking.PFCP.Enabled,
+		"pfcp_dscp", cfg.QoS.OuterMarking.PFCP.DSCP,
+	)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	sigCh := make(chan os.Signal, 1)
@@ -140,6 +147,12 @@ func main() {
 		if err != nil {
 			logger.Error("shared S11/S5/S8-C listener failed to start", "error", err)
 			os.Exit(1)
+		}
+		if cfg.QoS.OuterMarking.Enabled && cfg.QoS.OuterMarking.GTPC.Enabled {
+			if err := sharedGTPC.SetDSCP(uint8(cfg.QoS.OuterMarking.GTPC.DSCP)); err != nil {
+				logger.Error("shared S11/S5/S8-C QoS outer marking failed", "error", err)
+				os.Exit(1)
+			}
 		}
 		s5cClient = s5c.NewWithConn(sharedGTPC, controlIP, rc, logger.Logger)
 	} else {

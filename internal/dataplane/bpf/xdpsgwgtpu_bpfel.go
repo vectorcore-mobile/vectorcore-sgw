@@ -13,6 +13,14 @@ import (
 	"github.com/cilium/ebpf"
 )
 
+type XdpSgwGtpuQosOuterMarkingConfig struct {
+	_           structs.HostLayout
+	Enabled     uint8
+	GtpuEnabled uint8
+	GtpuDscp    uint8
+	Reserved    uint8
+}
+
 type XdpSgwGtpuSgwRuleKey struct {
 	_       structs.HostLayout
 	Teid    uint32
@@ -85,8 +93,9 @@ type XdpSgwGtpuProgramSpecs struct {
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type XdpSgwGtpuMapSpecs struct {
-	SgwFwdMap    *ebpf.MapSpec `ebpf:"sgw_fwd_map"`
-	SgwRuleStats *ebpf.MapSpec `ebpf:"sgw_rule_stats"`
+	QosOuterConfigMap *ebpf.MapSpec `ebpf:"qos_outer_config_map"`
+	SgwFwdMap         *ebpf.MapSpec `ebpf:"sgw_fwd_map"`
+	SgwRuleStats      *ebpf.MapSpec `ebpf:"sgw_rule_stats"`
 }
 
 // XdpSgwGtpuVariableSpecs contains global variables before they are loaded into the kernel.
@@ -115,12 +124,14 @@ func (o *XdpSgwGtpuObjects) Close() error {
 //
 // It can be passed to LoadXdpSgwGtpuObjects or ebpf.CollectionSpec.LoadAndAssign.
 type XdpSgwGtpuMaps struct {
-	SgwFwdMap    *ebpf.Map `ebpf:"sgw_fwd_map"`
-	SgwRuleStats *ebpf.Map `ebpf:"sgw_rule_stats"`
+	QosOuterConfigMap *ebpf.Map `ebpf:"qos_outer_config_map"`
+	SgwFwdMap         *ebpf.Map `ebpf:"sgw_fwd_map"`
+	SgwRuleStats      *ebpf.Map `ebpf:"sgw_rule_stats"`
 }
 
 func (m *XdpSgwGtpuMaps) Close() error {
 	return _XdpSgwGtpuClose(
+		m.QosOuterConfigMap,
 		m.SgwFwdMap,
 		m.SgwRuleStats,
 	)

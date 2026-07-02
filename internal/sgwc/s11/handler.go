@@ -103,6 +103,12 @@ func New(cfg *sgwcconfig.Config, sessions *session.Manager, rc *recovery.Counter
 	if err != nil {
 		return nil, fmt.Errorf("s11 listen: %w", err)
 	}
+	if cfg.QoS.OuterMarking.Enabled && cfg.QoS.OuterMarking.GTPC.Enabled {
+		if err := conn.SetDSCP(uint8(cfg.QoS.OuterMarking.GTPC.DSCP)); err != nil {
+			_ = conn.Close()
+			return nil, fmt.Errorf("s11 QoS outer marking: %w", err)
+		}
+	}
 	h := &Handler{
 		cfg:            cfg,
 		conn:           conn,

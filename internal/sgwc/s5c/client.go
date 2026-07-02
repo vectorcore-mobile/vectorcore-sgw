@@ -59,6 +59,12 @@ func New(cfg *sgwcconfig.Config, localIP netip.Addr, rc *recovery.Counter, log *
 	if err != nil {
 		return nil, fmt.Errorf("s5c listen: %w", err)
 	}
+	if cfg.QoS.OuterMarking.Enabled && cfg.QoS.OuterMarking.GTPC.Enabled {
+		if err := conn.SetDSCP(uint8(cfg.QoS.OuterMarking.GTPC.DSCP)); err != nil {
+			_ = conn.Close()
+			return nil, fmt.Errorf("s5c QoS outer marking: %w", err)
+		}
+	}
 
 	c := &Client{
 		conn:      conn,

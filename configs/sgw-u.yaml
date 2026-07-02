@@ -22,6 +22,16 @@ gtpu:
     # Bind S5/S8-U to interfaces.user.sgwinterface.
     bind: "sgwinterface"
 
+qos:
+  outer_marking:
+    enabled: true
+    gtpu:
+      enabled: true
+      dscp: 0
+    pfcp:
+      enabled: true
+      dscp: 40
+
 dataplane:
   # xdp-generic attaches XDP in SKB/generic mode and works in VMs.
   # xdp-native attaches in the NIC driver's XDP path when the driver supports it.

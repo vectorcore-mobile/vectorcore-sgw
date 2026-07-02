@@ -41,6 +41,13 @@ struct sgw_rule_value {
     __u32 counter_id;
 };
 
+struct qos_outer_marking_config {
+    __u8 enabled;
+    __u8 gtpu_enabled;
+    __u8 gtpu_dscp;
+    __u8 reserved;
+};
+
 struct {
     __uint(type, BPF_MAP_TYPE_HASH);
     __type(key,   struct sgw_rule_key);
@@ -55,6 +62,25 @@ struct {
     __uint(max_entries, 65536);
 } sgw_rule_stats SEC(".maps");
 
+struct {
+    __uint(type, BPF_MAP_TYPE_ARRAY);
+    __type(key,   __u32);
+    __type(value, struct qos_outer_marking_config);
+    __uint(max_entries, 1);
+} qos_outer_config_map SEC(".maps");
+
+static __always_inline void apply_outer_dscp_marking(struct iphdr *ip)
+{
+    __u32 key = 0;
+    struct qos_outer_marking_config *cfg = bpf_map_lookup_elem(&qos_outer_config_map, &key);
+    if (!cfg || !cfg->enabled || !cfg->gtpu_enabled)
+        return;
+
+    __u8 dscp = cfg->gtpu_dscp & 0x3f;
+    __u8 ecn = ip->tos & 0x03;
+    ip->tos = (dscp << 2) | ecn;
+}
+
 static __always_inline int rewrite_l3_l4(struct xdp_md *ctx, struct ethhdr *eth,
                                          struct iphdr *ip, struct udphdr *udp,
                                          struct gtpuhdr *gtp,
@@ -67,6 +93,7 @@ static __always_inline int rewrite_l3_l4(struct xdp_md *ctx, struct ethhdr *eth,
 
     ip->saddr = new_saddr;
     ip->daddr = new_daddr;
+    apply_outer_dscp_marking(ip);
     ip->check = 0;
     ip->check = ipv4_csum(ip, ip_hdr_len);
 

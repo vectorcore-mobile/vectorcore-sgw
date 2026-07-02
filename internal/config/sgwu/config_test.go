@@ -121,6 +121,35 @@ func TestValidateRejectsUnsupportedDriverMode(t *testing.T) {
 	}
 }
 
+func TestDefaultQoSOuterMarking(t *testing.T) {
+	cfg := Default()
+	if !cfg.QoS.OuterMarking.Enabled {
+		t.Fatal("default QoS outer marking disabled; want enabled")
+	}
+	if !cfg.QoS.OuterMarking.GTPU.Enabled || cfg.QoS.OuterMarking.GTPU.DSCP != 0 {
+		t.Fatalf("default GTP-U QoS = enabled:%v dscp:%d; want enabled:true dscp:0",
+			cfg.QoS.OuterMarking.GTPU.Enabled, cfg.QoS.OuterMarking.GTPU.DSCP)
+	}
+	if !cfg.QoS.OuterMarking.PFCP.Enabled || cfg.QoS.OuterMarking.PFCP.DSCP != 40 {
+		t.Fatalf("default PFCP QoS = enabled:%v dscp:%d; want enabled:true dscp:40",
+			cfg.QoS.OuterMarking.PFCP.Enabled, cfg.QoS.OuterMarking.PFCP.DSCP)
+	}
+}
+
+func TestValidateRejectsInvalidQoSDSCP(t *testing.T) {
+	cfg := validTestConfig()
+	cfg.QoS.OuterMarking.GTPU.DSCP = -1
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("Validate succeeded with qos.outer_marking.gtpu.dscp=-1")
+	}
+
+	cfg = validTestConfig()
+	cfg.QoS.OuterMarking.PFCP.DSCP = 64
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("Validate succeeded with qos.outer_marking.pfcp.dscp=64")
+	}
+}
+
 func TestLoadRejectsOldUserPlaneConfigFields(t *testing.T) {
 	path := writeTempConfig(t, `
 sgwu:
@@ -159,6 +188,20 @@ func loadExample(t *testing.T, name string) *Config {
 	if err != nil {
 		t.Fatalf("Load(%s): %v", name, err)
 	}
+	return cfg
+}
+
+func validTestConfig() *Config {
+	cfg := Default()
+	cfg.SGWU.NodeID = "sgw-u-1"
+	cfg.PFCP.Listen = "127.0.0.2:8805"
+	cfg.PFCP.AllowedSGWC = []string{"127.0.0.1"}
+	cfg.Interfaces.User = map[string]UserInterfaceConfig{
+		"access": {Ifname: "eth0", Listen: "10.90.250.59:2152"},
+		"core":   {Ifname: "eth1", Listen: "10.90.251.59:2152"},
+	}
+	cfg.GTPU.S1U = GTPULogical{Bind: "access"}
+	cfg.GTPU.S5U = GTPULogical{Bind: "core"}
 	return cfg
 }
 

@@ -68,5 +68,18 @@ func (c *Config) Validate() error {
 	if c.Dataplane.MapMaxEntries <= 0 {
 		return fmt.Errorf("dataplane.map_max_entries must be positive")
 	}
+	if err := validateDSCP("qos.outer_marking.gtpu.dscp", c.QoS.OuterMarking.GTPU.DSCP); err != nil {
+		return err
+	}
+	if err := validateDSCP("qos.outer_marking.pfcp.dscp", c.QoS.OuterMarking.PFCP.DSCP); err != nil {
+		return err
+	}
+	return nil
+}
+
+func validateDSCP(path string, dscp int) error {
+	if dscp < 0 || dscp > 63 {
+		return fmt.Errorf("%s must be in range 0-63, got %d", path, dscp)
+	}
 	return nil
 }

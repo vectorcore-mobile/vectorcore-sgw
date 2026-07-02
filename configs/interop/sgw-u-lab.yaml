@@ -19,6 +19,16 @@ gtpu:
   s5u:
     bind: "lab_user_plane"
 
+qos:
+  outer_marking:
+    enabled: true
+    gtpu:
+      enabled: true
+      dscp: 0
+    pfcp:
+      enabled: true
+      dscp: 40
+
 dataplane:
   # xdp-generic works in VMs; xdp-native requires NIC driver support.
   driver_mode: "xdp-generic"

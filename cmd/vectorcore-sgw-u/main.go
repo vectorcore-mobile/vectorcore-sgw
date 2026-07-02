@@ -76,6 +76,13 @@ func main() {
 		"api", cfg.API.Listen,
 		"metrics", cfg.Metrics.Listen,
 	)
+	logger.Info("SGW-U QoS outer marking configured",
+		"enabled", cfg.QoS.OuterMarking.Enabled,
+		"gtpu_enabled", cfg.QoS.OuterMarking.GTPU.Enabled,
+		"gtpu_dscp", cfg.QoS.OuterMarking.GTPU.DSCP,
+		"pfcp_enabled", cfg.QoS.OuterMarking.PFCP.Enabled,
+		"pfcp_dscp", cfg.QoS.OuterMarking.PFCP.DSCP,
+	)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	sigCh := make(chan os.Signal, 1)
@@ -126,6 +133,18 @@ func main() {
 			logger.Error("XDP-BPF dataplane failed to start", "error", bpfErr)
 			os.Exit(1)
 		}
+		if err := xdpDp.ConfigureQoSOuterMarking(bpf.QoSOuterMarkingConfig{
+			Enabled:     cfg.QoS.OuterMarking.Enabled,
+			GTPUEnabled: cfg.QoS.OuterMarking.GTPU.Enabled,
+			GTPUDSCP:    uint8(cfg.QoS.OuterMarking.GTPU.DSCP),
+		}); err != nil {
+			logger.Error("XDP-BPF QoS outer marking map load failed", "error", err)
+			os.Exit(1)
+		}
+		logger.Info("SGW-U eBPF QoS outer marking map loaded",
+			"gtpu_enabled", cfg.QoS.OuterMarking.Enabled && cfg.QoS.OuterMarking.GTPU.Enabled,
+			"gtpu_dscp", cfg.QoS.OuterMarking.GTPU.DSCP,
+		)
 		compiler := bpf.NewCompiler(xdpDp, s1uLocalIP, s5uLocalIP, logger.Logger)
 		pfcpSrv.SetBPFInstaller(compiler)
 		logger.Info("XDP-BPF GTP-U fast path active",

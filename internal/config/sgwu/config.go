@@ -17,6 +17,7 @@ type Config struct {
 	Interfaces InterfaceConfig `yaml:"interfaces"`
 	GTPU       GTPUConfig      `yaml:"gtpu"`
 	Dataplane  DataplaneConfig `yaml:"dataplane"`
+	QoS        QoSConfig       `yaml:"qos"`
 	Logging    LoggingConfig   `yaml:"logging"`
 	API        APIConfig       `yaml:"api"`
 	Metrics    MetricsConfig   `yaml:"metrics"`
@@ -63,6 +64,21 @@ type DataplaneConfig struct {
 	MapMaxEntries int `yaml:"map_max_entries"`
 }
 
+type QoSConfig struct {
+	OuterMarking OuterMarkingConfig `yaml:"outer_marking"`
+}
+
+type OuterMarkingConfig struct {
+	Enabled bool                  `yaml:"enabled"`
+	GTPU    ProtocolMarkingConfig `yaml:"gtpu"`
+	PFCP    ProtocolMarkingConfig `yaml:"pfcp"`
+}
+
+type ProtocolMarkingConfig struct {
+	Enabled bool `yaml:"enabled"`
+	DSCP    int  `yaml:"dscp"`
+}
+
 type LoggingConfig struct {
 	Level string `yaml:"level"`
 	File  string `yaml:"file"`
@@ -88,6 +104,13 @@ func Default() *Config {
 			AttachOnStart: true,
 			CleanupOnExit: true,
 			MapMaxEntries: 65536,
+		},
+		QoS: QoSConfig{
+			OuterMarking: OuterMarkingConfig{
+				Enabled: true,
+				GTPU:    ProtocolMarkingConfig{Enabled: true, DSCP: 0},
+				PFCP:    ProtocolMarkingConfig{Enabled: true, DSCP: 40},
+			},
 		},
 		Logging: LoggingConfig{Level: "info"},
 		// AUD-06: default to loopback so management interfaces are not exposed

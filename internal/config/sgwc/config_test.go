@@ -107,6 +107,35 @@ func TestDefaultCreateBearerRetryGuardEnabled(t *testing.T) {
 	}
 }
 
+func TestDefaultQoSOuterMarking(t *testing.T) {
+	cfg := Default()
+	if !cfg.QoS.OuterMarking.Enabled {
+		t.Fatal("default QoS outer marking disabled; want enabled")
+	}
+	if !cfg.QoS.OuterMarking.GTPC.Enabled || cfg.QoS.OuterMarking.GTPC.DSCP != 40 {
+		t.Fatalf("default GTP-C QoS = enabled:%v dscp:%d; want enabled:true dscp:40",
+			cfg.QoS.OuterMarking.GTPC.Enabled, cfg.QoS.OuterMarking.GTPC.DSCP)
+	}
+	if !cfg.QoS.OuterMarking.PFCP.Enabled || cfg.QoS.OuterMarking.PFCP.DSCP != 40 {
+		t.Fatalf("default PFCP QoS = enabled:%v dscp:%d; want enabled:true dscp:40",
+			cfg.QoS.OuterMarking.PFCP.Enabled, cfg.QoS.OuterMarking.PFCP.DSCP)
+	}
+}
+
+func TestValidateRejectsInvalidQoSDSCP(t *testing.T) {
+	cfg := validTestConfig()
+	cfg.QoS.OuterMarking.GTPC.DSCP = 64
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("Validate succeeded with qos.outer_marking.gtpc.dscp=64")
+	}
+
+	cfg = validTestConfig()
+	cfg.QoS.OuterMarking.PFCP.DSCP = -1
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("Validate succeeded with qos.outer_marking.pfcp.dscp=-1")
+	}
+}
+
 func TestLoadPrimaryConfigHasNoCreateBearerInteropLimit(t *testing.T) {
 	cfg, err := Load(filepath.Join("..", "..", "..", "configs", "sgw-c.yaml"))
 	if err != nil {
@@ -193,6 +222,21 @@ func loadExample(t *testing.T, name string) *Config {
 	if err != nil {
 		t.Fatalf("Load(%s): %v", name, err)
 	}
+	return cfg
+}
+
+func validTestConfig() *Config {
+	cfg := Default()
+	cfg.SGWC.NodeID = "sgw-c-1"
+	cfg.SGWC.PLMN.MCC = "311"
+	cfg.SGWC.PLMN.MNC = "435"
+	cfg.Interfaces.Control = map[string]ControlInterfaceConfig{
+		"control": {Listen: "127.0.0.1:2123"},
+	}
+	cfg.GTPC.S11 = GTPCLogical{Bind: "control"}
+	cfg.GTPC.S5C = GTPCLogical{Bind: "control"}
+	cfg.PFCP.LocalAddr = "127.0.0.1:8805"
+	cfg.PFCP.SGWU = []SGWUPeer{{Name: "sgw-u-1", Addr: "127.0.0.2:8805"}}
 	return cfg
 }
 

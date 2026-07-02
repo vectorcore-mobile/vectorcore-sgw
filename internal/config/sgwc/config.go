@@ -15,6 +15,7 @@ type Config struct {
 	GTPC       GTPCConfig      `yaml:"gtpc"`
 	S11        S11Config       `yaml:"s11"`
 	PFCP       PFCPConfig      `yaml:"pfcp"`
+	QoS        QoSConfig       `yaml:"qos"`
 	Logging    LoggingConfig   `yaml:"logging"`
 	API        APIConfig       `yaml:"api"`
 	Metrics    MetricsConfig   `yaml:"metrics"`
@@ -82,6 +83,21 @@ type SGWUPeer struct {
 	Addr   string `yaml:"addr"`
 }
 
+type QoSConfig struct {
+	OuterMarking OuterMarkingConfig `yaml:"outer_marking"`
+}
+
+type OuterMarkingConfig struct {
+	Enabled bool                  `yaml:"enabled"`
+	GTPC    ProtocolMarkingConfig `yaml:"gtpc"`
+	PFCP    ProtocolMarkingConfig `yaml:"pfcp"`
+}
+
+type ProtocolMarkingConfig struct {
+	Enabled bool `yaml:"enabled"`
+	DSCP    int  `yaml:"dscp"`
+}
+
 type LoggingConfig struct {
 	Level string `yaml:"level"`
 	File  string `yaml:"file"`
@@ -112,6 +128,13 @@ func Default() *Config {
 		GTPC: GTPCConfig{
 			CreateBearerRetryGuard: CreateBearerRetryGuardConfig{
 				Enabled: true,
+			},
+		},
+		QoS: QoSConfig{
+			OuterMarking: OuterMarkingConfig{
+				Enabled: true,
+				GTPC:    ProtocolMarkingConfig{Enabled: true, DSCP: 40},
+				PFCP:    ProtocolMarkingConfig{Enabled: true, DSCP: 40},
 			},
 		},
 		Logging: LoggingConfig{Level: "info"},

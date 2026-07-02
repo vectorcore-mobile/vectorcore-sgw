@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"vectorcore-sgw/internal/gtpv2/message"
+	"vectorcore-sgw/internal/qos"
 )
 
 const gtpcPort = 2123
@@ -125,6 +126,11 @@ func (c *Conn) SetHandler(h Handler) {
 // LocalAddr returns the local UDP address.
 func (c *Conn) LocalAddr() net.Addr {
 	return c.conn.LocalAddr()
+}
+
+// SetDSCP applies IPv4 DSCP marking to packets sent by this GTPv2-C socket.
+func (c *Conn) SetDSCP(dscp uint8) error {
+	return qos.SetUDPConnIPv4DSCP(c.conn, dscp)
 }
 
 // Serve reads incoming packets and dispatches them until ctx is cancelled.

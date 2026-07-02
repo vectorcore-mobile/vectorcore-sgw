@@ -26,6 +26,20 @@ type XDPDataplane struct {
 	testRules   map[XdpSgwGtpuSgwRuleKey]XdpSgwGtpuSgwRuleValue
 }
 
+// QoSOuterMarkingConfig is the SGW-U XDP default outer DSCP marking policy.
+type QoSOuterMarkingConfig struct {
+	Enabled     bool
+	GTPUEnabled bool
+	GTPUDSCP    uint8
+}
+
+type qosOuterMarkingMapValue struct {
+	Enabled     uint8
+	GTPUEnabled uint8
+	GTPUDSCP    uint8
+	Reserved    uint8
+}
+
 // New loads the XDP GTP-U program in xdp-generic mode. maxEntries controls
 // the BPF map capacity.
 func New(s1uIfname, s5uIfname string, maxEntries int) (*XDPDataplane, error) {
@@ -123,6 +137,33 @@ func (d *XDPDataplane) S5UIfindex() uint32 { return d.s5uIfindex }
 
 // SharedInterface reports whether S1-U and S5/S8-U share one Linux ifindex.
 func (d *XDPDataplane) SharedInterface() bool { return d.sharedIface }
+
+// ConfigureQoSOuterMarking writes the singleton XDP QoS outer marking map.
+func (d *XDPDataplane) ConfigureQoSOuterMarking(cfg QoSOuterMarkingConfig) error {
+	if cfg.GTPUDSCP > 63 {
+		return fmt.Errorf("bpf: GTP-U DSCP must be in range 0-63, got %d", cfg.GTPUDSCP)
+	}
+	if d.objs.QosOuterConfigMap == nil {
+		return fmt.Errorf("bpf: qos_outer_config_map is not loaded")
+	}
+	val := qosOuterMarkingMapValue{
+		Enabled:     boolToU8(cfg.Enabled),
+		GTPUEnabled: boolToU8(cfg.GTPUEnabled),
+		GTPUDSCP:    cfg.GTPUDSCP,
+	}
+	var key uint32
+	if err := d.objs.QosOuterConfigMap.Update(key, val, ebpf.UpdateAny); err != nil {
+		return fmt.Errorf("bpf: qos_outer_config_map update: %w", err)
+	}
+	return nil
+}
+
+func boolToU8(v bool) uint8 {
+	if v {
+		return 1
+	}
+	return 0
+}
 
 // InstallRule inserts or updates a forwarding rule in sgw_fwd_map.
 func (d *XDPDataplane) InstallRule(key XdpSgwGtpuSgwRuleKey, val XdpSgwGtpuSgwRuleValue) error {

@@ -121,6 +121,12 @@ func New(cfg *sgwuconfig.Config, startTime time.Time, log *slog.Logger) (*Server
 	if err != nil {
 		return nil, fmt.Errorf("PFCP server listen %s: %w", cfg.PFCP.Listen, err)
 	}
+	if cfg.QoS.OuterMarking.Enabled && cfg.QoS.OuterMarking.PFCP.Enabled {
+		if err := conn.SetDSCP(uint8(cfg.QoS.OuterMarking.PFCP.DSCP)); err != nil {
+			_ = conn.Close()
+			return nil, fmt.Errorf("PFCP server QoS outer marking: %w", err)
+		}
+	}
 
 	localIP, err := extractIPv4(cfg.PFCP.Listen)
 	if err != nil {
