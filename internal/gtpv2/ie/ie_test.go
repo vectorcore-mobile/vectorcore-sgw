@@ -159,7 +159,7 @@ func TestCauseRoundtrip(t *testing.T) {
 // Per C14: raw wire tests required for all non-trivial IEs.
 func TestCauseFlagByteWire(t *testing.T) {
 	for _, tc := range []struct {
-		name string
+		name         string
 		pce, bce, cs uint8
 		wantFlags    byte
 	}{
@@ -201,6 +201,48 @@ func TestBearerContextGrouped(t *testing.T) {
 	}
 	if ebiVal != 5 {
 		t.Errorf("EBI: got %d, want 5", ebiVal)
+	}
+}
+
+func TestSecondaryRATUsageDataReportOpaqueRoundtrip(t *testing.T) {
+	raw := []byte{0x01, 0x06, 0x00, 0x11, 0x22, 0x33}
+	report := ie.NewSecondaryRATUsageDataReport(raw)
+	raw[0] = 0xff
+
+	if report.Type != ie.TypeSecondaryRATUsageDataReport {
+		t.Fatalf("type = %d, want %d", report.Type, ie.TypeSecondaryRATUsageDataReport)
+	}
+	if report.Instance != 0 {
+		t.Fatalf("instance = %d, want 0", report.Instance)
+	}
+	want := []byte{0x01, 0x06, 0x00, 0x11, 0x22, 0x33}
+	if !bytes.Equal(report.Value, want) {
+		t.Fatalf("constructor did not preserve raw payload copy: got %x want %x", report.Value, want)
+	}
+
+	parsed, err := ie.ParseIEs(report.Marshal())
+	if err != nil {
+		t.Fatalf("ParseIEs: %v", err)
+	}
+	if len(parsed) != 1 {
+		t.Fatalf("parsed IE count = %d, want 1", len(parsed))
+	}
+	got, err := parsed[0].SecondaryRATUsageDataReportValue()
+	if err != nil {
+		t.Fatalf("SecondaryRATUsageDataReportValue: %v", err)
+	}
+	if !bytes.Equal(got, want) {
+		t.Fatalf("payload = %x, want %x", got, want)
+	}
+	got[0] = 0xee
+	if parsed[0].Value[0] == 0xee {
+		t.Fatal("SecondaryRATUsageDataReportValue returned aliased payload")
+	}
+}
+
+func TestSecondaryRATUsageDataReportRejectsWrongIEType(t *testing.T) {
+	if _, err := ie.NewRATType(ie.RATTypeEUTRAN).SecondaryRATUsageDataReportValue(); err == nil {
+		t.Fatal("expected error for wrong IE type")
 	}
 }
 

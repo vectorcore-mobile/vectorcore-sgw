@@ -246,6 +246,53 @@ func (c *Client) DeleteSessionFromS11(ctx context.Context, sess *session.SGWSess
 	return c.deleteSession(ctx, sess, req)
 }
 
+// ModifyBearerFromS11 forwards S11 Modify Bearer information that is valid on
+// S5/S8-C, including Rel-15 Secondary RAT Usage Data Report IEs for NSA/DCNR.
+func (c *Client) ModifyBearerFromS11(ctx context.Context, sess *session.SGWSession, req *message.ModifyBearerRequest) (uint8, error) {
+	if sess.PGWControlFTEID.TEID == 0 {
+		return ie.CauseRequestAccepted, nil
+	}
+
+	pgwIP4 := sess.PGWControlFTEID.IPv4.As4()
+	pgwAddr := &net.UDPAddr{
+		IP:   pgwIP4[:],
+		Port: 2123,
+	}
+	seq := c.conn.AllocSeq()
+	recIE := c.maybeRecoveryIE(pgwAddr)
+	raw, err := buildMBReq(sess, req, seq, recIE)
+	if err != nil {
+		return 0, fmt.Errorf("build S5/S8-C MBReq: %w", err)
+	}
+
+	c.log.Info("S5/S8-C: Modify Bearer Request",
+		"pgw", pgwAddr,
+		"pgw_s5c_teid", fmt.Sprintf("0x%08X", sess.PGWControlFTEID.TEID),
+		"seq", seq,
+		"secondary_rat_reports", len(req.SecondaryRATUsageDataReports),
+	)
+
+	respRaw, err := c.conn.Send(ctx, pgwAddr, raw)
+	if err != nil {
+		return 0, fmt.Errorf("s5c send MBReq: %w", err)
+	}
+	h, ies, err := message.Parse(respRaw)
+	if err != nil {
+		return 0, fmt.Errorf("s5c parse MBResp: %w", err)
+	}
+	if h.MessageType != message.MsgTypeModifyBearerResponse {
+		return 0, fmt.Errorf("s5c unexpected message type %d (want %d)",
+			h.MessageType, message.MsgTypeModifyBearerResponse)
+	}
+	resp, err := message.ParseModifyBearerResponse(h, ies)
+	if err != nil {
+		return 0, fmt.Errorf("s5c decode MBResp: %w", err)
+	}
+	cause, _ := resp.Cause.CauseValue()
+	c.log.Info("S5/S8-C: Modify Bearer Response", "pgw", pgwAddr, "cause", cause)
+	return cause, nil
+}
+
 func (c *Client) deleteSession(ctx context.Context, sess *session.SGWSession, req *message.DeleteSessionRequest) (uint8, error) {
 	if sess.PGWControlFTEID.TEID == 0 {
 		return ie.CauseRequestAccepted, nil
@@ -496,6 +543,29 @@ func buildCSReq(s11req *message.CreateSessionRequest, sgwS5CTEID uint32, sgwIP n
 		ies = append(ies, recIE)
 	}
 
+	return message.Marshal(hdr, ies)
+}
+
+// buildMBReq constructs a Modify Bearer Request for S5/S8-C. Phase 3 uses this
+// for Rel-15 Secondary RAT Usage Data Report forwarding while preserving bearer
+// contexts supplied by the MME.
+func buildMBReq(sess *session.SGWSession, req *message.ModifyBearerRequest, seq uint32, recIE *ie.IE) ([]byte, error) {
+	hdr := message.Header{
+		Version:        2,
+		HasTEID:        true,
+		MessageType:    message.MsgTypeModifyBearerRequest,
+		TEID:           sess.PGWControlFTEID.TEID,
+		SequenceNumber: seq,
+	}
+	ies := make([]*ie.IE, 0, len(req.BearerContexts)+len(req.SecondaryRATUsageDataReports)+2)
+	ies = append(ies, req.BearerContexts...)
+	ies = append(ies, req.SecondaryRATUsageDataReports...)
+	if req.Indication != nil {
+		ies = append(ies, req.Indication)
+	}
+	if recIE != nil {
+		ies = append(ies, recIE)
+	}
 	return message.Marshal(hdr, ies)
 }
 

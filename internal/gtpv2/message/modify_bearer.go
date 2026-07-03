@@ -4,11 +4,12 @@ import "vectorcore-sgw/internal/gtpv2/ie"
 
 // ModifyBearerRequest per TS 29.274 Section 7.2.7.
 type ModifyBearerRequest struct {
-	Header         Header
-	FTEID          *ie.IE   // Sender F-TEID (instance 0) — optional on S11 MBR
-	BearerContexts []*ie.IE // Modified bearer contexts
-	Indication     *ie.IE
-	Recovery       *ie.IE
+	Header                       Header
+	FTEID                        *ie.IE   // Sender F-TEID (instance 0) — optional on S11 MBR
+	BearerContexts               []*ie.IE // Modified bearer contexts
+	SecondaryRATUsageDataReports []*ie.IE // Rel-15 NSA/DCNR usage reports, preserved opaque.
+	Indication                   *ie.IE
+	Recovery                     *ie.IE
 }
 
 // ParseModifyBearerRequest decodes a Modify Bearer Request.
@@ -25,6 +26,8 @@ func ParseModifyBearerRequest(h Header, ies []*ie.IE) (*ModifyBearerRequest, err
 			}
 		case ie.TypeBearerContext:
 			req.BearerContexts = append(req.BearerContexts, i)
+		case ie.TypeSecondaryRATUsageDataReport:
+			req.SecondaryRATUsageDataReports = append(req.SecondaryRATUsageDataReports, i)
 		case ie.TypeIndication:
 			req.Indication = i
 		case ie.TypeRecovery:
@@ -38,7 +41,7 @@ func ParseModifyBearerRequest(h Header, ies []*ie.IE) (*ModifyBearerRequest, err
 type ModifyBearerResponse struct {
 	Header         Header
 	Cause          *ie.IE
-	FTEID          *ie.IE   // SGW F-TEID (instance 0) — optional
+	FTEID          *ie.IE // SGW F-TEID (instance 0) — optional
 	BearerContexts []*ie.IE
 	Recovery       *ie.IE
 }

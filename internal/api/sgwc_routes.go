@@ -36,25 +36,38 @@ type BearerView struct {
 	GBRDownlink             uint64 `json:"gbr_downlink_kbps"`
 }
 
+// SecondaryRATUsageReportView is a compact API view of an NSA/DCNR usage report
+// received in a GTPv2-C Secondary RAT Usage Data Report IE.
+type SecondaryRATUsageReportView struct {
+	ReceivedAt      time.Time `json:"received_at"`
+	SourceProcedure string    `json:"source_procedure"`
+	MMEPeer         string    `json:"mme_peer,omitempty"`
+	SGWS11TEID      string    `json:"sgw_s11_teid"`
+	SequenceNumber  string    `json:"sequence_number"`
+	PayloadLength   int       `json:"payload_length"`
+}
+
 // SessionView is the API representation of an SGW-C session.
 type SessionView struct {
-	SessionID      string       `json:"session_id"`
-	IMSI           string       `json:"imsi"`
-	APN            string       `json:"apn"`
-	RATType        uint8        `json:"rat_type"`
-	ServingNetwork string       `json:"serving_network"`
-	State          string       `json:"state"`
-	PFCPState      string       `json:"pfcp_state"`
-	PFCPLocalSEID  string       `json:"pfcp_local_seid"`
-	PFCPUPSEID     string       `json:"pfcp_up_seid"`
-	PFCPSGWUName   string       `json:"pfcp_sgwu_name,omitempty"`
-	PFCPSGWUAddr   string       `json:"pfcp_sgwu_addr,omitempty"`
-	SGWS11TEID     string       `json:"sgw_s11_teid"`
-	MMEControlTEID string       `json:"mme_control_teid"`
-	BearerCount    int          `json:"bearer_count"`
-	Bearers        []BearerView `json:"bearers"`
-	CreatedAt      time.Time    `json:"created_at"`
-	UpdatedAt      time.Time    `json:"updated_at"`
+	SessionID                    string                        `json:"session_id"`
+	IMSI                         string                        `json:"imsi"`
+	APN                          string                        `json:"apn"`
+	RATType                      uint8                         `json:"rat_type"`
+	ServingNetwork               string                        `json:"serving_network"`
+	State                        string                        `json:"state"`
+	PFCPState                    string                        `json:"pfcp_state"`
+	PFCPLocalSEID                string                        `json:"pfcp_local_seid"`
+	PFCPUPSEID                   string                        `json:"pfcp_up_seid"`
+	PFCPSGWUName                 string                        `json:"pfcp_sgwu_name,omitempty"`
+	PFCPSGWUAddr                 string                        `json:"pfcp_sgwu_addr,omitempty"`
+	SGWS11TEID                   string                        `json:"sgw_s11_teid"`
+	MMEControlTEID               string                        `json:"mme_control_teid"`
+	BearerCount                  int                           `json:"bearer_count"`
+	Bearers                      []BearerView                  `json:"bearers"`
+	SecondaryRATUsageReportCount int                           `json:"secondary_rat_usage_report_count"`
+	SecondaryRATUsageDataReports []SecondaryRATUsageReportView `json:"secondary_rat_usage_data_reports"`
+	CreatedAt                    time.Time                     `json:"created_at"`
+	UpdatedAt                    time.Time                     `json:"updated_at"`
 }
 
 type SessionListOutput struct {
@@ -121,25 +134,43 @@ func sessionToView(s *session.SGWSession) SessionView {
 	} else if state == session.StateRecovering {
 		pfcpState = "stale"
 	}
+	reports := secondaryRATUsageReportsToView(s.SecondaryRATUsageReports())
 	return SessionView{
-		SessionID:      s.SessionID,
-		IMSI:           s.IMSI,
-		APN:            s.APN,
-		RATType:        s.RATType,
-		ServingNetwork: s.ServingNetwork,
-		State:          string(state),
-		PFCPState:      pfcpState,
-		PFCPLocalSEID:  fmt.Sprintf("0x%016X", pfcp.LocalFSEID.SEID),
-		PFCPUPSEID:     fmt.Sprintf("0x%016X", pfcp.SGWUFSEID.SEID),
-		PFCPSGWUName:   pfcp.SGWUName,
-		PFCPSGWUAddr:   pfcp.SGWUAddr,
-		SGWS11TEID:     fmt.Sprintf("0x%08X", s.SGWS11FTEID.TEID),
-		MMEControlTEID: fmt.Sprintf("0x%08X", s.MMEControlFTEID.TEID),
-		BearerCount:    s.BearerCount(),
-		Bearers:        views,
-		CreatedAt:      s.CreatedAt,
-		UpdatedAt:      s.UpdatedAt,
+		SessionID:                    s.SessionID,
+		IMSI:                         s.IMSI,
+		APN:                          s.APN,
+		RATType:                      s.RATType,
+		ServingNetwork:               s.ServingNetwork,
+		State:                        string(state),
+		PFCPState:                    pfcpState,
+		PFCPLocalSEID:                fmt.Sprintf("0x%016X", pfcp.LocalFSEID.SEID),
+		PFCPUPSEID:                   fmt.Sprintf("0x%016X", pfcp.SGWUFSEID.SEID),
+		PFCPSGWUName:                 pfcp.SGWUName,
+		PFCPSGWUAddr:                 pfcp.SGWUAddr,
+		SGWS11TEID:                   fmt.Sprintf("0x%08X", s.SGWS11FTEID.TEID),
+		MMEControlTEID:               fmt.Sprintf("0x%08X", s.MMEControlFTEID.TEID),
+		BearerCount:                  s.BearerCount(),
+		Bearers:                      views,
+		SecondaryRATUsageReportCount: len(reports),
+		SecondaryRATUsageDataReports: reports,
+		CreatedAt:                    s.CreatedAt,
+		UpdatedAt:                    s.UpdatedAt,
 	}
+}
+
+func secondaryRATUsageReportsToView(reports []session.SecondaryRATUsageDataReport) []SecondaryRATUsageReportView {
+	views := make([]SecondaryRATUsageReportView, 0, len(reports))
+	for _, report := range reports {
+		views = append(views, SecondaryRATUsageReportView{
+			ReceivedAt:      report.ReceivedAt,
+			SourceProcedure: report.SourceProcedure,
+			MMEPeer:         report.MMEPeer,
+			SGWS11TEID:      fmt.Sprintf("0x%08X", report.SGWS11TEID),
+			SequenceNumber:  fmt.Sprintf("0x%06X", report.SequenceNumber),
+			PayloadLength:   len(report.Payload),
+		})
+	}
+	return views
 }
 
 func bearerToView(b *bearer.Bearer, defaultBearerID uint8) BearerView {

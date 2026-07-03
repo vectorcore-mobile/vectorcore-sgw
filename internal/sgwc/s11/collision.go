@@ -16,9 +16,19 @@ type collisionMetrics interface {
 	OnStaleExpired(req collision.Request, expired int)
 }
 
+type nsaMetrics interface {
+	OnSecondaryRATUsageReportsCaptured(apn, sourceProcedure string, count int)
+	OnSecondaryRATUsageReportsForwarded(apn string, cause uint8, count int)
+}
+
 // SetCollisionMetrics wires optional GTPv2-C transaction collision KPI reporting.
 func (h *Handler) SetCollisionMetrics(metrics collisionMetrics) {
 	h.collisionMetrics = metrics
+}
+
+// SetNSAMetrics wires optional Rel-15 NSA/DCNR KPI reporting.
+func (h *Handler) SetNSAMetrics(metrics nsaMetrics) {
+	h.nsaMetrics = metrics
 }
 
 func (h *Handler) beginProcedure(sess *session.SGWSession, req collision.Request) (collision.ActiveProcedure, bool) {

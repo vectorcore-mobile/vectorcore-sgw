@@ -414,6 +414,59 @@ func TestBuildDSReqPreservesS11CauseAndIndication(t *testing.T) {
 	}
 }
 
+func TestBuildMBReqForwardsSecondaryRATUsageDataReports(t *testing.T) {
+	const pgwTEID = 0xCAFEBABE
+	sess := makeSession(pgwTEID, 6)
+	report := ie.NewSecondaryRATUsageDataReport([]byte{0x01, 0x06, 0x00, 0xaa, 0xbb})
+	req := &message.ModifyBearerRequest{
+		BearerContexts: []*ie.IE{
+			ie.NewBearerContext(0, ie.NewEBI(6)),
+		},
+		SecondaryRATUsageDataReports: []*ie.IE{report},
+		Indication:                   &ie.IE{Type: ie.TypeIndication, Value: []byte{0x80}},
+	}
+	recIE := ie.NewRecovery(7)
+
+	raw, err := buildMBReq(sess, req, 0x123456, recIE)
+	if err != nil {
+		t.Fatalf("buildMBReq: %v", err)
+	}
+	h, ies, err := message.Parse(raw)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if h.MessageType != message.MsgTypeModifyBearerRequest {
+		t.Fatalf("MessageType = %d; want %d", h.MessageType, message.MsgTypeModifyBearerRequest)
+	}
+	if h.TEID != pgwTEID {
+		t.Fatalf("header TEID = 0x%08X; want PGW S5/S8-C TEID 0x%08X", h.TEID, pgwTEID)
+	}
+	if h.SequenceNumber != 0x123456 {
+		t.Fatalf("SequenceNumber = 0x%06X; want 0x123456", h.SequenceNumber)
+	}
+	if ie.FindInstance(ies, ie.TypeBearerContext, 0) == nil {
+		t.Fatal("Bearer Context from S11 MBReq not forwarded")
+	}
+	gotReport := ie.FindFirst(ies, ie.TypeSecondaryRATUsageDataReport)
+	if gotReport == nil {
+		t.Fatal("Secondary RAT Usage Data Report not forwarded")
+	}
+	gotPayload, err := gotReport.SecondaryRATUsageDataReportValue()
+	if err != nil {
+		t.Fatalf("SecondaryRATUsageDataReportValue: %v", err)
+	}
+	wantPayload := []byte{0x01, 0x06, 0x00, 0xaa, 0xbb}
+	if string(gotPayload) != string(wantPayload) {
+		t.Fatalf("report payload = % X; want % X", gotPayload, wantPayload)
+	}
+	if ie.FindFirst(ies, ie.TypeIndication) == nil {
+		t.Fatal("Indication IE from S11 MBReq not forwarded")
+	}
+	if ie.FindFirst(ies, ie.TypeRecovery) == nil {
+		t.Fatal("Recovery IE not included")
+	}
+}
+
 // ── helpers ──────────────────────────────────────────────────────────────────
 
 func makeS11CSReq(t *testing.T) *message.CreateSessionRequest {

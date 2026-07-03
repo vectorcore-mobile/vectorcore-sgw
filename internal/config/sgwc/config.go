@@ -52,6 +52,7 @@ type GTPCConfig struct {
 	S5C                    GTPCLogical                  `yaml:"s5c"`
 	CreateBearerRetryGuard CreateBearerRetryGuardConfig `yaml:"create_bearer_retry_guard"`
 	TransactionCollision   TransactionCollisionConfig   `yaml:"transaction_collision"`
+	NSADCNR                NSADCNRConfig                `yaml:"nsa_dcnr"`
 }
 
 type GTPCLogical struct {
@@ -69,6 +70,14 @@ type TransactionCollisionConfig struct {
 	Mode string `yaml:"mode"`
 	// ActiveProcedureTimeoutSeconds bounds stale in-flight procedure state.
 	ActiveProcedureTimeoutSeconds int `yaml:"active_procedure_timeout_seconds"`
+}
+
+type NSADCNRConfig struct {
+	// Enabled controls Rel-15 EPC NSA/DCNR awareness in SGW-C.
+	Enabled bool `yaml:"enabled"`
+	// ForwardSecondaryRATUsageReports forwards S11 Secondary RAT Usage Data Report IEs
+	// to the owning PGW over S5/S8-C Modify Bearer.
+	ForwardSecondaryRATUsageReports bool `yaml:"forward_secondary_rat_usage_reports"`
 }
 
 type S11Config struct {
@@ -142,6 +151,10 @@ func Default() *Config {
 			TransactionCollision: TransactionCollisionConfig{
 				Mode:                          "strict",
 				ActiveProcedureTimeoutSeconds: 120,
+			},
+			NSADCNR: NSADCNRConfig{
+				Enabled:                         true,
+				ForwardSecondaryRATUsageReports: true,
 			},
 		},
 		QoS: QoSConfig{

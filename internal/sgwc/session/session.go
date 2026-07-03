@@ -46,6 +46,18 @@ type PFCPSessionBinding struct {
 	Established bool
 }
 
+// SecondaryRATUsageDataReport records an opaque Rel-15 Secondary RAT Usage
+// Data Report IE payload received on S11. Interpretation/forwarding is handled
+// by higher procedure phases; session state keeps the exact report bytes.
+type SecondaryRATUsageDataReport struct {
+	ReceivedAt      time.Time
+	SourceProcedure string
+	MMEPeer         string
+	SGWS11TEID      uint32
+	SequenceNumber  uint32
+	Payload         []byte
+}
+
 // SGWSession is the SGW-C control-plane state for one PDN session
 // per 3GPP TS 23.401 Section 5.3.2 and TS 23.214.
 type SGWSession struct {
@@ -68,9 +80,10 @@ type SGWSession struct {
 	UEIPv4          netip.Addr // assigned by PGW in PAA (set in Phase 3)
 	DefaultBearerID uint8
 
-	Bearers    map[uint8]*bearer.Bearer // keyed by EBI
-	PFCP       PFCPSessionBinding
-	Procedures *collision.Tracker
+	Bearers                      map[uint8]*bearer.Bearer // keyed by EBI
+	PFCP                         PFCPSessionBinding
+	Procedures                   *collision.Tracker
+	SecondaryRATUsageDataReports []SecondaryRATUsageDataReport
 
 	State     SessionState
 	CreatedAt time.Time
@@ -220,6 +233,37 @@ func (s *SGWSession) DeleteBearer(ebi uint8) {
 	defer s.mu.Unlock()
 	delete(s.Bearers, ebi)
 	s.UpdatedAt = time.Now()
+}
+
+// RecordSecondaryRATUsageDataReports appends opaque NSA/DCNR usage reports to
+// the PDN session with defensive payload copies.
+func (s *SGWSession) RecordSecondaryRATUsageDataReports(reports []SecondaryRATUsageDataReport) {
+	if len(reports) == 0 {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, report := range reports {
+		copied := report
+		copied.Payload = append([]byte(nil), report.Payload...)
+		if copied.ReceivedAt.IsZero() {
+			copied.ReceivedAt = time.Now()
+		}
+		s.SecondaryRATUsageDataReports = append(s.SecondaryRATUsageDataReports, copied)
+	}
+	s.UpdatedAt = time.Now()
+}
+
+// SecondaryRATUsageReports returns a copy of stored NSA/DCNR usage reports.
+func (s *SGWSession) SecondaryRATUsageReports() []SecondaryRATUsageDataReport {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]SecondaryRATUsageDataReport, len(s.SecondaryRATUsageDataReports))
+	for i, report := range s.SecondaryRATUsageDataReports {
+		out[i] = report
+		out[i].Payload = append([]byte(nil), report.Payload...)
+	}
+	return out
 }
 
 func validTransition(from, to SessionState) bool {

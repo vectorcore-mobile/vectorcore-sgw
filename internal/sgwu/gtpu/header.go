@@ -50,14 +50,14 @@ const OptFieldsLen = 4
 // Header is a decoded GTP-U header per TS 29.281 §5.1.
 type Header struct {
 	// Mandatory fields — always present in all 8-byte GTP-U headers.
-	Version  uint8  // always 1 per §5.1
-	PT       bool   // always true for GTP (not GTP')
-	E        bool   // Extension Header flag
-	S        bool   // Sequence Number flag
-	PN       bool   // N-PDU Number flag
-	MsgType  uint8  // message type per Table 6.1-1
-	Length   uint16 // bytes after the mandatory 8-octet header (payload + optional fields if set)
-	TEID     uint32 // Tunnel Endpoint Identifier
+	Version uint8  // always 1 per §5.1
+	PT      bool   // always true for GTP (not GTP')
+	E       bool   // Extension Header flag
+	S       bool   // Sequence Number flag
+	PN      bool   // N-PDU Number flag
+	MsgType uint8  // message type per Table 6.1-1
+	Length  uint16 // bytes after the mandatory 8-octet header (payload + optional fields if set)
+	TEID    uint32 // Tunnel Endpoint Identifier
 
 	// Optional fields — present when E|S|PN (§5.1 NOTE 4).
 	SeqNum     uint16 // Sequence Number (meaningful when S=1)
@@ -127,6 +127,9 @@ func Parse(b []byte) (Header, int, error) {
 		if len(b) < MinLen+OptFieldsLen {
 			return Header{}, 0, fmt.Errorf("gtpu: too short for optional fields: %d < %d",
 				len(b), MinLen+OptFieldsLen)
+		}
+		if totalDeclared < MinLen+OptFieldsLen {
+			return Header{}, 0, fmt.Errorf("gtpu: declared Length %d too short for optional fields", h.Length)
 		}
 		h.SeqNum = binary.BigEndian.Uint16(b[8:10])
 		h.NPDUNum = b[10]

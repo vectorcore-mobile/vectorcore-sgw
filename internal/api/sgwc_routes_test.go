@@ -4,6 +4,7 @@ import (
 	"log/slog"
 	"net/netip"
 	"testing"
+	"time"
 
 	"vectorcore-sgw/internal/sgwc/bearer"
 	"vectorcore-sgw/internal/sgwc/session"
@@ -89,6 +90,41 @@ func TestSGWCRoutesExposePFCPPeerPlacement(t *testing.T) {
 	if out.Body.PFCPSGWUName != "sgwu-a" || out.Body.PFCPSGWUAddr != "192.0.2.12:8805" {
 		t.Fatalf("PFCP peer = %q/%q; want sgwu-a/192.0.2.12:8805",
 			out.Body.PFCPSGWUName, out.Body.PFCPSGWUAddr)
+	}
+}
+
+func TestSGWCRoutesExposeSecondaryRATUsageReports(t *testing.T) {
+	m := session.NewManager()
+	sess, _, err := m.Create(defaultSGWCSessionParams())
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	sess.RecordSecondaryRATUsageDataReports([]session.SecondaryRATUsageDataReport{{
+		ReceivedAt:      time.Unix(10, 0).UTC(),
+		SourceProcedure: "s11_modify_bearer_request",
+		MMEPeer:         "10.90.250.77:2123",
+		SGWS11TEID:      0x11223344,
+		SequenceNumber:  0x010203,
+		Payload:         []byte{0x01, 0x02, 0x03, 0x04},
+	}})
+
+	srv := newTestSGWCAPI(m)
+	var out SessionGetOutput
+	getJSON(t, srv, "/sessions/"+sess.SessionID, &out.Body)
+
+	if out.Body.SecondaryRATUsageReportCount != 1 {
+		t.Fatalf("secondary report count = %d; want 1", out.Body.SecondaryRATUsageReportCount)
+	}
+	if len(out.Body.SecondaryRATUsageDataReports) != 1 {
+		t.Fatalf("secondary reports len = %d; want 1", len(out.Body.SecondaryRATUsageDataReports))
+	}
+	got := out.Body.SecondaryRATUsageDataReports[0]
+	if got.SourceProcedure != "s11_modify_bearer_request" ||
+		got.MMEPeer != "10.90.250.77:2123" ||
+		got.SGWS11TEID != "0x11223344" ||
+		got.SequenceNumber != "0x010203" ||
+		got.PayloadLength != 4 {
+		t.Fatalf("secondary report view = %+v", got)
 	}
 }
 

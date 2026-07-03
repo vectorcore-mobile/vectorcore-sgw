@@ -93,6 +93,10 @@ func main() {
 		"mode", cfg.GTPC.TransactionCollision.Mode,
 		"active_procedure_timeout_seconds", cfg.GTPC.TransactionCollision.ActiveProcedureTimeoutSeconds,
 	)
+	logger.Info("SGW-C NSA/DCNR awareness configured",
+		"enabled", cfg.GTPC.NSADCNR.Enabled,
+		"forward_secondary_rat_usage_reports", cfg.GTPC.NSADCNR.ForwardSecondaryRATUsageReports,
+	)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	sigCh := make(chan os.Signal, 1)
@@ -182,6 +186,7 @@ func main() {
 	// Wire PFCP peer state changes to Prometheus metrics (Phase 11).
 	pfcpMetrics := metrics.NewPFCPMetrics(metricsSrv.Registry())
 	collisionMetrics := metrics.NewCollisionMetrics(metricsSrv.Registry())
+	nsaMetrics := metrics.NewNSAMetrics(metricsSrv.Registry())
 	pfcpClient.SetPeerStateCallback(func(peerName, peerAddr string, state pfcpclient.PeerState) {
 		pfcpMetrics.OnPeerStateChange(peerName, peerAddr, string(state))
 		if state == pfcpclient.PeerStateDown {
@@ -221,6 +226,7 @@ func main() {
 		}
 	}
 	s11Handler.SetCollisionMetrics(collisionMetrics)
+	s11Handler.SetNSAMetrics(nsaMetrics)
 	// Register handler for PGW-initiated bearer procedures (CBReq, UBReq, DBReq).
 	// Must be set before any session can be established so requests are never dropped.
 	// Per TS 29.274 §7.2.3/§7.2.9.2/§7.2.15: PGW initiates these after session creation.

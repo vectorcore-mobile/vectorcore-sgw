@@ -37,9 +37,10 @@ const (
 	TypeAPNRestriction = 127 // FIXED 2026-06-23: was 167 ("Change to Report Flags" / §8.98).
 	// Real value per Table 8.1-1: "127 | APN Restriction | Extendable / 8.57 | 1". Unused
 	// elsewhere in this codebase, so this was a latent wire-format bug, not yet triggered.
-	TypeUETimeZone    = 114
-	TypeNodeType      = 135
-	TypeSelectionMode = 128 // §8.58
+	TypeUETimeZone                  = 114
+	TypeNodeType                    = 135
+	TypeSelectionMode               = 128 // §8.58
+	TypeSecondaryRATUsageDataReport = 201 // §8.128, used for E-UTRAN NR DC / secondary RAT usage reporting.
 )
 
 // Cause values per TS 29.274 Rel-15 Table 8.4-1.
@@ -294,6 +295,15 @@ func NewBearerTFT(raw []byte) *IE {
 	return &IE{Type: TypeBearerTFT, Value: v}
 }
 
+// NewSecondaryRATUsageDataReport creates a Secondary RAT Usage Data Report IE
+// per TS 29.274 Rel-15 §8.128. Phase 1 preserves the opaque report payload for
+// S11/S5/S8-C procedure handling without interpreting nested usage counters.
+func NewSecondaryRATUsageDataReport(raw []byte) *IE {
+	v := make([]byte, len(raw))
+	copy(v, raw)
+	return &IE{Type: TypeSecondaryRATUsageDataReport, Value: v}
+}
+
 // NewBearerContext creates a grouped Bearer Context IE per TS 29.274 Section 8.28.
 func NewBearerContext(instance uint8, children ...*IE) *IE {
 	var body []byte
@@ -366,6 +376,16 @@ func (ie *IE) RATTypeValue() (uint8, error) {
 		return 0, fmt.Errorf("RAT Type IE too short")
 	}
 	return ie.Value[0], nil
+}
+
+// SecondaryRATUsageDataReportValue returns the opaque report payload.
+func (ie *IE) SecondaryRATUsageDataReportValue() ([]byte, error) {
+	if ie.Type != TypeSecondaryRATUsageDataReport {
+		return nil, fmt.Errorf("IE type %d is not Secondary RAT Usage Data Report", ie.Type)
+	}
+	v := make([]byte, len(ie.Value))
+	copy(v, ie.Value)
+	return v, nil
 }
 
 // APNValue returns the APN string decoded from the APN IE.

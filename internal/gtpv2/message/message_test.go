@@ -916,6 +916,45 @@ func TestModifyBearerRequestMissingBearerContext(t *testing.T) {
 	}
 }
 
+func TestModifyBearerRequestPreservesSecondaryRATUsageDataReport(t *testing.T) {
+	rawReport := []byte{0x01, 0x06, 0x00, 0xaa, 0xbb, 0xcc}
+	report := ie.NewSecondaryRATUsageDataReport(rawReport)
+	bc := ie.NewBearerContext(0, ie.NewEBI(5))
+	h := message.Header{
+		Version:        2,
+		HasTEID:        true,
+		MessageType:    message.MsgTypeModifyBearerRequest,
+		TEID:           0x01020304,
+		SequenceNumber: 0x123456,
+	}
+	wire, err := message.Marshal(h, []*ie.IE{bc, report})
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+
+	parsedH, ies, err := message.Parse(wire)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	req, err := message.ParseModifyBearerRequest(parsedH, ies)
+	if err != nil {
+		t.Fatalf("ParseModifyBearerRequest: %v", err)
+	}
+	if len(req.SecondaryRATUsageDataReports) != 1 {
+		t.Fatalf("SecondaryRATUsageDataReports count = %d; want 1", len(req.SecondaryRATUsageDataReports))
+	}
+	got, err := req.SecondaryRATUsageDataReports[0].SecondaryRATUsageDataReportValue()
+	if err != nil {
+		t.Fatalf("SecondaryRATUsageDataReportValue: %v", err)
+	}
+	if !bytes.Equal(got, rawReport) {
+		t.Fatalf("secondary RAT report payload = %x, want %x", got, rawReport)
+	}
+	if len(req.BearerContexts) != 1 {
+		t.Fatalf("BearerContexts count = %d; want 1", len(req.BearerContexts))
+	}
+}
+
 func TestResponseTypeForRel15RequestPairs(t *testing.T) {
 	tests := []struct {
 		name string

@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	sgwcconfig "vectorcore-sgw/internal/config/sgwc"
 	"vectorcore-sgw/internal/gtpv2/ie"
 	"vectorcore-sgw/internal/gtpv2/message"
 	pfcpie "vectorcore-sgw/internal/pfcp/ie"
@@ -66,7 +67,9 @@ func (f *fakeGTPCConn) Close() error                { return nil }
 func (f *fakeGTPCConn) LocalAddr() net.Addr         { return &net.UDPAddr{} }
 
 type fakeS5CClient struct {
-	replies [][]byte
+	replies           [][]byte
+	modifyBearerCalls int
+	lastModifyBearer  *message.ModifyBearerRequest
 }
 
 func (f *fakeS5CClient) PGWAddr(*message.CreateSessionRequest) (*net.UDPAddr, error) {
@@ -82,6 +85,11 @@ func (f *fakeS5CClient) DeleteSession(context.Context, *session.SGWSession) (uin
 	return ie.CauseRequestAccepted, nil
 }
 func (f *fakeS5CClient) DeleteSessionFromS11(context.Context, *session.SGWSession, *message.DeleteSessionRequest) (uint8, error) {
+	return ie.CauseRequestAccepted, nil
+}
+func (f *fakeS5CClient) ModifyBearerFromS11(_ context.Context, _ *session.SGWSession, req *message.ModifyBearerRequest) (uint8, error) {
+	f.modifyBearerCalls++
+	f.lastModifyBearer = req
 	return ie.CauseRequestAccepted, nil
 }
 func (f *fakeS5CClient) ReplyToPGW(_ *net.UDPAddr, raw []byte) error {
@@ -272,6 +280,194 @@ func TestBeginProcedurePermissiveModeAllowsUnknownBearerScope(t *testing.T) {
 	defer finishProcedure(sess, proc)
 	if got := sess.ProcedureTracker().Active(); len(got) != 2 {
 		t.Fatalf("active procedures after permissive overlap = %d; want 2", len(got))
+	}
+}
+
+func TestCaptureSecondaryRATUsageReportsUsesBearerOwner(t *testing.T) {
+	mgr := session.NewManager()
+	defaultSess, _, err := mgr.Create(session.CreateParams{
+		IMSI:           "311435000070570",
+		APN:            "internet.mnc435.mcc311.gprs",
+		RATType:        ie.RATTypeEUTRAN,
+		ServingNetwork: "311-435",
+		MMEControlFTEID: session.FTEID{
+			TEID: 0x11223344,
+			IPv4: netip.MustParseAddr("10.90.250.77"),
+		},
+		DefaultEBI: 5,
+		QCI:        9,
+		ARP:        bearer.ARP{PriorityLevel: 9},
+	})
+	if err != nil {
+		t.Fatalf("Create default session: %v", err)
+	}
+	imsSess, _, err := mgr.Create(session.CreateParams{
+		IMSI:             "311435000070570",
+		APN:              "ims.mnc435.mcc311.gprs",
+		RATType:          ie.RATTypeEUTRAN,
+		ServingNetwork:   "311-435",
+		MMEControlFTEID:  defaultSess.MMEControlFTEID,
+		ReuseSGWS11FTEID: defaultSess.SGWS11FTEID,
+		DefaultEBI:       6,
+		QCI:              5,
+		ARP:              bearer.ARP{PriorityLevel: 5},
+	})
+	if err != nil {
+		t.Fatalf("Create IMS session: %v", err)
+	}
+	h := &Handler{
+		log:      slog.Default(),
+		sessions: mgr,
+	}
+	reportPayload := []byte{0x01, 0x06, 0x00, 0xaa, 0xbb}
+	req := &message.ModifyBearerRequest{
+		BearerContexts: []*ie.IE{
+			ie.NewBearerContext(0, ie.NewEBI(6)),
+		},
+		SecondaryRATUsageDataReports: []*ie.IE{
+			ie.NewSecondaryRATUsageDataReport(reportPayload),
+		},
+	}
+	reportPayload[0] = 0xff
+	addr := &net.UDPAddr{IP: net.ParseIP("10.90.250.77"), Port: 2123}
+	hdr := message.Header{
+		Version:        2,
+		HasTEID:        true,
+		MessageType:    message.MsgTypeModifyBearerRequest,
+		TEID:           defaultSess.SGWS11FTEID.TEID,
+		SequenceNumber: 0x102030,
+	}
+
+	h.captureSecondaryRATUsageReports(addr, hdr, req, defaultSess)
+
+	if got := defaultSess.SecondaryRATUsageReports(); len(got) != 0 {
+		t.Fatalf("default PDN reports = %d; want 0 because EBI 6 belongs to IMS", len(got))
+	}
+	got := imsSess.SecondaryRATUsageReports()
+	if len(got) != 1 {
+		t.Fatalf("IMS reports = %d; want 1", len(got))
+	}
+	wantPayload := []byte{0x01, 0x06, 0x00, 0xaa, 0xbb}
+	if !reflect.DeepEqual(got[0].Payload, wantPayload) {
+		t.Fatalf("IMS report payload = %x, want %x", got[0].Payload, wantPayload)
+	}
+	if got[0].MMEPeer != "10.90.250.77:2123" {
+		t.Fatalf("MMEPeer = %q, want 10.90.250.77:2123", got[0].MMEPeer)
+	}
+	if got[0].SequenceNumber != hdr.SequenceNumber {
+		t.Fatalf("SequenceNumber = 0x%06X, want 0x%06X", got[0].SequenceNumber, hdr.SequenceNumber)
+	}
+	if got[0].SourceProcedure != "s11_modify_bearer_request" {
+		t.Fatalf("SourceProcedure = %q", got[0].SourceProcedure)
+	}
+}
+
+func TestNSADCNRConfigDisabledSkipsSecondaryRATCaptureAndForwardTargeting(t *testing.T) {
+	mgr := session.NewManager()
+	sess, _, err := mgr.Create(session.CreateParams{
+		IMSI:           "311435000070570",
+		APN:            "ims.mnc435.mcc311.gprs",
+		RATType:        ie.RATTypeEUTRAN,
+		ServingNetwork: "311-435",
+		MMEControlFTEID: session.FTEID{
+			TEID: 0x11223344,
+			IPv4: netip.MustParseAddr("10.90.250.77"),
+		},
+		DefaultEBI: 6,
+		QCI:        5,
+		ARP:        bearer.ARP{PriorityLevel: 5},
+	})
+	if err != nil {
+		t.Fatalf("Create session: %v", err)
+	}
+	cfg := sgwcconfig.Default()
+	cfg.GTPC.NSADCNR.Enabled = false
+	h := &Handler{
+		cfg:      cfg,
+		log:      slog.Default(),
+		sessions: mgr,
+	}
+	req := &message.ModifyBearerRequest{
+		BearerContexts: []*ie.IE{
+			ie.NewBearerContext(0, ie.NewEBI(6)),
+		},
+		SecondaryRATUsageDataReports: []*ie.IE{
+			ie.NewSecondaryRATUsageDataReport([]byte{0x01, 0x06}),
+		},
+	}
+	hdr := message.Header{
+		Version:        2,
+		HasTEID:        true,
+		MessageType:    message.MsgTypeModifyBearerRequest,
+		TEID:           sess.SGWS11FTEID.TEID,
+		SequenceNumber: 0x102030,
+	}
+
+	h.captureSecondaryRATUsageReports(nil, hdr, req, sess)
+
+	if got := sess.SecondaryRATUsageReports(); len(got) != 0 {
+		t.Fatalf("secondary RAT reports captured with NSA/DCNR disabled = %d; want 0", len(got))
+	}
+	if targets := h.secondaryRATReportTargetSessions(hdr.TEID, []uint8{6}, sess, h.nsaDCNRForwardSecondaryRATUsageReports(req)); len(targets) != 0 {
+		t.Fatalf("forward targets with NSA/DCNR disabled = %d; want 0", len(targets))
+	}
+}
+
+func TestNSADCNRForwardingTargetsBearerOwnerWhenEnabled(t *testing.T) {
+	mgr := session.NewManager()
+	defaultSess, _, err := mgr.Create(session.CreateParams{
+		IMSI:           "311435000070570",
+		APN:            "internet.mnc435.mcc311.gprs",
+		RATType:        ie.RATTypeEUTRAN,
+		ServingNetwork: "311-435",
+		MMEControlFTEID: session.FTEID{
+			TEID: 0x11223344,
+			IPv4: netip.MustParseAddr("10.90.250.77"),
+		},
+		DefaultEBI: 5,
+		QCI:        9,
+		ARP:        bearer.ARP{PriorityLevel: 9},
+	})
+	if err != nil {
+		t.Fatalf("Create default session: %v", err)
+	}
+	imsSess, _, err := mgr.Create(session.CreateParams{
+		IMSI:           "311435000070570",
+		APN:            "ims.mnc435.mcc311.gprs",
+		RATType:        ie.RATTypeEUTRAN,
+		ServingNetwork: "311-435",
+		MMEControlFTEID: session.FTEID{
+			TEID: 0x11223344,
+			IPv4: netip.MustParseAddr("10.90.250.77"),
+		},
+		ReuseSGWS11FTEID: defaultSess.SGWS11FTEID,
+		DefaultEBI:       6,
+		QCI:              5,
+		ARP:              bearer.ARP{PriorityLevel: 5},
+	})
+	if err != nil {
+		t.Fatalf("Create IMS session: %v", err)
+	}
+	h := &Handler{
+		cfg:      sgwcconfig.Default(),
+		log:      slog.Default(),
+		sessions: mgr,
+	}
+	req := &message.ModifyBearerRequest{
+		BearerContexts: []*ie.IE{
+			ie.NewBearerContext(0, ie.NewEBI(6)),
+		},
+		SecondaryRATUsageDataReports: []*ie.IE{
+			ie.NewSecondaryRATUsageDataReport([]byte{0x01, 0x06}),
+		},
+	}
+
+	targets := h.secondaryRATReportTargetSessions(defaultSess.SGWS11FTEID.TEID, []uint8{6}, defaultSess, h.nsaDCNRForwardSecondaryRATUsageReports(req))
+	if len(targets) != 1 {
+		t.Fatalf("forward targets = %d; want 1", len(targets))
+	}
+	if targets[0] != imsSess {
+		t.Fatalf("forward target APN = %q; want %q", targets[0].APN, imsSess.APN)
 	}
 }
 

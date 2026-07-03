@@ -117,6 +117,53 @@ func TestDefaultTransactionCollisionPolicy(t *testing.T) {
 	}
 }
 
+func TestDefaultNSADCNRConfig(t *testing.T) {
+	cfg := Default()
+	if !cfg.GTPC.NSADCNR.Enabled {
+		t.Fatal("default NSA/DCNR awareness disabled; want enabled")
+	}
+	if !cfg.GTPC.NSADCNR.ForwardSecondaryRATUsageReports {
+		t.Fatal("default NSA/DCNR Secondary RAT report forwarding disabled; want enabled")
+	}
+}
+
+func TestValidateAllowsNSADCNRDisabledByMasterSwitch(t *testing.T) {
+	path := writeTempConfig(t, `
+sgwc:
+  node_id: "sgw-c-1"
+  plmn:
+    mcc: "311"
+    mnc: "435"
+interfaces:
+  control:
+    control:
+      listen: "127.0.0.1:2123"
+gtpc:
+  s11:
+    bind: "control"
+  s5c:
+    bind: "control"
+  nsa_dcnr:
+    enabled: false
+s11:
+  t3_response_seconds: 3
+  n3_requests: 5
+pfcp:
+  local_addr: "127.0.0.1:8805"
+  sgwu:
+    - name: "sgw-u-1"
+      addr: "127.0.0.2:8805"
+`)
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load config with nsa_dcnr.enabled=false: %v", err)
+	}
+	if cfg.GTPC.NSADCNR.Enabled {
+		t.Fatal("nsa_dcnr.enabled = true; want false from config")
+	}
+}
+
 func TestValidateRejectsInvalidTransactionCollisionPolicy(t *testing.T) {
 	cfg := validTestConfig()
 	cfg.GTPC.TransactionCollision.Mode = "off"

@@ -1,8 +1,10 @@
 package session_test
 
 import (
+	"bytes"
 	"net/netip"
 	"testing"
+	"time"
 
 	"vectorcore-sgw/internal/sgwc/bearer"
 	"vectorcore-sgw/internal/sgwc/session"
@@ -134,6 +136,42 @@ func TestDeleteSharedS11TEIDKeepsOtherPDNIndexed(t *testing.T) {
 	}
 	if got := m.FindByS11TEIDAndBearer(defaultSess.SGWS11FTEID.TEID, 6); got != nil {
 		t.Fatalf("FindByS11TEIDAndBearer EBI 6 after deleting IMS = %+v; want nil", got)
+	}
+}
+
+func TestSecondaryRATUsageReportsAreCopied(t *testing.T) {
+	m := session.NewManager()
+	sess, _, err := m.Create(defaultParams())
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	payload := []byte{0x01, 0x02, 0x03}
+	sess.RecordSecondaryRATUsageDataReports([]session.SecondaryRATUsageDataReport{{
+		ReceivedAt:      time.Unix(1, 0),
+		SourceProcedure: "s11_modify_bearer_request",
+		MMEPeer:         "10.90.250.77:2123",
+		SGWS11TEID:      sess.SGWS11FTEID.TEID,
+		SequenceNumber:  0x123456,
+		Payload:         payload,
+	}})
+	payload[0] = 0xff
+
+	reports := sess.SecondaryRATUsageReports()
+	if len(reports) != 1 {
+		t.Fatalf("reports = %d, want 1", len(reports))
+	}
+	want := []byte{0x01, 0x02, 0x03}
+	if !bytes.Equal(reports[0].Payload, want) {
+		t.Fatalf("stored payload = %x, want %x", reports[0].Payload, want)
+	}
+	reports[0].Payload[0] = 0xee
+	reports = sess.SecondaryRATUsageReports()
+	if !bytes.Equal(reports[0].Payload, want) {
+		t.Fatalf("returned payload was aliased: got %x want %x", reports[0].Payload, want)
+	}
+	if reports[0].SourceProcedure != "s11_modify_bearer_request" {
+		t.Fatalf("SourceProcedure = %q", reports[0].SourceProcedure)
 	}
 }
 

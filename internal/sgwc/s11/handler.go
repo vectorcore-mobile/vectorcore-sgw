@@ -34,6 +34,7 @@ type Handler struct {
 	s5c              s5cClient
 	pfcp             pfcpClient
 	collisionMetrics collisionMetrics
+	nsaMetrics       nsaMetrics
 	collisionMode    collision.Mode
 	collisionTimeout time.Duration
 	localIP          netip.Addr // SGW-C S11 control-plane IP for Sender F-TEID IEs
@@ -60,6 +61,7 @@ type s5cClient interface {
 	DispatchPiggybacks(pgwAddr *net.UDPAddr, frames []message.Frame)
 	DeleteSession(ctx context.Context, sess *session.SGWSession) (uint8, error)
 	DeleteSessionFromS11(ctx context.Context, sess *session.SGWSession, req *message.DeleteSessionRequest) (uint8, error)
+	ModifyBearerFromS11(ctx context.Context, sess *session.SGWSession, req *message.ModifyBearerRequest) (uint8, error)
 	ReplyToPGW(pgwAddr *net.UDPAddr, raw []byte) error
 	AllocTEID() (uint32, error)
 	FreeTEID(teid uint32)
@@ -681,6 +683,7 @@ func (h *Handler) handleModifyBearerRequest(conn *transport.Conn, addr *net.UDPA
 		return
 	}
 	defer finishProcedure(defaultSess, mbProc)
+	h.captureSecondaryRATUsageReports(addr, hdr, req, defaultSess)
 
 	// Process each bearer context and record the per-bearer outcome.
 	// Per TS 29.274 Rel-15 Tables 7.2.8-1/7.2.8-2: MBResp must include a Bearer
@@ -692,6 +695,8 @@ func (h *Handler) handleModifyBearerRequest(conn *transport.Conn, addr *net.UDPA
 		sgwS1UFTEID bearer.FTEID // populated from bearer state after PFCP session exists
 	}
 	var results []mbResult
+
+	reportForwardTargets := h.secondaryRATReportTargetSessions(hdr.TEID, mbEBIs, defaultSess, h.nsaDCNRForwardSecondaryRATUsageReports(req))
 
 	for _, bcIE := range req.BearerContexts {
 		children, err := bcIE.ChildIEs()
@@ -802,6 +807,40 @@ func (h *Handler) handleModifyBearerRequest(conn *transport.Conn, addr *net.UDPA
 		results = append(results, mbResult{ebi: ebi, cause: ie.CauseRequestAccepted, sgwS1UFTEID: sgwS1U})
 	}
 
+	reportForwardCause := ie.CauseRequestAccepted
+	reportForwarded := false
+	for _, reportForwardSess := range reportForwardTargets {
+		if reportForwardSess.PGWControlFTEID.TEID == 0 {
+			continue
+		}
+		reportForwarded = true
+		cause, err := h.s5c.ModifyBearerFromS11(context.TODO(), reportForwardSess, req)
+		if err != nil {
+			h.log.Warn("S11: S5/S8-C Modify Bearer report forwarding failed",
+				"session_id", reportForwardSess.SessionID,
+				"apn", reportForwardSess.APN,
+				"pgw_s5c_teid", fmt.Sprintf("0x%08X", reportForwardSess.PGWControlFTEID.TEID),
+				"reports", len(req.SecondaryRATUsageDataReports),
+				"error", err)
+			if reportForwardCause == ie.CauseRequestAccepted {
+				reportForwardCause = ie.CauseSystemFailure
+			}
+		} else {
+			h.log.Info("S11: S5/S8-C Modify Bearer report forwarding completed",
+				"session_id", reportForwardSess.SessionID,
+				"apn", reportForwardSess.APN,
+				"pgw_s5c_teid", fmt.Sprintf("0x%08X", reportForwardSess.PGWControlFTEID.TEID),
+				"reports", len(req.SecondaryRATUsageDataReports),
+				"cause", cause)
+			if cause != ie.CauseRequestAccepted && reportForwardCause == ie.CauseRequestAccepted {
+				reportForwardCause = cause
+			}
+		}
+		if h.nsaMetrics != nil {
+			h.nsaMetrics.OnSecondaryRATUsageReportsForwarded(reportForwardSess.APN, cause, len(req.SecondaryRATUsageDataReports))
+		}
+	}
+
 	// Build Bearer Context Modified IEs per TS 29.274 Rel-15 Table 7.2.8-1/7.2.8-2.
 	// "Bearer Contexts modified" = instance 0 (all modified bearers share the same
 	// instance 0; multiple IEs of the same type+instance are permitted).
@@ -837,6 +876,9 @@ func (h *Handler) handleModifyBearerRequest(conn *transport.Conn, addr *net.UDPA
 			msgCause = results[0].cause
 		}
 	}
+	if len(results) == 0 && reportForwarded && reportForwardCause != ie.CauseRequestAccepted {
+		msgCause = reportForwardCause
+	}
 
 	// Include Recovery IE per TS 29.274 §7.2.0 on first contact with this MME.
 	if recIE := h.maybeRecoveryIE(addr); recIE != nil {
@@ -851,6 +893,90 @@ func (h *Handler) handleModifyBearerRequest(conn *transport.Conn, addr *net.UDPA
 	if err := conn.Reply(addr, resp); err != nil {
 		h.log.Warn("S11: Modify Bearer Response send failed", "to", addr, "error", err)
 	}
+}
+
+func (h *Handler) captureSecondaryRATUsageReports(addr *net.UDPAddr, hdr message.Header, req *message.ModifyBearerRequest, defaultSess *session.SGWSession) {
+	if req == nil || !h.nsaDCNREnabled() || len(req.SecondaryRATUsageDataReports) == 0 || h.sessions == nil {
+		return
+	}
+	targets := h.secondaryRATReportTargetSessions(hdr.TEID, bearerContextEBIs(req.BearerContexts), defaultSess, true)
+	if len(targets) == 0 {
+		return
+	}
+
+	peer := ""
+	if addr != nil {
+		peer = addr.String()
+	}
+	reports := make([]session.SecondaryRATUsageDataReport, 0, len(req.SecondaryRATUsageDataReports))
+	for _, reportIE := range req.SecondaryRATUsageDataReports {
+		payload, err := reportIE.SecondaryRATUsageDataReportValue()
+		if err != nil {
+			h.log.Warn("S11: Secondary RAT Usage Data Report invalid",
+				"sgw_s11_teid", fmt.Sprintf("0x%08X", hdr.TEID),
+				"seq", hdr.SequenceNumber,
+				"error", err)
+			continue
+		}
+		reports = append(reports, session.SecondaryRATUsageDataReport{
+			ReceivedAt:      time.Now(),
+			SourceProcedure: "s11_modify_bearer_request",
+			MMEPeer:         peer,
+			SGWS11TEID:      hdr.TEID,
+			SequenceNumber:  hdr.SequenceNumber,
+			Payload:         payload,
+		})
+	}
+	if len(reports) == 0 {
+		return
+	}
+	for _, sess := range targets {
+		sess.RecordSecondaryRATUsageDataReports(reports)
+		if h.nsaMetrics != nil {
+			h.nsaMetrics.OnSecondaryRATUsageReportsCaptured(sess.APN, "s11_modify_bearer_request", len(reports))
+		}
+		h.log.Info("S11: Secondary RAT usage reports captured",
+			"session_id", sess.SessionID,
+			"imsi", sess.IMSI,
+			"apn", sess.APN,
+			"default_ebi", sess.DefaultBearerID,
+			"sgw_s11_teid", fmt.Sprintf("0x%08X", hdr.TEID),
+			"seq", hdr.SequenceNumber,
+			"reports", len(reports),
+			"lookup_source", "s11_teid_bearer_owner",
+		)
+	}
+}
+
+func (h *Handler) secondaryRATReportTargetSessions(sgwS11TEID uint32, ebis []uint8, defaultSess *session.SGWSession, hasReports bool) []*session.SGWSession {
+	if !hasReports || h.sessions == nil {
+		return nil
+	}
+	targetMap := make(map[*session.SGWSession]struct{})
+	for _, ebi := range ebis {
+		if sess := h.sessions.FindByS11TEIDAndBearer(sgwS11TEID, ebi); sess != nil {
+			targetMap[sess] = struct{}{}
+		}
+	}
+	if len(targetMap) == 0 && defaultSess != nil {
+		targetMap[defaultSess] = struct{}{}
+	}
+	targets := make([]*session.SGWSession, 0, len(targetMap))
+	for sess := range targetMap {
+		targets = append(targets, sess)
+	}
+	return targets
+}
+
+func (h *Handler) nsaDCNREnabled() bool {
+	return h == nil || h.cfg == nil || h.cfg.GTPC.NSADCNR.Enabled
+}
+
+func (h *Handler) nsaDCNRForwardSecondaryRATUsageReports(req *message.ModifyBearerRequest) bool {
+	return req != nil &&
+		len(req.SecondaryRATUsageDataReports) > 0 &&
+		h.nsaDCNREnabled() &&
+		(h.cfg == nil || h.cfg.GTPC.NSADCNR.ForwardSecondaryRATUsageReports)
 }
 
 func (h *Handler) handleDeleteSessionRequest(conn *transport.Conn, addr *net.UDPAddr, hdr message.Header, ies []*ie.IE) {

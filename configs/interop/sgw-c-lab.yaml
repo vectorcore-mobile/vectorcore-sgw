@@ -16,6 +16,9 @@ gtpc:
     bind: "lab_control"
   s5c:
     bind: "lab_control"
+  nsa_dcnr:
+    enabled: true
+    forward_secondary_rat_usage_reports: true
 
 s11:
   t3_response_seconds: 3

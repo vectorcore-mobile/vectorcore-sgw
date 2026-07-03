@@ -28,6 +28,13 @@ dataplane.
 - GTPv2-C retransmission response caching.
 - GTPv2-C transaction collision handling with configurable strict/permissive
   policy.
+- Static outer IP DSCP marking for SGW-C GTP-C, SGW-C PFCP, SGW-U PFCP, and
+  SGW-U forwarded GTP-U.
+- QCI-aware GTP-U outer DSCP marking in SGW-U using operator-configured
+  QCI-to-DSCP mappings.
+- 3GPP Release 15 NSA/DCNR awareness for GTPv2-C Secondary RAT Usage Data
+  Report IE capture, owner-scoped session storage, S5/S8-C forwarding, API
+  visibility, and Prometheus counters.
 - Recovery counter support.
 - JSON API listeners for SGW-C and SGW-U runtime state.
 - Prometheus metrics listeners.
@@ -174,6 +181,9 @@ gtpc:
   transaction_collision:
     mode: "strict"
     active_procedure_timeout_seconds: 120
+  nsa_dcnr:
+    enabled: true
+    forward_secondary_rat_usage_reports: true
 
 s11:
   t3_response_seconds: 3
@@ -227,6 +237,8 @@ SGW-C options:
 | `gtpc.create_bearer_retry_guard.enabled` | Enables repeated Create Bearer retry guard. |
 | `gtpc.transaction_collision.mode` | GTPv2-C transaction collision policy. `strict` rejects unsafe overlaps. `permissive` only relaxes bearer-scoped overlaps when one side has no decoded EBI scope. |
 | `gtpc.transaction_collision.active_procedure_timeout_seconds` | Timeout for stale active GTPv2-C procedure state. Default 120. |
+| `gtpc.nsa_dcnr.enabled` | Enables Release 15 NSA/DCNR awareness in SGW-C. |
+| `gtpc.nsa_dcnr.forward_secondary_rat_usage_reports` | Forwards S11 Secondary RAT Usage Data Report IEs to the owner PGW session on S5/S8-C Modify Bearer. |
 | `s11.t3_response_seconds` | GTPv2-C retransmission timeout. |
 | `s11.n3_requests` | GTPv2-C retransmission count. |
 | `pfcp.local_addr` | SGW-C PFCP local address. |
@@ -250,16 +262,20 @@ Required SGW-C fields include `sgwc.node_id`, `sgwc.plmn.mcc`,
 `sgwc.plmn.mnc`, `gtpc.s11.bind`, `gtpc.s5c.bind`, `pfcp.local_addr`, and at
 least one `pfcp.sgwu` entry.
 
-SGW-C exports the following GTPv2-C transaction collision metrics on its
-Prometheus listener:
+SGW-C exports the following control-plane metrics on its Prometheus listener:
 
 | Metric | Purpose |
 | --- | --- |
 | `sgwc_gtpv2c_collision_rejections_total` | Count of rejected overlapping GTPv2-C procedures by action, policy, active procedure, new procedure, and owner. |
 | `sgwc_gtpv2c_collision_stale_expired_total` | Count of stale active-procedure records expired before a new collision decision. |
+| `sgwc_nsa_secondary_rat_usage_reports_captured_total` | Count of Release 15 Secondary RAT Usage Data Report IEs captured on S11 by APN and source procedure. |
+| `sgwc_nsa_secondary_rat_usage_reports_forwarded_total` | Count of Release 15 Secondary RAT Usage Data Report IEs forwarded on S5/S8-C by APN and resulting cause. |
 
 Additional transaction collision behavior and validation notes are in
 `docs/gtpv2c-transaction-collision.md`.
+
+NSA/DCNR Secondary RAT report behavior and validation notes are in
+`docs/5g-nsa-dcnr-awareness.md`.
 
 ## SGW-U Configuration
 

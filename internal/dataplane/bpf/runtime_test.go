@@ -210,6 +210,61 @@ func TestBPFQCIOuterDSCPMarkingPreservesECNAndInnerDSCP(t *testing.T) {
 	}
 }
 
+func TestBPFStaticOuterDSCPMarkingPreservesECN(t *testing.T) {
+	h := newHarness(t)
+	dp, err := New(h.s1u.name, h.s5u.name, 1024)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	t.Cleanup(func() { dp.Close() })
+	if err := dp.ConfigureQoSOuterMarking(QoSOuterMarkingConfig{
+		Enabled:        true,
+		GTPUEnabled:    true,
+		GTPUDSCP:       18,
+		QCIEnabled:     false,
+		QCIDefaultDSCP: 0,
+	}); err != nil {
+		t.Fatalf("ConfigureQoSOuterMarking: %v", err)
+	}
+
+	const (
+		localTEID = 0x1101
+		newTEID   = 0x2201
+		counterID = 12
+	)
+	key := XdpSgwGtpuSgwRuleKey{Teid: localTEID, Ifindex: dp.S1UIfindex()}
+	val := XdpSgwGtpuSgwRuleValue{
+		Action:        actionForward,
+		EgressIfindex: dp.S5UIfindex(),
+		NewTeid:       newTEID,
+		CounterId:     counterID,
+	}
+	copy(val.OuterSrcIp[:], h.s5u.ip.To4())
+	copy(val.OuterDstIp[:], h.s5uPeer.ip.To4())
+	if err := dp.InitStats(counterID); err != nil {
+		t.Fatalf("InitStats: %v", err)
+	}
+	if err := dp.InstallRule(key, val); err != nil {
+		t.Fatalf("InstallRule: %v", err)
+	}
+
+	frame := buildGPDUFrameWithTOS(h.s1uPeer.mac, h.s1u.mac, h.s1uPeer.ip, h.s1u.ip, 33004, localTEID, 0x02, []byte("static-qos"))
+
+	captureFd := openRawSocket(t, h.s5uPeer.ifindex, unix.ETH_P_ALL, testTimeout)
+	injectFd := openRawSocket(t, h.s1uPeer.ifindex, unix.ETH_P_ALL, 0)
+	if err := unix.Send(injectFd, frame, 0); err != nil {
+		t.Fatalf("inject: %v", err)
+	}
+
+	got, ok := captureGPDU(captureFd)
+	if !ok {
+		t.Fatalf("capture on %s: no G-PDU arrived within %s", h.s5uPeer.name, testTimeout)
+	}
+	if got.tos != 0x4a {
+		t.Fatalf("outer TOS = %#02x, want 0x4a", got.tos)
+	}
+}
+
 // TestBPFForwardDownlink mirrors TestBPFForwardUplink in the opposite
 // direction (S5/S8-U ingress -> S1-U egress) — Phase 7 acceptance:
 // "Downlink traffic is forwarded by BPF".

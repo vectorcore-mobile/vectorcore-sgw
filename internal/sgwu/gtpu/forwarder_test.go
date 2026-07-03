@@ -343,3 +343,28 @@ func TestForwarderDropAction(t *testing.T) {
 		t.Errorf("txPackets = %d, want 0 for DROP FAR", fwd.txPackets.Load())
 	}
 }
+
+func FuzzForwarderHandleWithLocalIP(f *testing.F) {
+	f.Add([]byte{})
+	f.Add([]byte{0x30, MsgTypeGPDU, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00})
+	f.Add(Marshal(Header{Version: 1, PT: true, MsgType: MsgTypeGPDU, TEID: 100}, 4))
+	f.Add(Marshal(Header{Version: 1, PT: true, S: true, MsgType: MsgTypeEchoRequest, TEID: 0, SeqNum: 0x1234}, 0))
+	f.Add(Marshal(Header{Version: 1, PT: true, MsgType: MsgTypeEndMarker, TEID: 777}, 0))
+
+	f.Fuzz(func(t *testing.T, data []byte) {
+		store := newTestStore()
+		fwd, err := New("127.0.0.1:0", netip.MustParseAddr("127.0.0.1"), store, discardSlog())
+		if err != nil {
+			t.Fatalf("New: %v", err)
+		}
+		defer fwd.conn.Close()
+
+		clientConn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 0})
+		if err != nil {
+			t.Fatalf("client ListenUDP: %v", err)
+		}
+		defer clientConn.Close()
+
+		fwd.handleWithLocalIP(data, clientConn.LocalAddr().(*net.UDPAddr), netip.MustParseAddr("127.0.0.1"))
+	})
+}
