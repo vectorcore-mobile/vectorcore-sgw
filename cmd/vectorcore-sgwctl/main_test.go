@@ -60,6 +60,38 @@ func TestFetchSessionsPrettyPrintsJSON(t *testing.T) {
 	}
 }
 
+func TestFetchGTPCPeersPrettyPrintsJSON(t *testing.T) {
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/gtpc/peers" {
+			t.Fatalf("path = %s; want /gtpc/peers", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"peers":[{"role":"mme","addr":"10.90.250.77:2123","state":"up"}],"total":1}`))
+	}))
+	defer api.Close()
+
+	var stdout, stderr bytes.Buffer
+	err := run([]string{"-sgwc-api", api.URL, "gtpc-peers"}, &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("run gtpc-peers: %v stderr=%s", err, stderr.String())
+	}
+	out := stdout.String()
+	if !strings.Contains(out, "SGW-C GTP-C peer health") || !strings.Contains(out, `"state": "up"`) {
+		t.Fatalf("gtpc-peers output = %q", out)
+	}
+}
+
+func TestUsageListsGTPCPeers(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	err := run(nil, &stdout, &stderr)
+	if err == nil {
+		t.Fatal("run without command succeeded")
+	}
+	if !strings.Contains(stderr.String(), "gtpc-peers") {
+		t.Fatalf("usage missing gtpc-peers command: %q", stderr.String())
+	}
+}
+
 func TestVersion(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	if err := run([]string{"-v"}, &stdout, &stderr); err != nil {

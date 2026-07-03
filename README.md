@@ -28,6 +28,9 @@ dataplane.
 - GTPv2-C retransmission response caching.
 - GTPv2-C transaction collision handling with configurable strict/permissive
   policy.
+- Dynamic GTPv2-C Echo probing and peer health tracking for observed MME and
+  PGW peers, including RTT, missed Echo counters, Recovery IE restart tracking,
+  API visibility, Prometheus metrics, and down-peer procedure warnings.
 - Static outer IP DSCP marking for SGW-C GTP-C, SGW-C PFCP, SGW-U PFCP, and
   SGW-U forwarded GTP-U.
 - QCI-aware GTP-U outer DSCP marking in SGW-U using operator-configured
@@ -142,6 +145,7 @@ health         show SGW-C health
 sessions       list SGW-C sessions
 bearers        list SGW-C sessions with bearer details
 pfcp           show SGW-C and SGW-U PFCP association status
+gtpc-peers     show SGW-C GTP-C peer health
 bpf            show SGW-U BPF map state
 ```
 
@@ -184,6 +188,16 @@ gtpc:
   nsa_dcnr:
     enabled: true
     forward_secondary_rat_usage_reports: true
+  peer_health:
+    enabled: true
+    echo_interval_seconds: 30
+    echo_timeout_seconds: 3
+    suspect_after_missed: 2
+    down_after_missed: 3
+    degraded_rtt_ms: 500
+    probe_mme_peers: true
+    probe_pgw_peers: true
+    warn_on_down_peer_procedure: true
 
 s11:
   t3_response_seconds: 3
@@ -239,6 +253,15 @@ SGW-C options:
 | `gtpc.transaction_collision.active_procedure_timeout_seconds` | Timeout for stale active GTPv2-C procedure state. Default 120. |
 | `gtpc.nsa_dcnr.enabled` | Enables Release 15 NSA/DCNR awareness in SGW-C. |
 | `gtpc.nsa_dcnr.forward_secondary_rat_usage_reports` | Forwards S11 Secondary RAT Usage Data Report IEs to the owner PGW session on S5/S8-C Modify Bearer. |
+| `gtpc.peer_health.enabled` | Enables SGW-C GTPv2-C peer health tracking and Echo probing. |
+| `gtpc.peer_health.echo_interval_seconds` | GTPv2-C Echo probe interval. Default 30. |
+| `gtpc.peer_health.echo_timeout_seconds` | GTPv2-C Echo response timeout. Default 3. |
+| `gtpc.peer_health.suspect_after_missed` | Consecutive missed Echo threshold for `suspect` state. Default 2. |
+| `gtpc.peer_health.down_after_missed` | Consecutive missed Echo threshold for `down` state. Default 3. |
+| `gtpc.peer_health.degraded_rtt_ms` | RTT threshold for `degraded` state. Default 500. |
+| `gtpc.peer_health.probe_mme_peers` | Enables Echo probing for observed MME GTP-C peers. |
+| `gtpc.peer_health.probe_pgw_peers` | Enables Echo probing for observed PGW GTP-C peers. |
+| `gtpc.peer_health.warn_on_down_peer_procedure` | Logs a warning when a procedure starts toward a peer currently marked `down`; procedures are not blocked. |
 | `s11.t3_response_seconds` | GTPv2-C retransmission timeout. |
 | `s11.n3_requests` | GTPv2-C retransmission count. |
 | `pfcp.local_addr` | SGW-C PFCP local address. |
@@ -268,11 +291,20 @@ SGW-C exports the following control-plane metrics on its Prometheus listener:
 | --- | --- |
 | `sgwc_gtpv2c_collision_rejections_total` | Count of rejected overlapping GTPv2-C procedures by action, policy, active procedure, new procedure, and owner. |
 | `sgwc_gtpv2c_collision_stale_expired_total` | Count of stale active-procedure records expired before a new collision decision. |
+| `sgwc_gtpc_peer_state` | One-hot peer health state gauge by role, peer, and state. |
+| `sgwc_gtpc_peer_echo_rtt_seconds` | Last GTPv2-C Echo RTT by role and peer. |
+| `sgwc_gtpc_peer_echo_sent_total` | Count of GTPv2-C Echo Requests sent by role and peer. |
+| `sgwc_gtpc_peer_echo_responses_total` | Count of GTPv2-C Echo Responses received by role and peer. |
+| `sgwc_gtpc_peer_echo_timeouts_total` | Count of GTPv2-C Echo timeouts by role and peer. |
+| `sgwc_gtpc_peer_restarts_total` | Count of Recovery IE restart-counter changes by role and peer. |
 | `sgwc_nsa_secondary_rat_usage_reports_captured_total` | Count of Release 15 Secondary RAT Usage Data Report IEs captured on S11 by APN and source procedure. |
 | `sgwc_nsa_secondary_rat_usage_reports_forwarded_total` | Count of Release 15 Secondary RAT Usage Data Report IEs forwarded on S5/S8-C by APN and resulting cause. |
 
 Additional transaction collision behavior and validation notes are in
 `docs/gtpv2c-transaction-collision.md`.
+
+GTPv2-C peer health behavior and validation notes are in
+`docs/gtpc-peer-health.md`.
 
 NSA/DCNR Secondary RAT report behavior and validation notes are in
 `docs/5g-nsa-dcnr-awareness.md`.

@@ -25,6 +25,7 @@ import (
 	pfcpie "vectorcore-sgw/internal/pfcp/ie"
 	"vectorcore-sgw/internal/sgwc/bearer"
 	"vectorcore-sgw/internal/sgwc/collision"
+	"vectorcore-sgw/internal/sgwc/peerhealth"
 	pfcpclient "vectorcore-sgw/internal/sgwc/pfcpclient"
 	"vectorcore-sgw/internal/sgwc/session"
 )
@@ -178,6 +179,9 @@ type createBearerBuildBearerDiagnostic struct {
 // It handles PGW-initiated Create/Update/Delete Bearer Requests arriving from the PGW.
 // Per C9: this handler is called from the S5/S8-C Serve loop.
 func (h *Handler) HandleS5CInbound(conn *transport.Conn, pgwAddr *net.UDPAddr, hdr message.Header, raw []byte) {
+	if _, ies, err := message.Parse(raw); err == nil {
+		h.observeGTPPeer(peerhealth.RolePGW, pgwAddr, hdr, ies)
+	}
 	switch hdr.MessageType {
 	case message.MsgTypeCreateBearerRequest:
 		h.handleCreateBearer(pgwAddr, hdr, raw)

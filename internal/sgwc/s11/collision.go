@@ -8,6 +8,7 @@ import (
 	sgwcconfig "vectorcore-sgw/internal/config/sgwc"
 	"vectorcore-sgw/internal/gtpv2/ie"
 	"vectorcore-sgw/internal/sgwc/collision"
+	"vectorcore-sgw/internal/sgwc/peerhealth"
 	"vectorcore-sgw/internal/sgwc/session"
 )
 
@@ -53,6 +54,7 @@ func (h *Handler) beginProcedure(sess *session.SGWSession, req collision.Request
 	}
 	proc, decision := track.Begin(req)
 	if decision.Action == collision.ActionAllow {
+		h.warnIfDownPeerProcedure(sess, req)
 		return proc, true
 	}
 	if h.collisionMetrics != nil {
@@ -79,6 +81,51 @@ func (h *Handler) beginProcedure(sess *session.SGWSession, req collision.Request
 		"reason", decision.Reason,
 	)
 	return collision.ActiveProcedure{}, false
+}
+
+func (h *Handler) warnIfDownPeerProcedure(sess *session.SGWSession, req collision.Request) {
+	if h == nil || h.peerHealth == nil || sess == nil || !warnOnDownPeerProcedureFromConfig(h.cfg) {
+		return
+	}
+	role, ok := peerRoleForProcedureOwner(req.Owner)
+	if !ok {
+		return
+	}
+	state, ok := h.peerHealth.State(role, req.Peer)
+	if !ok || state != peerhealth.StateDown {
+		return
+	}
+	h.log.Warn("GTPv2-C procedure started toward down peer",
+		"session_id", sess.SessionID,
+		"imsi", sess.IMSI,
+		"apn", sess.APN,
+		"procedure", req.Procedure,
+		"owner", req.Owner,
+		"peer_role", role,
+		"peer", req.Peer,
+		"peer_state", state,
+		"teid", fmt.Sprintf("0x%08X", req.TEID),
+		"seq", req.Seq,
+		"ebis", req.EBIs,
+	)
+}
+
+func peerRoleForProcedureOwner(owner collision.Owner) (peerhealth.Role, bool) {
+	switch owner {
+	case collision.OwnerMME:
+		return peerhealth.RoleMME, true
+	case collision.OwnerPGW:
+		return peerhealth.RolePGW, true
+	default:
+		return "", false
+	}
+}
+
+func warnOnDownPeerProcedureFromConfig(cfg *sgwcconfig.Config) bool {
+	if cfg == nil {
+		return true
+	}
+	return cfg.GTPC.PeerHealth.WarnOnDownPeerProcedure
 }
 
 func collisionModeFromConfig(cfg *sgwcconfig.Config) collision.Mode {

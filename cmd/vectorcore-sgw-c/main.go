@@ -20,6 +20,7 @@ import (
 	"vectorcore-sgw/internal/gtpv2/transport"
 	"vectorcore-sgw/internal/log"
 	"vectorcore-sgw/internal/metrics"
+	"vectorcore-sgw/internal/sgwc/peerhealth"
 	"vectorcore-sgw/internal/sgwc/pfcpclient"
 	"vectorcore-sgw/internal/sgwc/recovery"
 	"vectorcore-sgw/internal/sgwc/s11"
@@ -129,6 +130,7 @@ func main() {
 	}
 
 	sessions := session.NewManager()
+	gtpcPeers := peerhealth.NewTable(logger.Logger)
 
 	pfcpClient, err := pfcpclient.New(cfg, time.Now(), logger.Logger)
 	if err != nil {
@@ -176,6 +178,7 @@ func main() {
 			}
 		}()
 	}
+	s5cClient.SetPeerHealth(gtpcPeers)
 
 	metricsSrv := metrics.NewServer(cfg.Metrics.Listen, logger.Logger)
 	if err := metricsSrv.Start(ctx); err != nil {
@@ -187,6 +190,7 @@ func main() {
 	pfcpMetrics := metrics.NewPFCPMetrics(metricsSrv.Registry())
 	collisionMetrics := metrics.NewCollisionMetrics(metricsSrv.Registry())
 	nsaMetrics := metrics.NewNSAMetrics(metricsSrv.Registry())
+	metrics.NewGTPCPeerMetrics(metricsSrv.Registry(), gtpcPeers)
 	pfcpClient.SetPeerStateCallback(func(peerName, peerAddr string, state pfcpclient.PeerState) {
 		pfcpMetrics.OnPeerStateChange(peerName, peerAddr, string(state))
 		if state == pfcpclient.PeerStateDown {
@@ -210,6 +214,7 @@ func main() {
 	apiSrv := api.NewServer(cfg.API.Listen, api.BuildInfo{Component: "SGW-C", Version: version, BuildDate: buildDate}, logger.Logger)
 	api.RegisterSGWCRoutes(apiSrv.HumaAPI(), sessions)
 	api.RegisterPFCPRoutes(apiSrv.HumaAPI(), pfcpClient)
+	api.RegisterGTPCPeerRoutes(apiSrv.HumaAPI(), gtpcPeers)
 	if err := apiSrv.Start(ctx); err != nil {
 		logger.Error("API server failed to start", "error", err)
 		os.Exit(1)
@@ -225,8 +230,34 @@ func main() {
 			os.Exit(1)
 		}
 	}
+	s11Handler.SetPeerHealth(gtpcPeers)
 	s11Handler.SetCollisionMetrics(collisionMetrics)
 	s11Handler.SetNSAMetrics(nsaMetrics)
+	gtpcPeerProber := peerhealth.NewProber(gtpcPeers, peerhealth.ProberConfig{
+		Enabled:            cfg.GTPC.PeerHealth.Enabled,
+		EchoInterval:       time.Duration(cfg.GTPC.PeerHealth.EchoIntervalSeconds) * time.Second,
+		EchoTimeout:        time.Duration(cfg.GTPC.PeerHealth.EchoTimeoutSeconds) * time.Second,
+		SuspectAfterMissed: cfg.GTPC.PeerHealth.SuspectAfterMissed,
+		DownAfterMissed:    cfg.GTPC.PeerHealth.DownAfterMissed,
+		DegradedRTT:        time.Duration(cfg.GTPC.PeerHealth.DegradedRTTMS) * time.Millisecond,
+		ProbeMMEPeers:      cfg.GTPC.PeerHealth.ProbeMMEPeers,
+		ProbePGWPeers:      cfg.GTPC.PeerHealth.ProbePGWPeers,
+	}, func(probeCtx context.Context, target peerhealth.Target, seq uint32) (*peerhealth.EchoResult, error) {
+		switch target.Role {
+		case peerhealth.RoleMME:
+			return s11Handler.SendEcho(probeCtx, target.Addr, seq)
+		case peerhealth.RolePGW:
+			return s5cClient.SendEcho(probeCtx, target.Addr, seq)
+		default:
+			return nil, fmt.Errorf("unsupported GTP-C peer role %q", target.Role)
+		}
+	}, logger.Logger, func(target peerhealth.Target) uint32 {
+		if target.Role == peerhealth.RolePGW {
+			return s5cClient.AllocSeq()
+		}
+		return s11Handler.AllocSeq()
+	})
+	go gtpcPeerProber.Run(ctx)
 	// Register handler for PGW-initiated bearer procedures (CBReq, UBReq, DBReq).
 	// Must be set before any session can be established so requests are never dropped.
 	// Per TS 29.274 §7.2.3/§7.2.9.2/§7.2.15: PGW initiates these after session creation.

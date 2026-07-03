@@ -57,11 +57,37 @@ func (c *Config) Validate() error {
 	if c.GTPC.TransactionCollision.ActiveProcedureTimeoutSeconds <= 0 {
 		return fmt.Errorf("gtpc.transaction_collision.active_procedure_timeout_seconds must be positive")
 	}
+	if err := c.validatePeerHealth(); err != nil {
+		return err
+	}
 	if err := validateDSCP("qos.outer_marking.gtpc.dscp", c.QoS.OuterMarking.GTPC.DSCP); err != nil {
 		return err
 	}
 	if err := validateDSCP("qos.outer_marking.pfcp.dscp", c.QoS.OuterMarking.PFCP.DSCP); err != nil {
 		return err
+	}
+	return nil
+}
+
+func (c *Config) validatePeerHealth() error {
+	ph := c.GTPC.PeerHealth
+	if ph.EchoIntervalSeconds <= 0 {
+		return fmt.Errorf("gtpc.peer_health.echo_interval_seconds must be positive")
+	}
+	if ph.EchoTimeoutSeconds <= 0 {
+		return fmt.Errorf("gtpc.peer_health.echo_timeout_seconds must be positive")
+	}
+	if ph.EchoTimeoutSeconds >= ph.EchoIntervalSeconds {
+		return fmt.Errorf("gtpc.peer_health.echo_timeout_seconds must be less than echo_interval_seconds")
+	}
+	if ph.SuspectAfterMissed <= 0 {
+		return fmt.Errorf("gtpc.peer_health.suspect_after_missed must be positive")
+	}
+	if ph.DownAfterMissed < ph.SuspectAfterMissed {
+		return fmt.Errorf("gtpc.peer_health.down_after_missed must be greater than or equal to suspect_after_missed")
+	}
+	if ph.DegradedRTTMS <= 0 {
+		return fmt.Errorf("gtpc.peer_health.degraded_rtt_ms must be positive")
 	}
 	return nil
 }

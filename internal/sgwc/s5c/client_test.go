@@ -1,12 +1,14 @@
 package s5c
 
 import (
+	"net"
 	"net/netip"
 	"testing"
 
 	"vectorcore-sgw/internal/gtpv2/ie"
 	"vectorcore-sgw/internal/gtpv2/message"
 	"vectorcore-sgw/internal/sgwc/bearer"
+	"vectorcore-sgw/internal/sgwc/peerhealth"
 	"vectorcore-sgw/internal/sgwc/session"
 )
 
@@ -464,6 +466,31 @@ func TestBuildMBReqForwardsSecondaryRATUsageDataReports(t *testing.T) {
 	}
 	if ie.FindFirst(ies, ie.TypeRecovery) == nil {
 		t.Fatal("Recovery IE not included")
+	}
+}
+
+func TestObservePeerRecordsPGWRecovery(t *testing.T) {
+	table := peerhealth.NewTable(nil)
+	c := &Client{peers: table}
+	addr := &net.UDPAddr{IP: net.ParseIP("192.0.2.10"), Port: 30064}
+	hdr := message.Header{
+		Version:        2,
+		HasTEID:        false,
+		MessageType:    message.MsgTypeEchoResponse,
+		SequenceNumber: 0x010203,
+	}
+	c.observePeer(addr, hdr, []*ie.IE{ie.NewRecovery(4)})
+
+	snaps := table.Snapshot()
+	if len(snaps) != 1 {
+		t.Fatalf("peer snapshots = %d; want 1", len(snaps))
+	}
+	got := snaps[0]
+	if got.Role != peerhealth.RolePGW || got.Addr != "192.0.2.10:2123" || got.State != peerhealth.StateUp {
+		t.Fatalf("peer snapshot = %+v; want PGW up at 192.0.2.10:2123", got)
+	}
+	if !got.RecoverySeen || got.RecoveryCounter != 4 {
+		t.Fatalf("recovery = seen:%v counter:%d; want seen:true counter:4", got.RecoverySeen, got.RecoveryCounter)
 	}
 }
 

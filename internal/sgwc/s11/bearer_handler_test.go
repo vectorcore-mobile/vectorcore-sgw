@@ -19,6 +19,7 @@ import (
 	pfcpie "vectorcore-sgw/internal/pfcp/ie"
 	"vectorcore-sgw/internal/sgwc/bearer"
 	"vectorcore-sgw/internal/sgwc/collision"
+	"vectorcore-sgw/internal/sgwc/peerhealth"
 	"vectorcore-sgw/internal/sgwc/pfcpclient"
 	"vectorcore-sgw/internal/sgwc/s5c"
 	"vectorcore-sgw/internal/sgwc/session"
@@ -140,6 +141,40 @@ func (f *fakePFCPClient) DeleteSessionOnPeer(context.Context, string, uint64, ui
 	return nil
 }
 
+type captureSlogHandler struct {
+	messages []string
+}
+
+func (h *captureSlogHandler) Enabled(context.Context, slog.Level) bool {
+	return true
+}
+
+func (h *captureSlogHandler) Handle(_ context.Context, r slog.Record) error {
+	h.messages = append(h.messages, r.Message)
+	return nil
+}
+
+func (h *captureSlogHandler) WithAttrs([]slog.Attr) slog.Handler {
+	return h
+}
+
+func (h *captureSlogHandler) WithGroup(string) slog.Handler {
+	return h
+}
+
+func (h *captureSlogHandler) HasMessage(message string) bool {
+	for _, got := range h.messages {
+		if got == message {
+			return true
+		}
+	}
+	return false
+}
+
+func (h *captureSlogHandler) Messages() []string {
+	return append([]string(nil), h.messages...)
+}
+
 func TestHandleS5CUpdateBearerRejectsTransactionCollision(t *testing.T) {
 	mgr, sess := testCollisionSession(t)
 	s5cFake := &fakeS5CClient{}
@@ -238,7 +273,7 @@ func TestBeginProcedureRejectsS11SessionWideCollision(t *testing.T) {
 	if dec.Action != collision.ActionAllow {
 		t.Fatalf("seed collision procedure decision = %s, want allow", dec.Action)
 	}
-	addr := &net.UDPAddr{IP: net.ParseIP("10.90.250.77"), Port: 2123}
+	addr := &net.UDPAddr{IP: net.ParseIP("10.90.250.77"), Port: 30096}
 	proc, ok := h.beginProcedure(sess, mmeProcedureRequest(collision.ProcedureDeleteSession, addr, sess.SGWS11FTEID.TEID, 0x10205, []uint8{5}))
 	if ok {
 		t.Fatalf("beginProcedure returned ok with proc %+v; want collision rejection", proc)
@@ -280,6 +315,71 @@ func TestBeginProcedurePermissiveModeAllowsUnknownBearerScope(t *testing.T) {
 	defer finishProcedure(sess, proc)
 	if got := sess.ProcedureTracker().Active(); len(got) != 2 {
 		t.Fatalf("active procedures after permissive overlap = %d; want 2", len(got))
+	}
+}
+
+func TestBeginProcedureWarnsOnDownPeer(t *testing.T) {
+	_, sess := testCollisionSession(t)
+	logs := &captureSlogHandler{}
+	cfg := sgwcconfig.Default()
+	peers := peerhealth.NewTable(slog.New(slog.DiscardHandler))
+	addr := &net.UDPAddr{IP: net.ParseIP("10.90.250.77"), Port: 2123}
+	peers.Observe(peerhealth.RoleMME, addr, message.MsgTypeModifyBearerRequest, 1, nil)
+	for seq := uint32(2); seq <= 4; seq++ {
+		peers.MarkEchoTimeout(peerhealth.RoleMME, addr.String(), seq, peerhealth.ProbeConfig{
+			SuspectAfterMissed: 2,
+			DownAfterMissed:    3,
+			DegradedRTT:        500 * time.Millisecond,
+		})
+	}
+
+	h := &Handler{
+		cfg:              cfg,
+		log:              slog.New(logs),
+		peerHealth:       peers,
+		collisionMode:    collision.ModeStrict,
+		collisionTimeout: collision.DefaultActiveProcedureTimeout,
+	}
+	proc, ok := h.beginProcedure(sess, mmeProcedureRequest(collision.ProcedureModifyBearer, addr, sess.SGWS11FTEID.TEID, 0x10206, []uint8{5}))
+	if !ok {
+		t.Fatal("beginProcedure rejected procedure; want warning only")
+	}
+	defer finishProcedure(sess, proc)
+	if !logs.HasMessage("GTPv2-C procedure started toward down peer") {
+		t.Fatalf("warning log messages = %+v; want down-peer procedure warning", logs.Messages())
+	}
+}
+
+func TestBeginProcedureDownPeerWarningCanBeDisabled(t *testing.T) {
+	_, sess := testCollisionSession(t)
+	logs := &captureSlogHandler{}
+	cfg := sgwcconfig.Default()
+	cfg.GTPC.PeerHealth.WarnOnDownPeerProcedure = false
+	peers := peerhealth.NewTable(slog.New(slog.DiscardHandler))
+	addr := &net.UDPAddr{IP: net.ParseIP("192.0.2.10"), Port: 2123}
+	peers.Observe(peerhealth.RolePGW, addr, message.MsgTypeCreateBearerRequest, 1, nil)
+	for seq := uint32(2); seq <= 4; seq++ {
+		peers.MarkEchoTimeout(peerhealth.RolePGW, addr.String(), seq, peerhealth.ProbeConfig{
+			SuspectAfterMissed: 2,
+			DownAfterMissed:    3,
+			DegradedRTT:        500 * time.Millisecond,
+		})
+	}
+
+	h := &Handler{
+		cfg:              cfg,
+		log:              slog.New(logs),
+		peerHealth:       peers,
+		collisionMode:    collision.ModeStrict,
+		collisionTimeout: collision.DefaultActiveProcedureTimeout,
+	}
+	proc, ok := h.beginProcedure(sess, pgwProcedureRequest(collision.ProcedureCreateBearer, addr, sess.PGWControlFTEID.TEID, 0x10207, []uint8{5}))
+	if !ok {
+		t.Fatal("beginProcedure rejected procedure; want warning-only feature disabled")
+	}
+	defer finishProcedure(sess, proc)
+	if logs.HasMessage("GTPv2-C procedure started toward down peer") {
+		t.Fatalf("warning log messages = %+v; want no down-peer procedure warning", logs.Messages())
 	}
 }
 
@@ -468,6 +568,31 @@ func TestNSADCNRForwardingTargetsBearerOwnerWhenEnabled(t *testing.T) {
 	}
 	if targets[0] != imsSess {
 		t.Fatalf("forward target APN = %q; want %q", targets[0].APN, imsSess.APN)
+	}
+}
+
+func TestObserveGTPPeerRecordsMMERecovery(t *testing.T) {
+	table := peerhealth.NewTable(slog.Default())
+	h := &Handler{peerHealth: table}
+	addr := &net.UDPAddr{IP: net.ParseIP("10.90.250.77"), Port: 2123}
+	hdr := message.Header{
+		Version:        2,
+		HasTEID:        false,
+		MessageType:    message.MsgTypeEchoRequest,
+		SequenceNumber: 0x010203,
+	}
+	h.observeGTPPeer(peerhealth.RoleMME, addr, hdr, []*ie.IE{ie.NewRecovery(9)})
+
+	snaps := table.Snapshot()
+	if len(snaps) != 1 {
+		t.Fatalf("peer snapshots = %d; want 1", len(snaps))
+	}
+	got := snaps[0]
+	if got.Role != peerhealth.RoleMME || got.Addr != "10.90.250.77:2123" || got.State != peerhealth.StateUp {
+		t.Fatalf("peer snapshot = %+v; want MME up at 10.90.250.77:2123", got)
+	}
+	if !got.RecoverySeen || got.RecoveryCounter != 9 {
+		t.Fatalf("recovery = seen:%v counter:%d; want seen:true counter:9", got.RecoverySeen, got.RecoveryCounter)
 	}
 }
 

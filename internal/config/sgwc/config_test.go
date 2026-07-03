@@ -127,6 +127,54 @@ func TestDefaultNSADCNRConfig(t *testing.T) {
 	}
 }
 
+func TestDefaultPeerHealthConfig(t *testing.T) {
+	cfg := Default()
+	if !cfg.GTPC.PeerHealth.Enabled {
+		t.Fatal("default peer health disabled; want enabled")
+	}
+	if cfg.GTPC.PeerHealth.EchoIntervalSeconds != 30 {
+		t.Fatalf("default peer health echo interval = %d; want 30", cfg.GTPC.PeerHealth.EchoIntervalSeconds)
+	}
+	if cfg.GTPC.PeerHealth.EchoTimeoutSeconds != 3 {
+		t.Fatalf("default peer health echo timeout = %d; want 3", cfg.GTPC.PeerHealth.EchoTimeoutSeconds)
+	}
+	if cfg.GTPC.PeerHealth.SuspectAfterMissed != 2 || cfg.GTPC.PeerHealth.DownAfterMissed != 3 {
+		t.Fatalf("default peer health missed thresholds = suspect:%d down:%d; want suspect:2 down:3",
+			cfg.GTPC.PeerHealth.SuspectAfterMissed, cfg.GTPC.PeerHealth.DownAfterMissed)
+	}
+	if cfg.GTPC.PeerHealth.DegradedRTTMS != 500 {
+		t.Fatalf("default peer health degraded RTT = %d; want 500", cfg.GTPC.PeerHealth.DegradedRTTMS)
+	}
+	if !cfg.GTPC.PeerHealth.ProbeMMEPeers || !cfg.GTPC.PeerHealth.ProbePGWPeers {
+		t.Fatalf("default peer health probes = mme:%v pgw:%v; want both enabled",
+			cfg.GTPC.PeerHealth.ProbeMMEPeers, cfg.GTPC.PeerHealth.ProbePGWPeers)
+	}
+	if !cfg.GTPC.PeerHealth.WarnOnDownPeerProcedure {
+		t.Fatal("default peer health warn_on_down_peer_procedure disabled; want enabled")
+	}
+}
+
+func TestValidateRejectsInvalidPeerHealthConfig(t *testing.T) {
+	cfg := validTestConfig()
+	cfg.GTPC.PeerHealth.EchoTimeoutSeconds = cfg.GTPC.PeerHealth.EchoIntervalSeconds
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("Validate succeeded with peer_health echo timeout >= interval")
+	}
+
+	cfg = validTestConfig()
+	cfg.GTPC.PeerHealth.SuspectAfterMissed = 3
+	cfg.GTPC.PeerHealth.DownAfterMissed = 2
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("Validate succeeded with peer_health down_after_missed < suspect_after_missed")
+	}
+
+	cfg = validTestConfig()
+	cfg.GTPC.PeerHealth.DegradedRTTMS = 0
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("Validate succeeded with peer_health degraded_rtt_ms=0")
+	}
+}
+
 func TestValidateAllowsNSADCNRDisabledByMasterSwitch(t *testing.T) {
 	path := writeTempConfig(t, `
 sgwc:

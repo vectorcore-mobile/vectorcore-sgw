@@ -53,6 +53,7 @@ type GTPCConfig struct {
 	CreateBearerRetryGuard CreateBearerRetryGuardConfig `yaml:"create_bearer_retry_guard"`
 	TransactionCollision   TransactionCollisionConfig   `yaml:"transaction_collision"`
 	NSADCNR                NSADCNRConfig                `yaml:"nsa_dcnr"`
+	PeerHealth             PeerHealthConfig             `yaml:"peer_health"`
 }
 
 type GTPCLogical struct {
@@ -78,6 +79,18 @@ type NSADCNRConfig struct {
 	// ForwardSecondaryRATUsageReports forwards S11 Secondary RAT Usage Data Report IEs
 	// to the owning PGW over S5/S8-C Modify Bearer.
 	ForwardSecondaryRATUsageReports bool `yaml:"forward_secondary_rat_usage_reports"`
+}
+
+type PeerHealthConfig struct {
+	Enabled                 bool `yaml:"enabled"`
+	EchoIntervalSeconds     int  `yaml:"echo_interval_seconds"`
+	EchoTimeoutSeconds      int  `yaml:"echo_timeout_seconds"`
+	SuspectAfterMissed      int  `yaml:"suspect_after_missed"`
+	DownAfterMissed         int  `yaml:"down_after_missed"`
+	DegradedRTTMS           int  `yaml:"degraded_rtt_ms"`
+	ProbeMMEPeers           bool `yaml:"probe_mme_peers"`
+	ProbePGWPeers           bool `yaml:"probe_pgw_peers"`
+	WarnOnDownPeerProcedure bool `yaml:"warn_on_down_peer_procedure"`
 }
 
 type S11Config struct {
@@ -155,6 +168,17 @@ func Default() *Config {
 			NSADCNR: NSADCNRConfig{
 				Enabled:                         true,
 				ForwardSecondaryRATUsageReports: true,
+			},
+			PeerHealth: PeerHealthConfig{
+				Enabled:                 true,
+				EchoIntervalSeconds:     30,
+				EchoTimeoutSeconds:      3,
+				SuspectAfterMissed:      2,
+				DownAfterMissed:         3,
+				DegradedRTTMS:           500,
+				ProbeMMEPeers:           true,
+				ProbePGWPeers:           true,
+				WarnOnDownPeerProcedure: true,
 			},
 		},
 		QoS: QoSConfig{

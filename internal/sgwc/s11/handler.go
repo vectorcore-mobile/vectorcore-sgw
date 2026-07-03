@@ -18,6 +18,7 @@ import (
 	pfcpie "vectorcore-sgw/internal/pfcp/ie"
 	"vectorcore-sgw/internal/sgwc/bearer"
 	"vectorcore-sgw/internal/sgwc/collision"
+	"vectorcore-sgw/internal/sgwc/peerhealth"
 	"vectorcore-sgw/internal/sgwc/pfcpclient"
 	"vectorcore-sgw/internal/sgwc/recovery"
 	"vectorcore-sgw/internal/sgwc/s5c"
@@ -35,6 +36,7 @@ type Handler struct {
 	pfcp             pfcpClient
 	collisionMetrics collisionMetrics
 	nsaMetrics       nsaMetrics
+	peerHealth       *peerhealth.Table
 	collisionMode    collision.Mode
 	collisionTimeout time.Duration
 	localIP          netip.Addr // SGW-C S11 control-plane IP for Sender F-TEID IEs
@@ -169,6 +171,45 @@ func (h *Handler) Close() error {
 	return h.conn.Close()
 }
 
+func (h *Handler) SetPeerHealth(table *peerhealth.Table) {
+	h.peerHealth = table
+}
+
+func (h *Handler) AllocSeq() uint32 {
+	return h.conn.AllocSeq()
+}
+
+func (h *Handler) SendEcho(ctx context.Context, addr string, seq uint32) (*peerhealth.EchoResult, error) {
+	udpAddr, err := net.ResolveUDPAddr("udp4", addr)
+	if err != nil {
+		return nil, fmt.Errorf("resolve MME Echo peer %q: %w", addr, err)
+	}
+	var rec *uint8
+	if h.recovery != nil {
+		v := h.recovery.Value()
+		rec = &v
+	}
+	raw, err := message.MarshalEchoRequest(seq, rec)
+	if err != nil {
+		return nil, fmt.Errorf("marshal MME Echo Request: %w", err)
+	}
+	start := time.Now()
+	respRaw, err := h.conn.Send(ctx, udpAddr, raw)
+	if err != nil {
+		return nil, err
+	}
+	rtt := time.Since(start)
+	hdr, ies, err := message.Parse(respRaw)
+	if err != nil {
+		return nil, fmt.Errorf("parse MME Echo Response: %w", err)
+	}
+	if hdr.MessageType != message.MsgTypeEchoResponse {
+		return nil, fmt.Errorf("unexpected MME Echo response message type %d", hdr.MessageType)
+	}
+	resp := message.ParseEchoResponse(hdr, ies)
+	return &peerhealth.EchoResult{RTT: rtt, Recovery: recoveryIEValuePtr(resp.Recovery)}, nil
+}
+
 // Handle dispatches one inbound S11 GTPv2-C request. It is exported so the
 // SGW-C shared control socket can route S11 messages without owning a second
 // UDP listener.
@@ -184,23 +225,50 @@ func (h *Handler) handle(conn *transport.Conn, addr *net.UDPAddr, hdr message.He
 		h.sendCause(conn, addr, hdr, 0, ie.CauseInvalidMessageFormat)
 		return
 	}
-
 	switch hdr.MessageType {
 	case message.MsgTypeEchoRequest:
 		h.handleEchoRequest(conn, addr, hdr, ies)
 	case message.MsgTypeCreateSessionRequest:
+		h.observeGTPPeer(peerhealth.RoleMME, addr, hdr, ies)
 		h.handleCreateSessionRequest(conn, addr, hdr, ies)
 	case message.MsgTypeModifyBearerRequest:
+		h.observeGTPPeer(peerhealth.RoleMME, addr, hdr, ies)
 		h.handleModifyBearerRequest(conn, addr, hdr, ies)
 	case message.MsgTypeCreateBearerResponse:
+		h.observeGTPPeer(peerhealth.RoleMME, addr, hdr, ies)
 		h.handlePiggybackCreateBearerResponse(conn, addr, hdr, raw)
 	case message.MsgTypeDeleteSessionRequest:
+		h.observeGTPPeer(peerhealth.RoleMME, addr, hdr, ies)
 		h.handleDeleteSessionRequest(conn, addr, hdr, ies)
 	case message.MsgTypeReleaseAccessBearersRequest:
+		h.observeGTPPeer(peerhealth.RoleMME, addr, hdr, ies)
 		h.handleReleaseAccessBearersRequest(conn, addr, hdr, ies)
 	default:
 		h.log.Warn("S11: unhandled message type", "from", addr, "msg_type", hdr.MessageType)
 	}
+}
+
+func (h *Handler) observeGTPPeer(role peerhealth.Role, addr *net.UDPAddr, hdr message.Header, ies []*ie.IE) {
+	if h == nil || h.peerHealth == nil {
+		return
+	}
+	h.peerHealth.Observe(role, addr, hdr.MessageType, hdr.SequenceNumber, recoveryValuePtr(ies))
+}
+
+func recoveryValuePtr(ies []*ie.IE) *uint8 {
+	recIE := ie.FindFirst(ies, ie.TypeRecovery)
+	return recoveryIEValuePtr(recIE)
+}
+
+func recoveryIEValuePtr(recIE *ie.IE) *uint8 {
+	if recIE == nil {
+		return nil
+	}
+	rec, err := recIE.RecoveryValue()
+	if err != nil {
+		return nil
+	}
+	return &rec
 }
 
 func (h *Handler) handleEchoRequest(conn *transport.Conn, addr *net.UDPAddr, hdr message.Header, ies []*ie.IE) {
@@ -372,6 +440,14 @@ func (h *Handler) handleCreateSessionRequest(conn *transport.Conn, addr *net.UDP
 
 	// Send Create Session Request to PGW on S5/S8-C, including SGW-U S5/S8-U TEID.
 	// Per TS 29.274 Rel-15 §7.2.1 / Table 7.2.1-1 (S5/S8-C direction).
+	h.warnIfDownPeerProcedure(sess, collision.Request{
+		Procedure: collision.ProcedureCreateSession,
+		Owner:     collision.OwnerPGW,
+		Peer:      pgwAddr.String(),
+		TEID:      sgwS5CTEID,
+		Seq:       hdr.SequenceNumber,
+		EBIs:      []uint8{ebi},
+	})
 	s5cResult, err := h.s5c.CreateSession(context.TODO(), pgwAddr, req, sgwS5CTEID, pfcpResult.sgwUS5UFTEID)
 	if err != nil {
 		h.log.Error("S11: S5/S8-C Create Session failed", "pgw", pgwAddr, "error", err)

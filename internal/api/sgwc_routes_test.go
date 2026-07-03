@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"vectorcore-sgw/internal/sgwc/bearer"
+	"vectorcore-sgw/internal/sgwc/peerhealth"
 	"vectorcore-sgw/internal/sgwc/session"
 )
 
@@ -171,5 +172,36 @@ func TestSGWCRoutesExposeDefaultAndDedicatedBearerDetails(t *testing.T) {
 		dedicated.UplinkPDRID != 3 || dedicated.DownlinkPDRID != 4 ||
 		dedicated.UplinkFARID != 3 || dedicated.DownlinkFARID != 4 {
 		t.Fatalf("dedicated bearer view = %+v; want QoS and PDR/FAR details", dedicated)
+	}
+}
+
+func TestGTPCPeerRoutesExposePeerHealth(t *testing.T) {
+	peers := peerhealth.NewTable(slog.New(slog.DiscardHandler))
+	recovery := uint8(3)
+	peers.ObserveAddr(peerhealth.RoleMME, "10.90.250.77:2123", 32, 0x010203, &recovery)
+	peers.MarkEchoSent(peerhealth.RoleMME, "10.90.250.77:2123", 0x010204)
+	peers.MarkEchoResponse(peerhealth.RoleMME, "10.90.250.77:2123", 0x010204, 25*time.Millisecond, &recovery, peerhealth.ProbeConfig{
+		SuspectAfterMissed: 2,
+		DownAfterMissed:    3,
+		DegradedRTT:        500 * time.Millisecond,
+	})
+
+	srv := NewServer("127.0.0.1:0", BuildInfo{Version: "test", BuildDate: "now"}, slog.New(slog.DiscardHandler))
+	RegisterGTPCPeerRoutes(srv.HumaAPI(), peers)
+	var out GTPCPeerListOutput
+	getJSON(t, srv, "/gtpc/peers", &out.Body)
+
+	if out.Body.Total != 1 || len(out.Body.Peers) != 1 {
+		t.Fatalf("peer list = total %d len %d; want 1", out.Body.Total, len(out.Body.Peers))
+	}
+	got := out.Body.Peers[0]
+	if got.Role != "mme" || got.Addr != "10.90.250.77:2123" || got.State != "up" {
+		t.Fatalf("peer view = %+v; want mme peer up", got)
+	}
+	if got.LastRTTMS != 25 || got.EchoSent != 1 || got.EchoResponses != 1 || got.EchoTimeouts != 0 {
+		t.Fatalf("peer echo stats = %+v; want RTT 25ms sent/response 1/1", got)
+	}
+	if !got.RecoverySeen || got.RecoveryCounter != 3 {
+		t.Fatalf("peer recovery = seen:%v counter:%d; want true/3", got.RecoverySeen, got.RecoveryCounter)
 	}
 }

@@ -365,6 +365,39 @@ func TestEchoRoundtrip(t *testing.T) {
 	}
 }
 
+func TestMarshalEchoRequest(t *testing.T) {
+	recovery := uint8(9)
+	wire, err := message.MarshalEchoRequest(0x010203, &recovery)
+	if err != nil {
+		t.Fatalf("MarshalEchoRequest: %v", err)
+	}
+
+	h, ies, err := message.Parse(wire)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if h.HasTEID {
+		t.Fatal("Echo Request has TEID flag set; want no-TEID header")
+	}
+	if h.MessageType != message.MsgTypeEchoRequest {
+		t.Fatalf("Echo Request message type = %d; want %d", h.MessageType, message.MsgTypeEchoRequest)
+	}
+	if h.SequenceNumber != 0x010203 {
+		t.Fatalf("Echo Request seq = 0x%06X; want 0x010203", h.SequenceNumber)
+	}
+	recIE := ie.FindFirst(ies, ie.TypeRecovery)
+	if recIE == nil {
+		t.Fatal("Recovery IE missing from Echo Request")
+	}
+	got, err := recIE.RecoveryValue()
+	if err != nil {
+		t.Fatalf("RecoveryValue: %v", err)
+	}
+	if got != recovery {
+		t.Fatalf("Recovery IE value = %d; want %d", got, recovery)
+	}
+}
+
 func buildCSR(t *testing.T, teid uint32, seq uint32) []byte {
 	t.Helper()
 	h := message.Header{

@@ -9,12 +9,14 @@ import (
 	"net"
 	"net/netip"
 	"sync"
+	"time"
 
 	sgwcconfig "vectorcore-sgw/internal/config/sgwc"
 	"vectorcore-sgw/internal/gtpv2/ie"
 	"vectorcore-sgw/internal/gtpv2/message"
 	"vectorcore-sgw/internal/gtpv2/transport"
 	"vectorcore-sgw/internal/sgwc/bearer"
+	"vectorcore-sgw/internal/sgwc/peerhealth"
 	"vectorcore-sgw/internal/sgwc/recovery"
 	"vectorcore-sgw/internal/sgwc/session"
 	"vectorcore-sgw/internal/sgwc/teid"
@@ -28,6 +30,46 @@ type Client struct {
 	localIP   netip.Addr // SGW-C S5/S8-C IP for Sender F-TEID IEs
 	rc        *recovery.Counter
 	peerSeen  sync.Map // addr string → uint8; last restart counter advertised to each peer
+	peers     *peerhealth.Table
+}
+
+func (c *Client) SetPeerHealth(table *peerhealth.Table) {
+	c.peers = table
+}
+
+func (c *Client) AllocSeq() uint32 {
+	return c.conn.AllocSeq()
+}
+
+func (c *Client) SendEcho(ctx context.Context, addr string, seq uint32) (*peerhealth.EchoResult, error) {
+	udpAddr, err := net.ResolveUDPAddr("udp4", addr)
+	if err != nil {
+		return nil, fmt.Errorf("resolve PGW Echo peer %q: %w", addr, err)
+	}
+	var rec *uint8
+	if c.rc != nil {
+		v := c.rc.Value()
+		rec = &v
+	}
+	raw, err := message.MarshalEchoRequest(seq, rec)
+	if err != nil {
+		return nil, fmt.Errorf("marshal PGW Echo Request: %w", err)
+	}
+	start := time.Now()
+	respRaw, err := c.conn.Send(ctx, udpAddr, raw)
+	if err != nil {
+		return nil, err
+	}
+	rtt := time.Since(start)
+	hdr, ies, err := message.Parse(respRaw)
+	if err != nil {
+		return nil, fmt.Errorf("parse PGW Echo Response: %w", err)
+	}
+	if hdr.MessageType != message.MsgTypeEchoResponse {
+		return nil, fmt.Errorf("unexpected PGW Echo response message type %d", hdr.MessageType)
+	}
+	resp := message.ParseEchoResponse(hdr, ies)
+	return &peerhealth.EchoResult{RTT: rtt, Recovery: recoveryIEValuePtr(resp.Recovery)}, nil
 }
 
 // CreateSessionResult holds the outcome of a successful PGW Create Session exchange.
@@ -134,6 +176,7 @@ func (c *Client) CreateSession(ctx context.Context, pgwAddr *net.UDPAddr, s11req
 	if err != nil {
 		return nil, fmt.Errorf("s5c parse CSResp: %w", err)
 	}
+	c.observePeer(pgwAddr, h, ies)
 	if h.MessageType != message.MsgTypeCreateSessionResponse {
 		return nil, fmt.Errorf("s5c unexpected message type %d (want %d)",
 			h.MessageType, message.MsgTypeCreateSessionResponse)
@@ -280,6 +323,7 @@ func (c *Client) ModifyBearerFromS11(ctx context.Context, sess *session.SGWSessi
 	if err != nil {
 		return 0, fmt.Errorf("s5c parse MBResp: %w", err)
 	}
+	c.observePeer(pgwAddr, h, ies)
 	if h.MessageType != message.MsgTypeModifyBearerResponse {
 		return 0, fmt.Errorf("s5c unexpected message type %d (want %d)",
 			h.MessageType, message.MsgTypeModifyBearerResponse)
@@ -326,6 +370,7 @@ func (c *Client) deleteSession(ctx context.Context, sess *session.SGWSession, re
 	if err != nil {
 		return 0, fmt.Errorf("s5c parse DSResp: %w", err)
 	}
+	c.observePeer(pgwAddr, h, ies)
 	if h.MessageType != message.MsgTypeDeleteSessionResponse {
 		return 0, fmt.Errorf("s5c unexpected message type %d (want %d)",
 			h.MessageType, message.MsgTypeDeleteSessionResponse)
@@ -348,6 +393,29 @@ func (c *Client) deleteSession(ctx context.Context, sess *session.SGWSession, re
 	}
 
 	return cause, nil
+}
+
+func (c *Client) observePeer(addr *net.UDPAddr, hdr message.Header, ies []*ie.IE) {
+	if c == nil || c.peers == nil {
+		return
+	}
+	c.peers.Observe(peerhealth.RolePGW, addr, hdr.MessageType, hdr.SequenceNumber, recoveryValuePtr(ies))
+}
+
+func recoveryValuePtr(ies []*ie.IE) *uint8 {
+	recIE := ie.FindFirst(ies, ie.TypeRecovery)
+	return recoveryIEValuePtr(recIE)
+}
+
+func recoveryIEValuePtr(recIE *ie.IE) *uint8 {
+	if recIE == nil {
+		return nil
+	}
+	rec, err := recIE.RecoveryValue()
+	if err != nil {
+		return nil
+	}
+	return &rec
 }
 
 // maybeRecoveryIE returns a Recovery IE if this peer has not yet seen our current

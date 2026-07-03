@@ -26,6 +26,21 @@ func ParseEchoResponse(h Header, ies []*ie.IE) *EchoResponse {
 	return resp
 }
 
+// MarshalEchoRequest encodes an Echo Request with the given sequence number.
+func MarshalEchoRequest(seq uint32, restartCounter *uint8) ([]byte, error) {
+	h := Header{
+		Version:        2,
+		HasTEID:        false,
+		MessageType:    MsgTypeEchoRequest,
+		SequenceNumber: seq,
+	}
+	var ies []*ie.IE
+	if restartCounter != nil {
+		ies = append(ies, ie.NewRecovery(*restartCounter))
+	}
+	return Marshal(h, ies)
+}
+
 // MarshalEchoResponse encodes an Echo Response for the given request.
 func MarshalEchoResponse(req *EchoRequest, restartCounter uint8) ([]byte, error) {
 	h := Header{
