@@ -81,14 +81,37 @@ func TestFetchGTPCPeersPrettyPrintsJSON(t *testing.T) {
 	}
 }
 
+func TestFetchPGWFailuresPrettyPrintsJSON(t *testing.T) {
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/gtpc/pgw-failures" {
+			t.Fatalf("path = %s; want /gtpc/pgw-failures", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"pgw_failures":[{"pgw_addr":"10.90.250.92:2123","state":"down","affected_sessions":2}],"total":1}`))
+	}))
+	defer api.Close()
+
+	var stdout, stderr bytes.Buffer
+	err := run([]string{"-sgwc-api", api.URL, "pgw-failures"}, &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("run pgw-failures: %v stderr=%s", err, stderr.String())
+	}
+	out := stdout.String()
+	if !strings.Contains(out, "SGW-C PGW failure state") ||
+		!strings.Contains(out, `"state": "down"`) ||
+		!strings.Contains(out, `"affected_sessions": 2`) {
+		t.Fatalf("pgw-failures output = %q", out)
+	}
+}
+
 func TestUsageListsGTPCPeers(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	err := run(nil, &stdout, &stderr)
 	if err == nil {
 		t.Fatal("run without command succeeded")
 	}
-	if !strings.Contains(stderr.String(), "gtpc-peers") {
-		t.Fatalf("usage missing gtpc-peers command: %q", stderr.String())
+	if !strings.Contains(stderr.String(), "gtpc-peers") || !strings.Contains(stderr.String(), "pgw-failures") {
+		t.Fatalf("usage missing GTP-C commands: %q", stderr.String())
 	}
 }
 

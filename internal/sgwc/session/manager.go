@@ -4,6 +4,8 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"net"
+	"strconv"
 	"sync"
 	"time"
 
@@ -29,8 +31,9 @@ type Manager struct {
 	byID      map[string]*SGWSession
 	byS11     map[uint32][]*SGWSession // SGW S11 TEID → PDN sessions sharing the UE/MME S11 context
 	byS5C     map[uint32]*SGWSession   // SGW S5/S8-C TEID → session (for PGW-initiated procedures)
-	byIMSI    map[string]*SGWSession   // IMSI → most recent session (any APN)
-	byPDN     map[pdnKey]*SGWSession   // (IMSI+EBI) → active PDN connection
+	byPGW     map[string]map[string]*SGWSession
+	byIMSI    map[string]*SGWSession // IMSI → most recent session (any APN)
+	byPDN     map[pdnKey]*SGWSession // (IMSI+EBI) → active PDN connection
 	teidAlloc *teid.Allocator
 }
 
@@ -40,6 +43,7 @@ func NewManager() *Manager {
 		byID:      make(map[string]*SGWSession),
 		byS11:     make(map[uint32][]*SGWSession),
 		byS5C:     make(map[uint32]*SGWSession),
+		byPGW:     make(map[string]map[string]*SGWSession),
 		byIMSI:    make(map[string]*SGWSession),
 		byPDN:     make(map[pdnKey]*SGWSession),
 		teidAlloc: teid.NewAllocator(),
@@ -211,6 +215,62 @@ func (m *Manager) RegisterS5CTEID(sessionID string, s5cTEID uint32) {
 	}
 }
 
+// RegisterPGW indexes a session under the canonical PGW S5/S8-C endpoint.
+func (m *Manager) RegisterPGW(sessionID, pgwAddr string) {
+	canonical := CanonicalGTPCEndpoint(pgwAddr)
+	if canonical == "" {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	sess, ok := m.byID[sessionID]
+	if !ok {
+		return
+	}
+	if sess.PGWFailure.PGWAddr != "" && sess.PGWFailure.PGWAddr != canonical {
+		m.removePGWLocked(sess.PGWFailure.PGWAddr, sessionID)
+	}
+	if m.byPGW[canonical] == nil {
+		m.byPGW[canonical] = make(map[string]*SGWSession)
+	}
+	m.byPGW[canonical][sessionID] = sess
+	sess.SetPGWPathState(PGWPathStateUp, canonical, time.Now())
+}
+
+// FindByPGW returns all sessions indexed under the canonical PGW endpoint.
+func (m *Manager) FindByPGW(pgwAddr string) []*SGWSession {
+	canonical := CanonicalGTPCEndpoint(pgwAddr)
+	if canonical == "" {
+		return nil
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	sessions := m.byPGW[canonical]
+	out := make([]*SGWSession, 0, len(sessions))
+	for _, sess := range sessions {
+		out = append(out, sess)
+	}
+	return out
+}
+
+func (m *Manager) MarkPGWPathState(pgwAddr string, state PGWPathState, at time.Time) int {
+	sessions := m.FindByPGW(pgwAddr)
+	canonical := CanonicalGTPCEndpoint(pgwAddr)
+	for _, sess := range sessions {
+		sess.SetPGWPathState(state, canonical, at)
+	}
+	return len(sessions)
+}
+
+func (m *Manager) MarkPGWRestart(pgwAddr string, recovery uint8, at time.Time) int {
+	sessions := m.FindByPGW(pgwAddr)
+	canonical := CanonicalGTPCEndpoint(pgwAddr)
+	for _, sess := range sessions {
+		sess.MarkPGWRestart(canonical, recovery, at)
+	}
+	return len(sessions)
+}
+
 // FindByS5CTEID returns the session whose SGW S5/S8-C TEID matches, or nil.
 // This is the TEID the PGW addresses when sending CBReq/UBReq/DBReq.
 func (m *Manager) FindByS5CTEID(t uint32) *SGWSession {
@@ -252,6 +312,11 @@ func (m *Manager) removeLocked(sess *SGWSession) {
 	if sess.SGWS5CFTEID.TEID != 0 {
 		delete(m.byS5C, sess.SGWS5CFTEID.TEID)
 	}
+	if sess.PGWFailure.PGWAddr != "" {
+		m.removePGWLocked(sess.PGWFailure.PGWAddr, sess.SessionID)
+	} else if sess.PGWControlFTEID.IPv4.IsValid() {
+		m.removePGWLocked(CanonicalGTPCEndpoint(sess.PGWControlFTEID.IPv4.String()), sess.SessionID)
+	}
 	pdn := pdnKey{imsi: sess.IMSI, ebi: sess.DefaultBearerID}
 	if m.byPDN[pdn] == sess {
 		delete(m.byPDN, pdn)
@@ -269,6 +334,21 @@ func (m *Manager) removeLocked(sess *SGWSession) {
 		if newest != nil {
 			m.byIMSI[sess.IMSI] = newest
 		}
+	}
+}
+
+func (m *Manager) removePGWLocked(pgwAddr, sessionID string) {
+	canonical := CanonicalGTPCEndpoint(pgwAddr)
+	if canonical == "" {
+		return
+	}
+	sessions := m.byPGW[canonical]
+	if len(sessions) == 0 {
+		return
+	}
+	delete(sessions, sessionID)
+	if len(sessions) == 0 {
+		delete(m.byPGW, canonical)
 	}
 }
 
@@ -323,4 +403,21 @@ func newSessionID() (string, error) {
 		return "", err
 	}
 	return hex.EncodeToString(b[:]), nil
+}
+
+// CanonicalGTPCEndpoint returns the stable GTPv2-C endpoint used for PGW/MME
+// health and failure indexing. GTPv2-C peers are probed on UDP/2123 even when a
+// packet was observed from a transient source port.
+func CanonicalGTPCEndpoint(addr string) string {
+	if addr == "" {
+		return ""
+	}
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		host = addr
+	}
+	if host == "" {
+		return ""
+	}
+	return net.JoinHostPort(host, strconv.Itoa(2123))
 }

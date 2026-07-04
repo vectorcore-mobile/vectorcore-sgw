@@ -399,6 +399,20 @@ func (h *Handler) handleCreateSessionRequest(conn *transport.Conn, addr *net.UDP
 		h.sendCause(conn, addr, hdr, mmeTEID, ie.CauseConditionalIEMissing)
 		return
 	}
+	createPGWReq := collision.Request{
+		Procedure: collision.ProcedureCreateSession,
+		Owner:     collision.OwnerPGW,
+		Peer:      pgwAddr.String(),
+		TEID:      0,
+		Seq:       hdr.SequenceNumber,
+		EBIs:      []uint8{ebi},
+	}
+	if !h.allowPeerProcedure(sess, createPGWReq) {
+		h.clearCreateBearerProcedureFailuresForSession(sess.SessionID, "create_session_abort")
+		h.sessions.Delete(sess.SessionID)
+		h.sendCause(conn, addr, hdr, mmeTEID, ie.CauseSystemFailure)
+		return
+	}
 
 	// R15-REAUDIT-001: PFCP Session Establishment BEFORE S5/S8-C CSReq.
 	// The provisional PFCP session allocates the SGW-U S5/S8-U TEID (Created PDR 2),
@@ -440,14 +454,6 @@ func (h *Handler) handleCreateSessionRequest(conn *transport.Conn, addr *net.UDP
 
 	// Send Create Session Request to PGW on S5/S8-C, including SGW-U S5/S8-U TEID.
 	// Per TS 29.274 Rel-15 §7.2.1 / Table 7.2.1-1 (S5/S8-C direction).
-	h.warnIfDownPeerProcedure(sess, collision.Request{
-		Procedure: collision.ProcedureCreateSession,
-		Owner:     collision.OwnerPGW,
-		Peer:      pgwAddr.String(),
-		TEID:      sgwS5CTEID,
-		Seq:       hdr.SequenceNumber,
-		EBIs:      []uint8{ebi},
-	})
 	s5cResult, err := h.s5c.CreateSession(context.TODO(), pgwAddr, req, sgwS5CTEID, pfcpResult.sgwUS5UFTEID)
 	if err != nil {
 		h.log.Error("S11: S5/S8-C Create Session failed", "pgw", pgwAddr, "error", err)
@@ -493,6 +499,7 @@ func (h *Handler) handleCreateSessionRequest(conn *transport.Conn, addr *net.UDP
 
 	// Update session with PGW response per TS 29.274 §7.2.2 / Table 7.2.2-1.
 	sess.PGWControlFTEID = s5cResult.PGWControlFTEID
+	h.sessions.RegisterPGW(sess.SessionID, pgwAddr.String())
 	sess.UEIPv4 = s5cResult.UEIP
 
 	// Update default bearer with PGW-U S5/S8-U F-TEID per Table 7.2.2-2.
@@ -890,6 +897,24 @@ func (h *Handler) handleModifyBearerRequest(conn *transport.Conn, addr *net.UDPA
 			continue
 		}
 		reportForwarded = true
+		pgwAddr := pgwAddrFromSession(reportForwardSess)
+		reportReq := collision.Request{
+			Procedure: collision.ProcedureModifyBearer,
+			Owner:     collision.OwnerPGW,
+			Peer:      pgwAddr,
+			TEID:      reportForwardSess.PGWControlFTEID.TEID,
+			Seq:       hdr.SequenceNumber,
+			EBIs:      mbEBIs,
+		}
+		if !h.allowPeerProcedure(reportForwardSess, reportReq) {
+			if reportForwardCause == ie.CauseRequestAccepted {
+				reportForwardCause = ie.CauseSystemFailure
+			}
+			if h.nsaMetrics != nil {
+				h.nsaMetrics.OnSecondaryRATUsageReportsForwarded(reportForwardSess.APN, ie.CauseSystemFailure, len(req.SecondaryRATUsageDataReports))
+			}
+			continue
+		}
 		cause, err := h.s5c.ModifyBearerFromS11(context.TODO(), reportForwardSess, req)
 		if err != nil {
 			h.log.Warn("S11: S5/S8-C Modify Bearer report forwarding failed",
@@ -1124,6 +1149,19 @@ func (h *Handler) handleDeleteSessionRequest(conn *transport.Conn, addr *net.UDP
 	// Per TS 29.274 Rel-15 §7.2.9 / Table 7.2.9.1-1 (S5/S8-C direction).
 	// R15-005: propagate PGW cause to MME; retain local state on failure for retry.
 	if sess.PGWControlFTEID.TEID != 0 {
+		pgwReq := collision.Request{
+			Procedure: collision.ProcedureDeleteSession,
+			Owner:     collision.OwnerPGW,
+			Peer:      pgwAddrFromSession(sess),
+			TEID:      sess.PGWControlFTEID.TEID,
+			Seq:       hdr.SequenceNumber,
+			EBIs:      dsEBIs,
+		}
+		if !h.allowPeerProcedure(sess, pgwReq) {
+			resp, _ := message.MarshalDeleteSessionResponse(req, mmeTEID, ie.CauseSystemFailure)
+			conn.Reply(addr, resp) //nolint:errcheck
+			return
+		}
 		pgwCause, pgwErr := h.s5c.DeleteSessionFromS11(context.TODO(), sess, req)
 		if pgwErr != nil {
 			// Transport or decode error: return system failure; retain local state for retry.

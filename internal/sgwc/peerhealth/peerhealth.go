@@ -57,6 +57,28 @@ type Snapshot struct {
 	Restarts           uint64
 }
 
+type StateChangeEvent struct {
+	Role     Role
+	Addr     string
+	OldState State
+	NewState State
+	Reason   string
+	At       time.Time
+}
+
+type RestartEvent struct {
+	Role        Role
+	Addr        string
+	OldRecovery uint8
+	NewRecovery uint8
+	At          time.Time
+}
+
+type EventHandler interface {
+	OnPeerStateChange(StateChangeEvent)
+	OnPeerRestart(RestartEvent)
+}
+
 type Target struct {
 	Role Role
 	Addr string
@@ -167,10 +189,20 @@ func (t *Table) MarkEchoResponse(role Role, addr string, seq uint32, rtt time.Du
 	}
 	restartLog := t.applyRecoveryLocked(p, recovery, now)
 	newState := p.state
+	handler := t.eventHandler
 	t.mu.Unlock()
 
 	t.logStateChange(role, addr, oldState, newState, "echo_response")
 	t.logRestart(role, addr, restartLog)
+	t.notifyStateChange(handler, StateChangeEvent{
+		Role:     role,
+		Addr:     addr,
+		OldState: oldState,
+		NewState: newState,
+		Reason:   "echo_response",
+		At:       now,
+	})
+	t.notifyRestart(handler, role, addr, restartLog, now)
 }
 
 func (t *Table) MarkEchoTimeout(role Role, addr string, seq uint32, cfg ProbeConfig) {
@@ -198,16 +230,26 @@ func (t *Table) MarkEchoTimeout(role Role, addr string, seq uint32, cfg ProbeCon
 	p.lastStateChange = stateChangeTime(p.lastStateChange, oldState, p.state, now)
 	newState := p.state
 	misses := p.consecutiveMisses
+	handler := t.eventHandler
 	t.mu.Unlock()
 
 	t.logStateChange(role, addr, oldState, newState, "echo_timeout", "missed_echo", misses)
+	t.notifyStateChange(handler, StateChangeEvent{
+		Role:     role,
+		Addr:     addr,
+		OldState: oldState,
+		NewState: newState,
+		Reason:   "echo_timeout",
+		At:       now,
+	})
 }
 
 type Table struct {
-	mu    sync.RWMutex
-	log   *slog.Logger
-	peers map[Key]*peer
-	now   func() time.Time
+	mu           sync.RWMutex
+	log          *slog.Logger
+	peers        map[Key]*peer
+	now          func() time.Time
+	eventHandler EventHandler
 }
 
 func NewTable(log *slog.Logger) *Table {
@@ -219,6 +261,15 @@ func NewTable(log *slog.Logger) *Table {
 		peers: make(map[Key]*peer),
 		now:   time.Now,
 	}
+}
+
+func (t *Table) SetEventHandler(handler EventHandler) {
+	if t == nil {
+		return
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.eventHandler = handler
 }
 
 func (t *Table) Observe(role Role, addr *net.UDPAddr, msgType uint8, seq uint32, recovery *uint8) {
@@ -281,10 +332,20 @@ func (t *Table) observe(role Role, addr string, msgType uint8, seq uint32, recov
 	p.lastSeq = seq
 
 	restartLog := t.applyRecoveryLocked(p, recovery, now)
+	handler := t.eventHandler
 	t.mu.Unlock()
 
 	t.logStateChange(role, addr, oldState, StateUp, "valid_gtpc_message")
 	t.logRestart(role, addr, restartLog)
+	t.notifyStateChange(handler, StateChangeEvent{
+		Role:     role,
+		Addr:     addr,
+		OldState: oldState,
+		NewState: StateUp,
+		Reason:   "valid_gtpc_message",
+		At:       now,
+	})
+	t.notifyRestart(handler, role, addr, restartLog, now)
 }
 
 type restartChange struct {
@@ -352,6 +413,26 @@ func (t *Table) logRestart(role Role, addr string, change *restartChange) {
 		"peer", addr,
 		"old_recovery", change.old,
 		"new_recovery", change.new)
+}
+
+func (t *Table) notifyStateChange(handler EventHandler, event StateChangeEvent) {
+	if handler == nil || event.OldState == event.NewState {
+		return
+	}
+	handler.OnPeerStateChange(event)
+}
+
+func (t *Table) notifyRestart(handler EventHandler, role Role, addr string, change *restartChange, at time.Time) {
+	if handler == nil || change == nil {
+		return
+	}
+	handler.OnPeerRestart(RestartEvent{
+		Role:        role,
+		Addr:        addr,
+		OldRecovery: change.old,
+		NewRecovery: change.new,
+		At:          at,
+	})
 }
 
 func (t *Table) Snapshot() []Snapshot {

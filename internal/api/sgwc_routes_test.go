@@ -8,6 +8,7 @@ import (
 
 	"vectorcore-sgw/internal/sgwc/bearer"
 	"vectorcore-sgw/internal/sgwc/peerhealth"
+	"vectorcore-sgw/internal/sgwc/pgwfailure"
 	"vectorcore-sgw/internal/sgwc/session"
 )
 
@@ -129,6 +130,29 @@ func TestSGWCRoutesExposeSecondaryRATUsageReports(t *testing.T) {
 	}
 }
 
+func TestSGWCRoutesExposePGWFailureState(t *testing.T) {
+	m := session.NewManager()
+	sess, _, err := m.Create(defaultSGWCSessionParams())
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	m.RegisterPGW(sess.SessionID, "10.90.250.92:30064")
+	downAt := time.Unix(20, 0).UTC()
+	if got := m.MarkPGWPathState("10.90.250.92:2123", session.PGWPathStateDown, downAt); got != 1 {
+		t.Fatalf("MarkPGWPathState = %d; want 1", got)
+	}
+
+	srv := newTestSGWCAPI(m)
+	var out SessionGetOutput
+	getJSON(t, srv, "/sessions/"+sess.SessionID, &out.Body)
+
+	if out.Body.PGWFailure.PathState != "down" ||
+		out.Body.PGWFailure.PGWAddr != "10.90.250.92:2123" ||
+		!out.Body.PGWFailure.PathDownAt.Equal(downAt) {
+		t.Fatalf("PGW failure view = %+v; want down at canonical PGW", out.Body.PGWFailure)
+	}
+}
+
 func TestSGWCRoutesExposeDefaultAndDedicatedBearerDetails(t *testing.T) {
 	m := session.NewManager()
 	sess, _, err := m.Create(defaultSGWCSessionParams())
@@ -172,6 +196,50 @@ func TestSGWCRoutesExposeDefaultAndDedicatedBearerDetails(t *testing.T) {
 		dedicated.UplinkPDRID != 3 || dedicated.DownlinkPDRID != 4 ||
 		dedicated.UplinkFARID != 3 || dedicated.DownlinkFARID != 4 {
 		t.Fatalf("dedicated bearer view = %+v; want QoS and PDR/FAR details", dedicated)
+	}
+}
+
+func TestPGWFailureRoutesExposeFailureSummary(t *testing.T) {
+	m := session.NewManager()
+	sess, _, err := m.Create(defaultSGWCSessionParams())
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	m.RegisterPGW(sess.SessionID, "10.90.250.92:30064")
+	handler := pgwfailure.NewHandler(m, pgwfailure.Config{
+		Enabled:                true,
+		MarkSessionsOnPathDown: true,
+		MarkSessionsOnRestart:  true,
+	}, slog.New(slog.DiscardHandler))
+	handler.OnPeerStateChange(peerhealth.StateChangeEvent{
+		Role:     peerhealth.RolePGW,
+		Addr:     "10.90.250.92:2123",
+		OldState: peerhealth.StateUp,
+		NewState: peerhealth.StateDown,
+		Reason:   "echo_timeout",
+		At:       time.Unix(30, 0).UTC(),
+	})
+	handler.OnPeerRestart(peerhealth.RestartEvent{
+		Role:        peerhealth.RolePGW,
+		Addr:        "10.90.250.92:2123",
+		OldRecovery: 3,
+		NewRecovery: 4,
+		At:          time.Unix(40, 0).UTC(),
+	})
+
+	srv := NewServer("127.0.0.1:0", BuildInfo{Version: "test", BuildDate: "now"}, slog.New(slog.DiscardHandler))
+	RegisterPGWFailureRoutes(srv.HumaAPI(), handler)
+	var out PGWFailureListOutput
+	getJSON(t, srv, "/gtpc/pgw-failures", &out.Body)
+
+	if out.Body.Total != 1 || len(out.Body.PGWFailures) != 1 {
+		t.Fatalf("PGW failures = total %d len %d; want 1", out.Body.Total, len(out.Body.PGWFailures))
+	}
+	got := out.Body.PGWFailures[0]
+	if got.PGWAddr != "10.90.250.92:2123" || got.State != "restarted" ||
+		got.AffectedSessions != 1 || got.RecoveryCounter != 4 ||
+		got.Restarts != 1 || got.PathDownEvents != 1 {
+		t.Fatalf("PGW failure summary = %+v; want restarted affected PGW", got)
 	}
 }
 

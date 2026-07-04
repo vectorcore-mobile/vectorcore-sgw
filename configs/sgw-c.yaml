@@ -37,6 +37,12 @@ gtpc:
     probe_mme_peers: true
     probe_pgw_peers: true
     warn_on_down_peer_procedure: true
+  pgw_failure:
+    enabled: true
+    mark_sessions_on_path_down: true
+    mark_sessions_on_restart: true
+    block_new_procedures_to_down_pgw: false
+    notify_mme_on_pgw_restart: false
 
 s11:
   t3_response_seconds: 3

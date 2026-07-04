@@ -54,7 +54,10 @@ func (h *Handler) beginProcedure(sess *session.SGWSession, req collision.Request
 	}
 	proc, decision := track.Begin(req)
 	if decision.Action == collision.ActionAllow {
-		h.warnIfDownPeerProcedure(sess, req)
+		if !h.allowPeerProcedure(sess, req) {
+			track.Finish(proc)
+			return collision.ActiveProcedure{}, false
+		}
 		return proc, true
 	}
 	if h.collisionMetrics != nil {
@@ -84,30 +87,41 @@ func (h *Handler) beginProcedure(sess *session.SGWSession, req collision.Request
 }
 
 func (h *Handler) warnIfDownPeerProcedure(sess *session.SGWSession, req collision.Request) {
+	_ = h.allowPeerProcedure(sess, req)
+}
+
+func (h *Handler) allowPeerProcedure(sess *session.SGWSession, req collision.Request) bool {
 	if h == nil || h.peerHealth == nil || sess == nil || !warnOnDownPeerProcedureFromConfig(h.cfg) {
-		return
+		if h == nil || h.peerHealth == nil || sess == nil {
+			return true
+		}
 	}
 	role, ok := peerRoleForProcedureOwner(req.Owner)
 	if !ok {
-		return
+		return true
 	}
 	state, ok := h.peerHealth.State(role, req.Peer)
 	if !ok || state != peerhealth.StateDown {
-		return
+		return true
 	}
-	h.log.Warn("GTPv2-C procedure started toward down peer",
-		"session_id", sess.SessionID,
-		"imsi", sess.IMSI,
-		"apn", sess.APN,
-		"procedure", req.Procedure,
-		"owner", req.Owner,
-		"peer_role", role,
-		"peer", req.Peer,
-		"peer_state", state,
-		"teid", fmt.Sprintf("0x%08X", req.TEID),
-		"seq", req.Seq,
-		"ebis", req.EBIs,
-	)
+	block := blockNewProceduresToDownPGWFromConfig(h.cfg) && req.Owner == collision.OwnerPGW
+	if warnOnDownPeerProcedureFromConfig(h.cfg) || block {
+		h.log.Warn("GTPv2-C procedure toward down peer",
+			"session_id", sess.SessionID,
+			"imsi", sess.IMSI,
+			"apn", sess.APN,
+			"procedure", req.Procedure,
+			"owner", req.Owner,
+			"peer_role", role,
+			"peer", req.Peer,
+			"peer_state", state,
+			"teid", fmt.Sprintf("0x%08X", req.TEID),
+			"seq", req.Seq,
+			"ebis", req.EBIs,
+			"action", downPeerPolicyAction(block),
+		)
+	}
+	return !block
 }
 
 func peerRoleForProcedureOwner(owner collision.Owner) (peerhealth.Role, bool) {
@@ -126,6 +140,17 @@ func warnOnDownPeerProcedureFromConfig(cfg *sgwcconfig.Config) bool {
 		return true
 	}
 	return cfg.GTPC.PeerHealth.WarnOnDownPeerProcedure
+}
+
+func blockNewProceduresToDownPGWFromConfig(cfg *sgwcconfig.Config) bool {
+	return cfg != nil && cfg.GTPC.PGWFailure.Enabled && cfg.GTPC.PGWFailure.BlockNewProceduresToDownPGW
+}
+
+func downPeerPolicyAction(block bool) string {
+	if block {
+		return "blocked"
+	}
+	return "warning_only"
 }
 
 func collisionModeFromConfig(cfg *sgwcconfig.Config) collision.Mode {
@@ -169,6 +194,19 @@ func pgwProcedureRequest(proc collision.Procedure, addr *net.UDPAddr, teid, seq 
 		Seq:       seq,
 		EBIs:      ebis,
 	}
+}
+
+func pgwAddrFromSession(sess *session.SGWSession) string {
+	if sess == nil {
+		return ""
+	}
+	if status := sess.PGWFailureSnapshot(); status.PGWAddr != "" {
+		return status.PGWAddr
+	}
+	if sess.PGWControlFTEID.IPv4.IsValid() {
+		return net.JoinHostPort(sess.PGWControlFTEID.IPv4.String(), "2123")
+	}
+	return ""
 }
 
 func bearerContextEBIs(bcs []*ie.IE) []uint8 {

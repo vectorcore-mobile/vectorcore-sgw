@@ -80,6 +80,60 @@ func TestObserveDetectsRecoveryCounterChange(t *testing.T) {
 	}
 }
 
+type recordingHandler struct {
+	stateChanges []StateChangeEvent
+	restarts     []RestartEvent
+}
+
+func (h *recordingHandler) OnPeerStateChange(event StateChangeEvent) {
+	h.stateChanges = append(h.stateChanges, event)
+}
+
+func (h *recordingHandler) OnPeerRestart(event RestartEvent) {
+	h.restarts = append(h.restarts, event)
+}
+
+func TestEventHandlerReceivesStateChangeAfterEchoTimeout(t *testing.T) {
+	tbl := testTable()
+	rec := &recordingHandler{}
+	tbl.SetEventHandler(rec)
+
+	tbl.ObserveAddr(RolePGW, "192.0.2.10:2123", 33, 1, nil)
+	tbl.MarkEchoTimeout(RolePGW, "192.0.2.10:30200", 2, ProbeConfig{
+		SuspectAfterMissed: 2,
+		DownAfterMissed:    3,
+	})
+
+	if len(rec.stateChanges) != 2 {
+		t.Fatalf("state change events = %d; want observe and timeout events", len(rec.stateChanges))
+	}
+	got := rec.stateChanges[1]
+	if got.Role != RolePGW || got.Addr != "192.0.2.10:2123" ||
+		got.OldState != StateUp || got.NewState != StateDegraded || got.Reason != "echo_timeout" {
+		t.Fatalf("timeout event = %+v; want PGW up->degraded echo_timeout", got)
+	}
+}
+
+func TestEventHandlerReceivesRestartEvent(t *testing.T) {
+	tbl := testTable()
+	rec := &recordingHandler{}
+	tbl.SetEventHandler(rec)
+	first := uint8(3)
+	next := uint8(4)
+
+	tbl.ObserveAddr(RolePGW, "192.0.2.10:2123", 33, 1, &first)
+	tbl.ObserveAddr(RolePGW, "192.0.2.10:2123", 33, 2, &next)
+
+	if len(rec.restarts) != 1 {
+		t.Fatalf("restart events = %d; want 1", len(rec.restarts))
+	}
+	got := rec.restarts[0]
+	if got.Role != RolePGW || got.Addr != "192.0.2.10:2123" ||
+		got.OldRecovery != 3 || got.NewRecovery != 4 {
+		t.Fatalf("restart event = %+v; want Recovery 3->4", got)
+	}
+}
+
 func TestStateReturnsCurrentPeerState(t *testing.T) {
 	tbl := testTable()
 	tbl.ObserveAddr(RolePGW, "192.0.2.10:2123", 33, 1, nil)

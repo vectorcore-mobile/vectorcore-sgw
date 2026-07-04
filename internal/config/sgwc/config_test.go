@@ -154,6 +154,25 @@ func TestDefaultPeerHealthConfig(t *testing.T) {
 	}
 }
 
+func TestDefaultPGWFailureConfig(t *testing.T) {
+	cfg := Default()
+	if !cfg.GTPC.PGWFailure.Enabled {
+		t.Fatal("default PGW failure handling disabled; want enabled")
+	}
+	if !cfg.GTPC.PGWFailure.MarkSessionsOnPathDown {
+		t.Fatal("default mark_sessions_on_path_down disabled; want enabled")
+	}
+	if !cfg.GTPC.PGWFailure.MarkSessionsOnRestart {
+		t.Fatal("default mark_sessions_on_restart disabled; want enabled")
+	}
+	if cfg.GTPC.PGWFailure.BlockNewProceduresToDownPGW {
+		t.Fatal("default block_new_procedures_to_down_pgw enabled; want warning-only false")
+	}
+	if cfg.GTPC.PGWFailure.NotifyMMEOnPGWRestart {
+		t.Fatal("default notify_mme_on_pgw_restart enabled; want false")
+	}
+}
+
 func TestValidateRejectsInvalidPeerHealthConfig(t *testing.T) {
 	cfg := validTestConfig()
 	cfg.GTPC.PeerHealth.EchoTimeoutSeconds = cfg.GTPC.PeerHealth.EchoIntervalSeconds
@@ -172,6 +191,14 @@ func TestValidateRejectsInvalidPeerHealthConfig(t *testing.T) {
 	cfg.GTPC.PeerHealth.DegradedRTTMS = 0
 	if err := cfg.Validate(); err == nil {
 		t.Fatal("Validate succeeded with peer_health degraded_rtt_ms=0")
+	}
+}
+
+func TestValidateRejectsUnsupportedPGWRestartNotification(t *testing.T) {
+	cfg := validTestConfig()
+	cfg.GTPC.PGWFailure.NotifyMMEOnPGWRestart = true
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("Validate succeeded with unsupported notify_mme_on_pgw_restart=true")
 	}
 }
 

@@ -195,6 +195,166 @@ func TestRegisterS5CTEIDFindsPendingSession(t *testing.T) {
 	}
 }
 
+func TestRegisterPGWIndexesCanonicalEndpoint(t *testing.T) {
+	m := session.NewManager()
+	sess, _, err := m.Create(defaultParams())
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	m.RegisterPGW(sess.SessionID, "10.90.250.92:30064")
+
+	got := m.FindByPGW("10.90.250.92:2123")
+	if len(got) != 1 || got[0] != sess {
+		t.Fatalf("FindByPGW canonical = %+v; want session", got)
+	}
+	got = m.FindByPGW("10.90.250.92:39999")
+	if len(got) != 1 || got[0] != sess {
+		t.Fatalf("FindByPGW transient = %+v; want session", got)
+	}
+	status := sess.PGWFailureSnapshot()
+	if status.PathState != session.PGWPathStateUp || status.PGWAddr != "10.90.250.92:2123" {
+		t.Fatalf("PGW failure status = %+v; want up at canonical PGW", status)
+	}
+}
+
+func TestRegisterPGWIndexesMultipleSessionsPerPGW(t *testing.T) {
+	m := session.NewManager()
+	defaultSess, _, err := m.Create(defaultParams())
+	if err != nil {
+		t.Fatalf("Create default: %v", err)
+	}
+	imsParams := defaultParams()
+	imsParams.APN = "ims"
+	imsParams.DefaultEBI = 6
+	imsParams.QCI = 5
+	imsParams.ReuseSGWS11FTEID = defaultSess.SGWS11FTEID
+	imsSess, _, err := m.Create(imsParams)
+	if err != nil {
+		t.Fatalf("Create IMS: %v", err)
+	}
+	otherParams := defaultParams()
+	otherParams.IMSI = "311430000000002"
+	otherSess, _, err := m.Create(otherParams)
+	if err != nil {
+		t.Fatalf("Create other UE: %v", err)
+	}
+
+	m.RegisterPGW(defaultSess.SessionID, "10.90.250.92:2123")
+	m.RegisterPGW(imsSess.SessionID, "10.90.250.92:30064")
+	m.RegisterPGW(otherSess.SessionID, "10.90.250.93:2123")
+
+	samePGW := m.FindByPGW("10.90.250.92:2123")
+	if len(samePGW) != 2 {
+		t.Fatalf("sessions on PGW .92 = %d; want 2", len(samePGW))
+	}
+	otherPGW := m.FindByPGW("10.90.250.93:2123")
+	if len(otherPGW) != 1 || otherPGW[0] != otherSess {
+		t.Fatalf("sessions on PGW .93 = %+v; want other UE session", otherPGW)
+	}
+}
+
+func TestDeleteRemovesPGWIndex(t *testing.T) {
+	m := session.NewManager()
+	sess, _, err := m.Create(defaultParams())
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	m.RegisterPGW(sess.SessionID, "10.90.250.92:2123")
+
+	m.Delete(sess.SessionID)
+
+	if got := m.FindByPGW("10.90.250.92:2123"); len(got) != 0 {
+		t.Fatalf("FindByPGW after delete = %+v; want empty", got)
+	}
+}
+
+func TestPGWFailureStateSnapshot(t *testing.T) {
+	m := session.NewManager()
+	sess, _, err := m.Create(defaultParams())
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	downAt := time.Unix(100, 0).UTC()
+	sess.SetPGWPathState(session.PGWPathStateDown, "10.90.250.92:2123", downAt)
+	status := sess.PGWFailureSnapshot()
+	if status.PathState != session.PGWPathStateDown || !status.PathDownAt.Equal(downAt) {
+		t.Fatalf("down status = %+v; want down at %s", status, downAt)
+	}
+	restartAt := time.Unix(200, 0).UTC()
+	sess.MarkPGWRestart("10.90.250.92:2123", 12, restartAt)
+	status = sess.PGWFailureSnapshot()
+	if status.PathState != session.PGWPathStateRestarted || !status.RestartDetectedAt.Equal(restartAt) ||
+		!status.RecoverySeen || status.RecoveryCounter != 12 {
+		t.Fatalf("restart status = %+v; want restarted recovery 12", status)
+	}
+}
+
+func TestMarkPGWPathStateUpdatesIndexedSessions(t *testing.T) {
+	m := session.NewManager()
+	first, _, err := m.Create(defaultParams())
+	if err != nil {
+		t.Fatalf("Create first: %v", err)
+	}
+	secondParams := defaultParams()
+	secondParams.IMSI = "311430000000002"
+	second, _, err := m.Create(secondParams)
+	if err != nil {
+		t.Fatalf("Create second: %v", err)
+	}
+	otherParams := defaultParams()
+	otherParams.IMSI = "311430000000003"
+	other, _, err := m.Create(otherParams)
+	if err != nil {
+		t.Fatalf("Create other: %v", err)
+	}
+	m.RegisterPGW(first.SessionID, "10.90.250.92:2123")
+	m.RegisterPGW(second.SessionID, "10.90.250.92:30064")
+	m.RegisterPGW(other.SessionID, "10.90.250.93:2123")
+
+	downAt := time.Unix(300, 0).UTC()
+	if got := m.MarkPGWPathState("10.90.250.92:39999", session.PGWPathStateDown, downAt); got != 2 {
+		t.Fatalf("MarkPGWPathState affected = %d; want 2", got)
+	}
+	for _, sess := range []*session.SGWSession{first, second} {
+		status := sess.PGWFailureSnapshot()
+		if status.PathState != session.PGWPathStateDown || !status.PathDownAt.Equal(downAt) ||
+			status.PGWAddr != "10.90.250.92:2123" {
+			t.Fatalf("indexed session status = %+v; want down on canonical PGW", status)
+		}
+	}
+	if status := other.PGWFailureSnapshot(); status.PathState != session.PGWPathStateUp {
+		t.Fatalf("other PGW session status = %+v; want unchanged up", status)
+	}
+
+	upAt := time.Unix(400, 0).UTC()
+	if got := m.MarkPGWPathState("10.90.250.92:2123", session.PGWPathStateUp, upAt); got != 2 {
+		t.Fatalf("MarkPGWPathState up affected = %d; want 2", got)
+	}
+	if status := first.PGWFailureSnapshot(); status.PathState != session.PGWPathStateUp || !status.PathDownAt.IsZero() {
+		t.Fatalf("recovered status = %+v; want up with cleared PathDownAt", status)
+	}
+}
+
+func TestMarkPGWRestartUpdatesIndexedSessions(t *testing.T) {
+	m := session.NewManager()
+	sess, _, err := m.Create(defaultParams())
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	m.RegisterPGW(sess.SessionID, "10.90.250.92:30064")
+
+	restartAt := time.Unix(500, 0).UTC()
+	if got := m.MarkPGWRestart("10.90.250.92:2123", 17, restartAt); got != 1 {
+		t.Fatalf("MarkPGWRestart affected = %d; want 1", got)
+	}
+	status := sess.PGWFailureSnapshot()
+	if status.PathState != session.PGWPathStateRestarted || status.PGWAddr != "10.90.250.92:2123" ||
+		!status.RecoverySeen || status.RecoveryCounter != 17 || !status.RestartDetectedAt.Equal(restartAt) {
+		t.Fatalf("restart status = %+v; want restarted recovery 17", status)
+	}
+}
+
 func TestFindByIMSI(t *testing.T) {
 	m := session.NewManager()
 	sess, _, _ := m.Create(defaultParams())

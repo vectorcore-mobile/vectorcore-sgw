@@ -68,9 +68,10 @@ func (f *fakeGTPCConn) Close() error                { return nil }
 func (f *fakeGTPCConn) LocalAddr() net.Addr         { return &net.UDPAddr{} }
 
 type fakeS5CClient struct {
-	replies           [][]byte
-	modifyBearerCalls int
-	lastModifyBearer  *message.ModifyBearerRequest
+	replies                   [][]byte
+	deleteSessionFromS11Calls int
+	modifyBearerCalls         int
+	lastModifyBearer          *message.ModifyBearerRequest
 }
 
 func (f *fakeS5CClient) PGWAddr(*message.CreateSessionRequest) (*net.UDPAddr, error) {
@@ -86,6 +87,7 @@ func (f *fakeS5CClient) DeleteSession(context.Context, *session.SGWSession) (uin
 	return ie.CauseRequestAccepted, nil
 }
 func (f *fakeS5CClient) DeleteSessionFromS11(context.Context, *session.SGWSession, *message.DeleteSessionRequest) (uint8, error) {
+	f.deleteSessionFromS11Calls++
 	return ie.CauseRequestAccepted, nil
 }
 func (f *fakeS5CClient) ModifyBearerFromS11(_ context.Context, _ *session.SGWSession, req *message.ModifyBearerRequest) (uint8, error) {
@@ -345,7 +347,7 @@ func TestBeginProcedureWarnsOnDownPeer(t *testing.T) {
 		t.Fatal("beginProcedure rejected procedure; want warning only")
 	}
 	defer finishProcedure(sess, proc)
-	if !logs.HasMessage("GTPv2-C procedure started toward down peer") {
+	if !logs.HasMessage("GTPv2-C procedure toward down peer") {
 		t.Fatalf("warning log messages = %+v; want down-peer procedure warning", logs.Messages())
 	}
 }
@@ -378,8 +380,39 @@ func TestBeginProcedureDownPeerWarningCanBeDisabled(t *testing.T) {
 		t.Fatal("beginProcedure rejected procedure; want warning-only feature disabled")
 	}
 	defer finishProcedure(sess, proc)
-	if logs.HasMessage("GTPv2-C procedure started toward down peer") {
+	if logs.HasMessage("GTPv2-C procedure toward down peer") {
 		t.Fatalf("warning log messages = %+v; want no down-peer procedure warning", logs.Messages())
+	}
+}
+
+func TestBeginProcedureBlocksDownPGWWhenConfigured(t *testing.T) {
+	_, sess := testCollisionSession(t)
+	cfg := sgwcconfig.Default()
+	cfg.GTPC.PGWFailure.BlockNewProceduresToDownPGW = true
+	peers := peerhealth.NewTable(slog.New(slog.DiscardHandler))
+	addr := &net.UDPAddr{IP: net.ParseIP("192.0.2.10"), Port: 2123}
+	peers.Observe(peerhealth.RolePGW, addr, message.MsgTypeCreateBearerRequest, 1, nil)
+	for seq := uint32(2); seq <= 4; seq++ {
+		peers.MarkEchoTimeout(peerhealth.RolePGW, addr.String(), seq, peerhealth.ProbeConfig{
+			SuspectAfterMissed: 2,
+			DownAfterMissed:    3,
+			DegradedRTT:        500 * time.Millisecond,
+		})
+	}
+
+	h := &Handler{
+		cfg:              cfg,
+		log:              slog.Default(),
+		peerHealth:       peers,
+		collisionMode:    collision.ModeStrict,
+		collisionTimeout: collision.DefaultActiveProcedureTimeout,
+	}
+	proc, ok := h.beginProcedure(sess, pgwProcedureRequest(collision.ProcedureCreateBearer, addr, sess.PGWControlFTEID.TEID, 0x10207, []uint8{5}))
+	if ok {
+		t.Fatalf("beginProcedure returned ok with proc %+v; want down PGW block", proc)
+	}
+	if active := sess.ProcedureTracker().Active(); len(active) != 0 {
+		t.Fatalf("active procedures after PGW block = %+v; want none", active)
 	}
 }
 

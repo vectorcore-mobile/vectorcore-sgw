@@ -46,6 +46,28 @@ type PFCPSessionBinding struct {
 	Established bool
 }
 
+// PGWPathState records SGW-C's view of the S5/S8-C PGW path for this PDN.
+type PGWPathState string
+
+const (
+	PGWPathStateUnknown   PGWPathState = "unknown"
+	PGWPathStateUp        PGWPathState = "up"
+	PGWPathStateDegraded  PGWPathState = "degraded"
+	PGWPathStateSuspect   PGWPathState = "suspect"
+	PGWPathStateDown      PGWPathState = "down"
+	PGWPathStateRestarted PGWPathState = "restarted"
+)
+
+// PGWFailureStatus is an API-safe snapshot of PGW path/restart state.
+type PGWFailureStatus struct {
+	PathState         PGWPathState
+	PGWAddr           string
+	PathDownAt        time.Time
+	RestartDetectedAt time.Time
+	RecoverySeen      bool
+	RecoveryCounter   uint8
+}
+
 // SecondaryRATUsageDataReport records an opaque Rel-15 Secondary RAT Usage
 // Data Report IE payload received on S11. Interpretation/forwarding is handled
 // by higher procedure phases; session state keeps the exact report bytes.
@@ -84,6 +106,7 @@ type SGWSession struct {
 	PFCP                         PFCPSessionBinding
 	Procedures                   *collision.Tracker
 	SecondaryRATUsageDataReports []SecondaryRATUsageDataReport
+	PGWFailure                   PGWFailureStatus
 
 	State     SessionState
 	CreatedAt time.Time
@@ -264,6 +287,48 @@ func (s *SGWSession) SecondaryRATUsageReports() []SecondaryRATUsageDataReport {
 		out[i].Payload = append([]byte(nil), report.Payload...)
 	}
 	return out
+}
+
+// PGWFailureSnapshot returns the current PGW path/restart state for this session.
+func (s *SGWSession) PGWFailureSnapshot() PGWFailureStatus {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.PGWFailure
+}
+
+// SetPGWPathState updates this session's PGW path state.
+func (s *SGWSession) SetPGWPathState(state PGWPathState, pgwAddr string, at time.Time) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if at.IsZero() {
+		at = time.Now()
+	}
+	s.PGWFailure.PathState = state
+	if pgwAddr != "" {
+		s.PGWFailure.PGWAddr = pgwAddr
+	}
+	if state == PGWPathStateDown && s.PGWFailure.PathDownAt.IsZero() {
+		s.PGWFailure.PathDownAt = at
+	}
+	if state == PGWPathStateUp {
+		s.PGWFailure.PathDownAt = time.Time{}
+	}
+	s.UpdatedAt = at
+}
+
+// MarkPGWRestart records that the owning PGW has advertised a changed Recovery IE.
+func (s *SGWSession) MarkPGWRestart(pgwAddr string, recovery uint8, at time.Time) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if at.IsZero() {
+		at = time.Now()
+	}
+	s.PGWFailure.PathState = PGWPathStateRestarted
+	s.PGWFailure.PGWAddr = pgwAddr
+	s.PGWFailure.RestartDetectedAt = at
+	s.PGWFailure.RecoverySeen = true
+	s.PGWFailure.RecoveryCounter = recovery
+	s.UpdatedAt = at
 }
 
 func validTransition(from, to SessionState) bool {

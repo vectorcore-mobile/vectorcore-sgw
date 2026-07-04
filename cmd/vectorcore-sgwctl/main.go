@@ -84,6 +84,8 @@ func run(args []string, stdout, stderr io.Writer) error {
 		return c.fetchBoth("/pfcp/associations")
 	case "gtpc-peers":
 		return c.fetch("SGW-C GTP-C peer health", c.sgwcAPI, "/gtpc/peers")
+	case "pgw-failures":
+		return c.fetch("SGW-C PGW failure state", c.sgwcAPI, "/gtpc/pgw-failures")
 	case "bpf":
 		return c.fetch("SGW-U BPF rules", c.sgwuAPI, "/bpf/rules")
 	default:
@@ -110,6 +112,7 @@ func usage(w io.Writer, fs *flag.FlagSet) {
 	fmt.Fprintf(w, "  bearers    List SGW-C sessions with bearer details\n")
 	fmt.Fprintf(w, "  pfcp       Show SGW-C and SGW-U PFCP association status\n")
 	fmt.Fprintf(w, "  gtpc-peers Show SGW-C GTP-C peer health\n")
+	fmt.Fprintf(w, "  pgw-failures Show SGW-C PGW path and restart state\n")
 	fmt.Fprintf(w, "  bpf        Show SGW-U BPF map state\n")
 	fmt.Fprintf(w, "\nValidate examples:\n")
 	fmt.Fprintf(w, "  vectorcore-sgwctl validate -sgwc configs/sgw-c.yaml -sgwu configs/sgw-u.yaml\n")

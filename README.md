@@ -31,6 +31,9 @@ dataplane.
 - Dynamic GTPv2-C Echo probing and peer health tracking for observed MME and
   PGW peers, including RTT, missed Echo counters, Recovery IE restart tracking,
   API visibility, Prometheus metrics, and down-peer procedure warnings.
+- PGW restart and S5/S8-C path-failure manager with PGW-to-session indexing,
+  affected-session marking, API visibility, Prometheus metrics, and
+  configurable warning/blocking policy for procedures toward a down PGW.
 - Static outer IP DSCP marking for SGW-C GTP-C, SGW-C PFCP, SGW-U PFCP, and
   SGW-U forwarded GTP-U.
 - QCI-aware GTP-U outer DSCP marking in SGW-U using operator-configured
@@ -146,6 +149,7 @@ sessions       list SGW-C sessions
 bearers        list SGW-C sessions with bearer details
 pfcp           show SGW-C and SGW-U PFCP association status
 gtpc-peers     show SGW-C GTP-C peer health
+pgw-failures   show SGW-C PGW path and restart state
 bpf            show SGW-U BPF map state
 ```
 
@@ -198,6 +202,12 @@ gtpc:
     probe_mme_peers: true
     probe_pgw_peers: true
     warn_on_down_peer_procedure: true
+  pgw_failure:
+    enabled: true
+    mark_sessions_on_path_down: true
+    mark_sessions_on_restart: true
+    block_new_procedures_to_down_pgw: false
+    notify_mme_on_pgw_restart: false
 
 s11:
   t3_response_seconds: 3
@@ -261,7 +271,12 @@ SGW-C options:
 | `gtpc.peer_health.degraded_rtt_ms` | RTT threshold for `degraded` state. Default 500. |
 | `gtpc.peer_health.probe_mme_peers` | Enables Echo probing for observed MME GTP-C peers. |
 | `gtpc.peer_health.probe_pgw_peers` | Enables Echo probing for observed PGW GTP-C peers. |
-| `gtpc.peer_health.warn_on_down_peer_procedure` | Logs a warning when a procedure starts toward a peer currently marked `down`; procedures are not blocked. |
+| `gtpc.peer_health.warn_on_down_peer_procedure` | Logs a warning when a procedure starts toward a peer currently marked `down`. |
+| `gtpc.pgw_failure.enabled` | Enables PGW restart/path-failure session marking. |
+| `gtpc.pgw_failure.mark_sessions_on_path_down` | Marks sessions indexed to a PGW when that PGW transitions down or back up. |
+| `gtpc.pgw_failure.mark_sessions_on_restart` | Marks sessions indexed to a PGW when that PGW's Recovery IE restart counter changes. |
+| `gtpc.pgw_failure.block_new_procedures_to_down_pgw` | If true, rejects new PGW-owned S5/S8-C procedures toward a PGW currently marked down. Default false, warning-only. |
+| `gtpc.pgw_failure.notify_mme_on_pgw_restart` | Reserved for future TS 29.274 PGW Restart Notification support. Must be false in this release. |
 | `s11.t3_response_seconds` | GTPv2-C retransmission timeout. |
 | `s11.n3_requests` | GTPv2-C retransmission count. |
 | `pfcp.local_addr` | SGW-C PFCP local address. |
@@ -297,6 +312,10 @@ SGW-C exports the following control-plane metrics on its Prometheus listener:
 | `sgwc_gtpc_peer_echo_responses_total` | Count of GTPv2-C Echo Responses received by role and peer. |
 | `sgwc_gtpc_peer_echo_timeouts_total` | Count of GTPv2-C Echo timeouts by role and peer. |
 | `sgwc_gtpc_peer_restarts_total` | Count of Recovery IE restart-counter changes by role and peer. |
+| `sgwc_pgw_path_state` | One-hot PGW path/restart state gauge by PGW and state. |
+| `sgwc_pgw_affected_sessions` | Current count of sessions affected by PGW path/restart state. |
+| `sgwc_pgw_restarts_total` | Count of PGW Recovery IE restart-counter changes handled by SGW-C. |
+| `sgwc_pgw_path_down_total` | Count of PGW path-down transitions handled by SGW-C. |
 | `sgwc_nsa_secondary_rat_usage_reports_captured_total` | Count of Release 15 Secondary RAT Usage Data Report IEs captured on S11 by APN and source procedure. |
 | `sgwc_nsa_secondary_rat_usage_reports_forwarded_total` | Count of Release 15 Secondary RAT Usage Data Report IEs forwarded on S5/S8-C by APN and resulting cause. |
 
@@ -305,6 +324,9 @@ Additional transaction collision behavior and validation notes are in
 
 GTPv2-C peer health behavior and validation notes are in
 `docs/gtpc-peer-health.md`.
+
+PGW restart and path-failure behavior and validation notes are in
+`docs/pgw-restart-path-failure.md`.
 
 NSA/DCNR Secondary RAT report behavior and validation notes are in
 `docs/5g-nsa-dcnr-awareness.md`.

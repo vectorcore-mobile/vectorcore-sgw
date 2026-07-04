@@ -60,11 +60,21 @@ func (c *Config) Validate() error {
 	if err := c.validatePeerHealth(); err != nil {
 		return err
 	}
+	if err := c.validatePGWFailure(); err != nil {
+		return err
+	}
 	if err := validateDSCP("qos.outer_marking.gtpc.dscp", c.QoS.OuterMarking.GTPC.DSCP); err != nil {
 		return err
 	}
 	if err := validateDSCP("qos.outer_marking.pfcp.dscp", c.QoS.OuterMarking.PFCP.DSCP); err != nil {
 		return err
+	}
+	return nil
+}
+
+func (c *Config) validatePGWFailure() error {
+	if c.GTPC.PGWFailure.NotifyMMEOnPGWRestart {
+		return fmt.Errorf("gtpc.pgw_failure.notify_mme_on_pgw_restart is not supported yet; PGW restart notification requires TS 29.274 message support and MME lab validation")
 	}
 	return nil
 }

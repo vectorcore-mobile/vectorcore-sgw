@@ -47,6 +47,15 @@ type SecondaryRATUsageReportView struct {
 	PayloadLength   int       `json:"payload_length"`
 }
 
+type PGWFailureView struct {
+	PathState         string    `json:"path_state"`
+	PGWAddr           string    `json:"pgw_addr,omitempty"`
+	PathDownAt        time.Time `json:"path_down_at,omitempty"`
+	RestartDetectedAt time.Time `json:"restart_detected_at,omitempty"`
+	RecoverySeen      bool      `json:"recovery_seen"`
+	RecoveryCounter   uint8     `json:"recovery_counter"`
+}
+
 // SessionView is the API representation of an SGW-C session.
 type SessionView struct {
 	SessionID                    string                        `json:"session_id"`
@@ -66,6 +75,7 @@ type SessionView struct {
 	Bearers                      []BearerView                  `json:"bearers"`
 	SecondaryRATUsageReportCount int                           `json:"secondary_rat_usage_report_count"`
 	SecondaryRATUsageDataReports []SecondaryRATUsageReportView `json:"secondary_rat_usage_data_reports"`
+	PGWFailure                   PGWFailureView                `json:"pgw_failure"`
 	CreatedAt                    time.Time                     `json:"created_at"`
 	UpdatedAt                    time.Time                     `json:"updated_at"`
 }
@@ -153,8 +163,20 @@ func sessionToView(s *session.SGWSession) SessionView {
 		Bearers:                      views,
 		SecondaryRATUsageReportCount: len(reports),
 		SecondaryRATUsageDataReports: reports,
+		PGWFailure:                   pgwFailureToView(s.PGWFailureSnapshot()),
 		CreatedAt:                    s.CreatedAt,
 		UpdatedAt:                    s.UpdatedAt,
+	}
+}
+
+func pgwFailureToView(status session.PGWFailureStatus) PGWFailureView {
+	return PGWFailureView{
+		PathState:         string(status.PathState),
+		PGWAddr:           status.PGWAddr,
+		PathDownAt:        status.PathDownAt,
+		RestartDetectedAt: status.RestartDetectedAt,
+		RecoverySeen:      status.RecoverySeen,
+		RecoveryCounter:   status.RecoveryCounter,
 	}
 }
 

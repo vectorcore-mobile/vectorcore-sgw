@@ -22,6 +22,7 @@ import (
 	"vectorcore-sgw/internal/metrics"
 	"vectorcore-sgw/internal/sgwc/peerhealth"
 	"vectorcore-sgw/internal/sgwc/pfcpclient"
+	"vectorcore-sgw/internal/sgwc/pgwfailure"
 	"vectorcore-sgw/internal/sgwc/recovery"
 	"vectorcore-sgw/internal/sgwc/s11"
 	"vectorcore-sgw/internal/sgwc/s5c"
@@ -131,6 +132,12 @@ func main() {
 
 	sessions := session.NewManager()
 	gtpcPeers := peerhealth.NewTable(logger.Logger)
+	pgwFailureHandler := pgwfailure.NewHandler(sessions, pgwfailure.Config{
+		Enabled:                cfg.GTPC.PGWFailure.Enabled,
+		MarkSessionsOnPathDown: cfg.GTPC.PGWFailure.MarkSessionsOnPathDown,
+		MarkSessionsOnRestart:  cfg.GTPC.PGWFailure.MarkSessionsOnRestart,
+	}, logger.Logger)
+	gtpcPeers.SetEventHandler(pgwFailureHandler)
 
 	pfcpClient, err := pfcpclient.New(cfg, time.Now(), logger.Logger)
 	if err != nil {
@@ -191,6 +198,7 @@ func main() {
 	collisionMetrics := metrics.NewCollisionMetrics(metricsSrv.Registry())
 	nsaMetrics := metrics.NewNSAMetrics(metricsSrv.Registry())
 	metrics.NewGTPCPeerMetrics(metricsSrv.Registry(), gtpcPeers)
+	metrics.NewPGWFailureMetrics(metricsSrv.Registry(), pgwFailureHandler)
 	pfcpClient.SetPeerStateCallback(func(peerName, peerAddr string, state pfcpclient.PeerState) {
 		pfcpMetrics.OnPeerStateChange(peerName, peerAddr, string(state))
 		if state == pfcpclient.PeerStateDown {
@@ -215,6 +223,7 @@ func main() {
 	api.RegisterSGWCRoutes(apiSrv.HumaAPI(), sessions)
 	api.RegisterPFCPRoutes(apiSrv.HumaAPI(), pfcpClient)
 	api.RegisterGTPCPeerRoutes(apiSrv.HumaAPI(), gtpcPeers)
+	api.RegisterPGWFailureRoutes(apiSrv.HumaAPI(), pgwFailureHandler)
 	if err := apiSrv.Start(ctx); err != nil {
 		logger.Error("API server failed to start", "error", err)
 		os.Exit(1)

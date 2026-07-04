@@ -54,6 +54,7 @@ type GTPCConfig struct {
 	TransactionCollision   TransactionCollisionConfig   `yaml:"transaction_collision"`
 	NSADCNR                NSADCNRConfig                `yaml:"nsa_dcnr"`
 	PeerHealth             PeerHealthConfig             `yaml:"peer_health"`
+	PGWFailure             PGWFailureConfig             `yaml:"pgw_failure"`
 }
 
 type GTPCLogical struct {
@@ -91,6 +92,14 @@ type PeerHealthConfig struct {
 	ProbeMMEPeers           bool `yaml:"probe_mme_peers"`
 	ProbePGWPeers           bool `yaml:"probe_pgw_peers"`
 	WarnOnDownPeerProcedure bool `yaml:"warn_on_down_peer_procedure"`
+}
+
+type PGWFailureConfig struct {
+	Enabled                     bool `yaml:"enabled"`
+	MarkSessionsOnPathDown      bool `yaml:"mark_sessions_on_path_down"`
+	MarkSessionsOnRestart       bool `yaml:"mark_sessions_on_restart"`
+	BlockNewProceduresToDownPGW bool `yaml:"block_new_procedures_to_down_pgw"`
+	NotifyMMEOnPGWRestart       bool `yaml:"notify_mme_on_pgw_restart"`
 }
 
 type S11Config struct {
@@ -179,6 +188,13 @@ func Default() *Config {
 				ProbeMMEPeers:           true,
 				ProbePGWPeers:           true,
 				WarnOnDownPeerProcedure: true,
+			},
+			PGWFailure: PGWFailureConfig{
+				Enabled:                     true,
+				MarkSessionsOnPathDown:      true,
+				MarkSessionsOnRestart:       true,
+				BlockNewProceduresToDownPGW: false,
+				NotifyMMEOnPGWRestart:       false,
 			},
 		},
 		QoS: QoSConfig{
