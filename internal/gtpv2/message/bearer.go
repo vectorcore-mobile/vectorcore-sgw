@@ -1,5 +1,6 @@
 // bearer.go implements Create/Update/Delete Bearer Request and Response messages
-// per 3GPP TS 29.274 Rel-15 §7.2.3, §7.2.4, §7.2.9.2, §7.2.10.2, §7.2.15, §7.2.16.
+// per 3GPP TS 29.274 Rel-15 §7.2.3, §7.2.4, §7.2.9.2, §7.2.10.2, §7.2.15, §7.2.16,
+// and MME-initiated Delete Bearer Command/Failure Indication per §7.2.17.
 package message
 
 import (
@@ -375,6 +376,110 @@ func MarshalDeleteBearerResponse(peerTEID, seq uint32, ies ...*ie.IE) ([]byte, e
 		Version:        2,
 		HasTEID:        true,
 		MessageType:    MsgTypeDeleteBearerResponse, // Table 6.1-1: 100
+		TEID:           peerTEID,
+		SequenceNumber: seq,
+	}
+	return Marshal(h, ies)
+}
+
+// ── Delete Bearer Command (MsgType=66) ──────────────────────────────────────
+// Per TS 29.274 Rel-15 Table 7.2.17.1-1.
+//
+// On S11 interface — MME→SGW-C for MME initiated dedicated bearer deactivation:
+//   Bearer Contexts (BC inst=0): M — dedicated bearers to be deleted.
+//
+// On S5/S8 interface — SGW-C→PGW-C:
+//   Bearer Contexts are forwarded; Sender F-TEID for Control Plane is conditional
+//   and should be added by the SGW on S5/S8.
+
+type DeleteBearerCommand struct {
+	Header
+	BearerContexts []*ie.IE
+	IEs            []*ie.IE
+}
+
+func ParseDeleteBearerCommand(b []byte) (*DeleteBearerCommand, error) {
+	h, ies, err := Parse(b)
+	if err != nil {
+		return nil, err
+	}
+	if h.MessageType != MsgTypeDeleteBearerCommand {
+		return nil, fmt.Errorf("DeleteBearerCommand: wrong message type %d (want %d)", h.MessageType, MsgTypeDeleteBearerCommand)
+	}
+	cmd := &DeleteBearerCommand{Header: h, IEs: ies}
+	for _, i := range ies {
+		if i.Type == ie.TypeBearerContext && i.Instance == 0 {
+			cmd.BearerContexts = append(cmd.BearerContexts, i)
+		}
+	}
+	if len(cmd.BearerContexts) == 0 {
+		return nil, fmt.Errorf("DeleteBearerCommand: missing M-IE Bearer Contexts per Table 7.2.17.1-1")
+	}
+	for idx, bcIE := range cmd.BearerContexts {
+		children, cErr := bcIE.ChildIEs()
+		if cErr != nil {
+			return nil, fmt.Errorf("DeleteBearerCommand: bearer context[%d] malformed: %w", idx, cErr)
+		}
+		if ie.FindFirst(children, ie.TypeEBI) == nil {
+			return nil, fmt.Errorf("DeleteBearerCommand: bearer context[%d] missing EBI", idx)
+		}
+	}
+	return cmd, nil
+}
+
+func MarshalDeleteBearerCommand(peerTEID, seq uint32, ies ...*ie.IE) ([]byte, error) {
+	h := Header{
+		Version:        2,
+		HasTEID:        true,
+		MessageType:    MsgTypeDeleteBearerCommand,
+		TEID:           peerTEID,
+		SequenceNumber: seq,
+	}
+	return Marshal(h, ies)
+}
+
+// ── Delete Bearer Failure Indication (MsgType=67) ───────────────────────────
+// Per TS 29.274 Rel-15 Table 7.2.17.2-1:
+//   Cause (inst=0): M
+//   Bearer Context (inst=0): M — failed bearers.
+
+type DeleteBearerFailureIndication struct {
+	Header
+	Cause          *ie.IE
+	BearerContexts []*ie.IE
+}
+
+func ParseDeleteBearerFailureIndication(b []byte) (*DeleteBearerFailureIndication, error) {
+	h, ies, err := Parse(b)
+	if err != nil {
+		return nil, err
+	}
+	if h.MessageType != MsgTypeDeleteBearerFailureIndication {
+		return nil, fmt.Errorf("DeleteBearerFailureIndication: wrong message type %d (want %d)", h.MessageType, MsgTypeDeleteBearerFailureIndication)
+	}
+	ind := &DeleteBearerFailureIndication{Header: h}
+	for _, i := range ies {
+		switch {
+		case i.Type == ie.TypeCause && i.Instance == 0:
+			ind.Cause = i
+		case i.Type == ie.TypeBearerContext && i.Instance == 0:
+			ind.BearerContexts = append(ind.BearerContexts, i)
+		}
+	}
+	if ind.Cause == nil {
+		return nil, fmt.Errorf("DeleteBearerFailureIndication: missing M-IE Cause per Table 7.2.17.2-1")
+	}
+	if len(ind.BearerContexts) == 0 {
+		return nil, fmt.Errorf("DeleteBearerFailureIndication: missing M-IE Bearer Context per Table 7.2.17.2-1")
+	}
+	return ind, nil
+}
+
+func MarshalDeleteBearerFailureIndication(peerTEID, seq uint32, ies ...*ie.IE) ([]byte, error) {
+	h := Header{
+		Version:        2,
+		HasTEID:        true,
+		MessageType:    MsgTypeDeleteBearerFailureIndication,
 		TEID:           peerTEID,
 		SequenceNumber: seq,
 	}

@@ -52,6 +52,7 @@ type Handler struct {
 type gtpcConn interface {
 	AllocSeq() uint32
 	Send(ctx context.Context, addr *net.UDPAddr, raw []byte) ([]byte, error)
+	Reply(addr *net.UDPAddr, raw []byte) error
 	Serve(ctx context.Context) error
 	Close() error
 	LocalAddr() net.Addr
@@ -243,6 +244,9 @@ func (h *Handler) handle(conn *transport.Conn, addr *net.UDPAddr, hdr message.He
 	case message.MsgTypeReleaseAccessBearersRequest:
 		h.observeGTPPeer(peerhealth.RoleMME, addr, hdr, ies)
 		h.handleReleaseAccessBearersRequest(conn, addr, hdr, ies)
+	case message.MsgTypeDeleteBearerCommand:
+		h.observeGTPPeer(peerhealth.RoleMME, addr, hdr, ies)
+		h.handleDeleteBearerCommand(conn, addr, hdr, raw)
 	case message.MsgTypeUpdateBearerResponse, message.MsgTypeDeleteBearerResponse:
 		h.observeGTPPeer(peerhealth.RoleMME, addr, hdr, ies)
 		h.handleLateBearerResponse(addr, hdr, ies)

@@ -50,6 +50,7 @@ type createBearerShapeIE struct {
 type fakeGTPCConn struct {
 	nextSeq uint32
 	sends   [][]byte
+	replies [][]byte
 	resp    []byte
 }
 
@@ -61,6 +62,11 @@ func (f *fakeGTPCConn) AllocSeq() uint32 {
 func (f *fakeGTPCConn) Send(_ context.Context, _ *net.UDPAddr, raw []byte) ([]byte, error) {
 	f.sends = append(f.sends, append([]byte(nil), raw...))
 	return append([]byte(nil), f.resp...), nil
+}
+
+func (f *fakeGTPCConn) Reply(_ *net.UDPAddr, raw []byte) error {
+	f.replies = append(f.replies, append([]byte(nil), raw...))
+	return nil
 }
 
 func (f *fakeGTPCConn) Serve(context.Context) error { return nil }
@@ -259,6 +265,69 @@ func TestHandleS5CDeleteBearerRejectsTransactionCollision(t *testing.T) {
 	assertBearerCauseResponse(t, s5cFake.replies, message.MsgTypeDeleteBearerResponse, sess.PGWControlFTEID.TEID, hdr.SequenceNumber, ie.CauseRequestRejected)
 	if len(gtpc.sends) != 0 {
 		t.Fatalf("S11 sends after collided Delete Bearer = %d; want 0", len(gtpc.sends))
+	}
+}
+
+func TestHandleS11DeleteBearerCommandRelaysToPGWAndRemovesBearer(t *testing.T) {
+	mgr, sess := testCollisionSession(t)
+	sess.SetBearer(&bearer.Bearer{
+		EBI:    7,
+		QCI:    1,
+		State:  bearer.BearerStateActive,
+		PDRIDs: [2]uint32{3, 4},
+		FARIDs: [2]uint32{3, 4},
+	})
+	s5cFake := &fakeS5CClient{}
+	pfcpFake := &fakePFCPClient{}
+	gtpc := &fakeGTPCConn{}
+	h := &Handler{
+		conn:     gtpc,
+		log:      slog.Default(),
+		sessions: mgr,
+		s5c:      s5cFake,
+		pfcp:     pfcpFake,
+		localIP:  netip.MustParseAddr("10.90.250.59"),
+	}
+	mmeAddr := &net.UDPAddr{IP: net.ParseIP("10.90.250.77"), Port: 30096}
+	hdr := message.Header{
+		Version:        2,
+		HasTEID:        true,
+		MessageType:    message.MsgTypeDeleteBearerCommand,
+		TEID:           sess.SGWS11FTEID.TEID,
+		SequenceNumber: 0x222222,
+	}
+	raw, err := message.MarshalDeleteBearerCommand(hdr.TEID, hdr.SequenceNumber,
+		ie.NewBearerContext(0, ie.NewEBI(7)))
+	if err != nil {
+		t.Fatalf("Marshal Delete Bearer Command: %v", err)
+	}
+
+	h.handle(nil, mmeAddr, hdr, raw)
+
+	if sess.GetBearer(7) != nil {
+		t.Fatal("dedicated bearer EBI 7 still exists after Delete Bearer Command")
+	}
+	if pfcpFake.removes != 1 {
+		t.Fatalf("PFCP RemoveBearerRules calls = %d; want 1", pfcpFake.removes)
+	}
+	if len(s5cFake.replies) != 1 {
+		t.Fatalf("S5C sends = %d; want 1 Delete Bearer Command to PGW", len(s5cFake.replies))
+	}
+	outHdr, outIEs, err := message.Parse(s5cFake.replies[0])
+	if err != nil {
+		t.Fatalf("Parse S5C Delete Bearer Command: %v", err)
+	}
+	if outHdr.MessageType != message.MsgTypeDeleteBearerCommand {
+		t.Fatalf("S5C message type = %d; want Delete Bearer Command", outHdr.MessageType)
+	}
+	if outHdr.TEID != sess.PGWControlFTEID.TEID {
+		t.Fatalf("S5C Delete Bearer Command TEID = 0x%08X; want PGW TEID 0x%08X", outHdr.TEID, sess.PGWControlFTEID.TEID)
+	}
+	if sender := ie.FindInstance(outIEs, ie.TypeFTEID, 0); sender == nil {
+		t.Fatal("S5C Delete Bearer Command missing Sender F-TEID for Control Plane")
+	}
+	if len(gtpc.replies) != 0 {
+		t.Fatalf("S11 failure indications = %d; want 0 on successful command", len(gtpc.replies))
 	}
 }
 

@@ -189,6 +189,8 @@ func (h *Handler) HandleS5CInbound(conn *transport.Conn, pgwAddr *net.UDPAddr, h
 		h.handleUpdateBearer(pgwAddr, hdr, raw)
 	case message.MsgTypeDeleteBearerRequest:
 		h.handleDeleteBearer(pgwAddr, hdr, raw)
+	case message.MsgTypeDeleteBearerFailureIndication:
+		h.handleS5CDeleteBearerFailureIndication(pgwAddr, hdr, raw)
 	default:
 		h.log.Warn("S5C inbound: unhandled message type from PGW",
 			"from", pgwAddr, "msg_type", hdr.MessageType)
@@ -1477,6 +1479,267 @@ func (h *Handler) handleDeleteBearer(pgwAddr *net.UDPAddr, hdr message.Header, r
 
 	h.log.Info("S5C: Delete Bearer completed",
 		"session_id", sess.SessionID, "msg_cause", msgCause)
+}
+
+func (h *Handler) handleDeleteBearerCommand(conn *transport.Conn, mmeAddr *net.UDPAddr, hdr message.Header, raw []byte) {
+	cmd, err := message.ParseDeleteBearerCommand(raw)
+	if err != nil {
+		h.log.Warn("S11: Delete Bearer Command invalid", "from", mmeAddr, "error", err)
+		return
+	}
+	ebis, failedBCs := deleteBearerCommandEBIs(cmd.BearerContexts)
+	if len(ebis) == 0 {
+		h.log.Warn("S11: Delete Bearer Command missing bearer EBIs",
+			"from", mmeAddr,
+			"sgw_s11_teid", fmt.Sprintf("0x%08X", hdr.TEID),
+		)
+		h.replyDeleteBearerFailureIndication(conn, mmeAddr, hdr, 0, ie.CauseMandatoryIEMissing, failedBCs)
+		return
+	}
+
+	type ownerGroup struct {
+		sess *session.SGWSession
+		ebis []uint8
+	}
+	groupsBySession := make(map[string]*ownerGroup)
+	var peerTEID uint32
+	for _, ebi := range ebis {
+		sess := h.sessions.FindByS11TEIDAndBearer(hdr.TEID, ebi)
+		if sess == nil {
+			knownEBIs, knownPDNs := h.knownS11BearerState(hdr.TEID)
+			h.log.Warn("S11: Delete Bearer Command bearer owner not found",
+				"from", mmeAddr,
+				"sgw_s11_teid", fmt.Sprintf("0x%08X", hdr.TEID),
+				"requested_ebi", ebi,
+				"known_ebis", knownEBIs,
+				"known_pdns", knownPDNs,
+			)
+			h.replyDeleteBearerFailureIndication(conn, mmeAddr, hdr, peerTEID, ie.CauseContextNotFound, failedBCs)
+			return
+		}
+		if peerTEID == 0 {
+			peerTEID = sess.MMEControlFTEID.TEID
+		}
+		if ebi == sess.DefaultBearerID {
+			h.log.Warn("S11: Delete Bearer Command requested default bearer; rejecting command",
+				"session_id", sess.SessionID,
+				"imsi", sess.IMSI,
+				"apn", sess.APN,
+				"ebi", ebi,
+			)
+			h.replyDeleteBearerFailureIndication(conn, mmeAddr, hdr, sess.MMEControlFTEID.TEID, ie.CauseRequestRejected, failedBCs)
+			return
+		}
+		group := groupsBySession[sess.SessionID]
+		if group == nil {
+			group = &ownerGroup{sess: sess}
+			groupsBySession[sess.SessionID] = group
+		}
+		group.ebis = append(group.ebis, ebi)
+	}
+
+	for _, group := range groupsBySession {
+		sess := group.sess
+		proc, ok := h.beginProcedure(sess, mmeProcedureRequest(collision.ProcedureDeleteBearer, mmeAddr, hdr.TEID, hdr.SequenceNumber, group.ebis))
+		if !ok {
+			h.replyDeleteBearerFailureIndication(conn, mmeAddr, hdr, sess.MMEControlFTEID.TEID, ie.CauseRequestRejected, bearerContextsForEBIs(group.ebis, ie.CauseRequestRejected))
+			return
+		}
+		defer finishProcedure(sess, proc)
+
+		pgwAddr, pgwErr := pgwAddrForSession(sess)
+		if pgwErr != nil {
+			h.log.Warn("S11: Delete Bearer Command cannot resolve PGW address",
+				"session_id", sess.SessionID,
+				"imsi", sess.IMSI,
+				"apn", sess.APN,
+				"error", pgwErr,
+			)
+			h.replyDeleteBearerFailureIndication(conn, mmeAddr, hdr, sess.MMEControlFTEID.TEID, ie.CauseContextNotFound, bearerContextsForEBIs(group.ebis, ie.CauseContextNotFound))
+			return
+		}
+
+		s5cIEs := deleteBearerCommandIEsForEBIs(cmd.IEs, group.ebis)
+		if ie.FindInstance(s5cIEs, ie.TypeFTEID, 0) == nil && sess.SGWS5CFTEID.TEID != 0 && h.localIP.IsValid() {
+			s5cIEs = append(s5cIEs, ie.NewFTEID(0, ie.IFTypeS5S8CSGW, sess.SGWS5CFTEID.TEID, h.localIP))
+		}
+		s5cRaw, mErr := message.MarshalDeleteBearerCommand(sess.PGWControlFTEID.TEID, h.conn.AllocSeq(), s5cIEs...)
+		if mErr != nil {
+			h.log.Error("S11: Delete Bearer Command marshal toward PGW failed",
+				"session_id", sess.SessionID, "error", mErr)
+			h.replyDeleteBearerFailureIndication(conn, mmeAddr, hdr, sess.MMEControlFTEID.TEID, ie.CauseSystemFailure, bearerContextsForEBIs(group.ebis, ie.CauseSystemFailure))
+			return
+		}
+		if err := h.s5c.ReplyToPGW(pgwAddr, s5cRaw); err != nil {
+			h.log.Warn("S11: Delete Bearer Command send to PGW failed",
+				"session_id", sess.SessionID,
+				"pgw", pgwAddr,
+				"error", err,
+			)
+			h.replyDeleteBearerFailureIndication(conn, mmeAddr, hdr, sess.MMEControlFTEID.TEID, ie.CauseSystemFailure, bearerContextsForEBIs(group.ebis, ie.CauseSystemFailure))
+			return
+		}
+
+		for _, ebi := range group.ebis {
+			h.removeBearerRulesAndState(sess, ebi, "delete-bearer-command")
+		}
+		h.log.Info("S11: Delete Bearer Command handled",
+			"session_id", sess.SessionID,
+			"imsi", sess.IMSI,
+			"apn", sess.APN,
+			"ebis", group.ebis,
+			"pgw", pgwAddr.String(),
+		)
+	}
+}
+
+func (h *Handler) handleS5CDeleteBearerFailureIndication(pgwAddr *net.UDPAddr, hdr message.Header, raw []byte) {
+	ind, err := message.ParseDeleteBearerFailureIndication(raw)
+	if err != nil {
+		h.log.Warn("S5C: Delete Bearer Failure Indication invalid", "from", pgwAddr, "error", err)
+		return
+	}
+	sess := h.sessions.FindByS5CTEID(hdr.TEID)
+	if sess == nil {
+		h.log.Warn("S5C: Delete Bearer Failure Indication — session not found",
+			"teid", fmt.Sprintf("0x%08X", hdr.TEID),
+			"from", pgwAddr,
+		)
+		return
+	}
+	if !sess.MMEControlFTEID.IPv4.IsValid() {
+		h.log.Warn("S5C: Delete Bearer Failure Indication — MME address unavailable",
+			"session_id", sess.SessionID,
+			"imsi", sess.IMSI,
+		)
+		return
+	}
+	mmeIP4 := sess.MMEControlFTEID.IPv4.As4()
+	mmeAddr := &net.UDPAddr{IP: net.IP(mmeIP4[:]), Port: 2123}
+	rawOut, mErr := message.MarshalDeleteBearerFailureIndication(sess.MMEControlFTEID.TEID, h.conn.AllocSeq(), append([]*ie.IE{ind.Cause}, ind.BearerContexts...)...)
+	if mErr != nil {
+		h.log.Error("S5C: Delete Bearer Failure Indication marshal to MME failed", "error", mErr)
+		return
+	}
+	if err := h.conn.Reply(mmeAddr, rawOut); err != nil {
+		h.log.Warn("S5C: Delete Bearer Failure Indication relay to MME failed", "error", err)
+	}
+}
+
+func (h *Handler) removeBearerRulesAndState(sess *session.SGWSession, ebi uint8, reason string) {
+	b := sess.GetBearer(ebi)
+	if b == nil {
+		return
+	}
+	if b.PDRIDs[0] != 0 || b.PDRIDs[1] != 0 {
+		if err := h.pfcp.RemoveBearerRulesOnPeer(context.Background(),
+			sess.PFCP.SGWUAddr,
+			sess.PFCP.LocalFSEID.SEID, sess.PFCP.SGWUFSEID.SEID,
+			[]uint32{b.PDRIDs[0], b.PDRIDs[1]},
+			[]uint32{b.FARIDs[0], b.FARIDs[1]}); err != nil {
+			h.log.Warn("S11: Delete Bearer Command PFCP RemoveBearerRules failed",
+				"session_id", sess.SessionID,
+				"ebi", ebi,
+				"reason", reason,
+				"error", err,
+			)
+		}
+	}
+	sess.DeleteBearer(ebi)
+}
+
+func deleteBearerCommandEBIs(bcs []*ie.IE) ([]uint8, []*ie.IE) {
+	seen := map[uint8]bool{}
+	var ebis []uint8
+	var failed []*ie.IE
+	for _, bcIE := range bcs {
+		children, err := bcIE.ChildIEs()
+		if err != nil {
+			continue
+		}
+		ebiIE := ie.FindFirst(children, ie.TypeEBI)
+		if ebiIE == nil {
+			continue
+		}
+		ebi, err := ebiIE.EBIValue()
+		if err != nil {
+			continue
+		}
+		failed = append(failed, ie.NewBearerContext(0, ie.NewEBI(ebi)))
+		if !seen[ebi] {
+			seen[ebi] = true
+			ebis = append(ebis, ebi)
+		}
+	}
+	return ebis, failed
+}
+
+func bearerContextsForEBIs(ebis []uint8, cause uint8) []*ie.IE {
+	out := make([]*ie.IE, 0, len(ebis))
+	for _, ebi := range ebis {
+		out = append(out, ie.NewBearerContext(0, ie.NewEBI(ebi), ie.NewCause(cause, 0, 0, 0, nil)))
+	}
+	return out
+}
+
+func deleteBearerCommandIEsForEBIs(in []*ie.IE, ebis []uint8) []*ie.IE {
+	wanted := make(map[uint8]bool, len(ebis))
+	for _, ebi := range ebis {
+		wanted[ebi] = true
+	}
+	out := make([]*ie.IE, 0, len(in))
+	for _, i := range in {
+		if i.Type != ie.TypeBearerContext || i.Instance != 0 {
+			out = append(out, i)
+			continue
+		}
+		children, err := i.ChildIEs()
+		if err != nil {
+			continue
+		}
+		ebiIE := ie.FindFirst(children, ie.TypeEBI)
+		if ebiIE == nil {
+			continue
+		}
+		ebi, err := ebiIE.EBIValue()
+		if err == nil && wanted[ebi] {
+			out = append(out, i)
+		}
+	}
+	return out
+}
+
+func (h *Handler) replyDeleteBearerFailureIndication(conn *transport.Conn, mmeAddr *net.UDPAddr, hdr message.Header, peerTEID uint32, cause uint8, failedBCs []*ie.IE) {
+	if conn == nil {
+		h.log.Warn("S11: Delete Bearer Failure Indication not sent; transport unavailable",
+			"to", mmeAddr,
+			"cause", cause,
+		)
+		return
+	}
+	if peerTEID == 0 {
+		peerTEID = hdr.TEID
+	}
+	if len(failedBCs) == 0 {
+		failedBCs = []*ie.IE{ie.NewBearerContext(0, ie.NewCause(cause, 0, 0, 0, nil))}
+	}
+	ies := append([]*ie.IE{ie.NewCause(cause, 0, 0, 0, nil)}, failedBCs...)
+	raw, err := message.MarshalDeleteBearerFailureIndication(peerTEID, hdr.SequenceNumber, ies...)
+	if err != nil {
+		h.log.Error("S11: Delete Bearer Failure Indication marshal failed", "error", err)
+		return
+	}
+	if err := conn.Reply(mmeAddr, raw); err != nil {
+		h.log.Warn("S11: Delete Bearer Failure Indication send failed", "to", mmeAddr, "error", err)
+	}
+}
+
+func pgwAddrForSession(sess *session.SGWSession) (*net.UDPAddr, error) {
+	if !sess.PGWControlFTEID.IPv4.IsValid() {
+		return nil, fmt.Errorf("PGW control F-TEID IPv4 missing")
+	}
+	ip4 := sess.PGWControlFTEID.IPv4.As4()
+	return &net.UDPAddr{IP: net.IP(ip4[:]), Port: 2123}, nil
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────

@@ -301,6 +301,8 @@ func TestBearerTFTWire(t *testing.T) {
 //   98 = Update Bearer Response
 //   99 = Delete Bearer Request
 //  100 = Delete Bearer Response
+//   66 = Delete Bearer Command
+//   67 = Delete Bearer Failure Indication
 
 func TestBearerMessageTypeConstants(t *testing.T) {
 	cases := []struct {
@@ -314,6 +316,8 @@ func TestBearerMessageTypeConstants(t *testing.T) {
 		{"UpdateBearerResponse", message.MsgTypeUpdateBearerResponse, 98},
 		{"DeleteBearerRequest", message.MsgTypeDeleteBearerRequest, 99},
 		{"DeleteBearerResponse", message.MsgTypeDeleteBearerResponse, 100},
+		{"DeleteBearerCommand", message.MsgTypeDeleteBearerCommand, 66},
+		{"DeleteBearerFailureIndication", message.MsgTypeDeleteBearerFailureIndication, 67},
 	}
 	for _, tc := range cases {
 		if tc.typ != tc.want {
