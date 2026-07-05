@@ -1253,9 +1253,19 @@ func (h *Handler) handleUpdateBearer(pgwAddr *net.UDPAddr, hdr message.Header, r
 	}
 
 	msgCause, _ := ubResp.Cause.CauseValue()
+	ubRespBearerContexts := ubResp.BearerContexts
+	if len(ubRespBearerContexts) == 0 && msgCause == ie.CauseRequestAccepted {
+		ubRespBearerContexts = acceptedUpdateBearerContextsFromRequest(ubReq.BearerContexts)
+		h.log.Warn("S5C: Update Bearer — S11 UBResp missing Bearer Contexts; accepting top-level Cause and synthesizing bearer results",
+			"session_id", sess.SessionID,
+			"imsi", sess.IMSI,
+			"apn", sess.APN,
+			"bearer_contexts", len(ubRespBearerContexts),
+		)
+	}
 
 	// Update local bearer state for accepted bearers.
-	for _, bcIE := range ubResp.BearerContexts {
+	for _, bcIE := range ubRespBearerContexts {
 		children, cErr := bcIE.ChildIEs()
 		if cErr != nil {
 			continue
@@ -1308,9 +1318,9 @@ func (h *Handler) handleUpdateBearer(pgwAddr *net.UDPAddr, hdr message.Header, r
 	}
 
 	// Build S5/S8-C UBResp and relay to PGW.
-	s5cRespIEs := make([]*ie.IE, 0, 1+len(ubResp.BearerContexts))
+	s5cRespIEs := make([]*ie.IE, 0, 1+len(ubRespBearerContexts))
 	s5cRespIEs = append(s5cRespIEs, ie.NewCause(msgCause, 0, 0, 0, nil))
-	s5cRespIEs = append(s5cRespIEs, ubResp.BearerContexts...)
+	s5cRespIEs = append(s5cRespIEs, ubRespBearerContexts...)
 	s5cResp, err := message.MarshalUpdateBearerResponse(
 		sess.PGWControlFTEID.TEID, hdr.SequenceNumber, s5cRespIEs...)
 	if err != nil {
@@ -1323,6 +1333,29 @@ func (h *Handler) handleUpdateBearer(pgwAddr *net.UDPAddr, hdr message.Header, r
 
 	h.log.Info("S5C: Update Bearer completed",
 		"session_id", sess.SessionID, "msg_cause", msgCause)
+}
+
+func acceptedUpdateBearerContextsFromRequest(reqBCs []*ie.IE) []*ie.IE {
+	out := make([]*ie.IE, 0, len(reqBCs))
+	for _, reqBC := range reqBCs {
+		children, err := reqBC.ChildIEs()
+		if err != nil {
+			continue
+		}
+		ebiIE := ie.FindFirst(children, ie.TypeEBI)
+		if ebiIE == nil {
+			continue
+		}
+		ebi, err := ebiIE.EBIValue()
+		if err != nil {
+			continue
+		}
+		out = append(out, ie.NewBearerContext(0,
+			ie.NewEBI(ebi),
+			ie.NewCause(ie.CauseRequestAccepted, 0, 0, 0, nil),
+		))
+	}
+	return out
 }
 
 // ── Delete Bearer ─────────────────────────────────────────────────────────────

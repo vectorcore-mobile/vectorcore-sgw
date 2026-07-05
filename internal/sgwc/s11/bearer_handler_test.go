@@ -262,12 +262,12 @@ func TestHandleS5CDeleteBearerRejectsTransactionCollision(t *testing.T) {
 	}
 }
 
-func TestBeginProcedureRejectsS11SessionWideCollision(t *testing.T) {
+func TestBeginProcedureAllowsS11DeleteSessionDuringBearerProcedure(t *testing.T) {
 	_, sess := testCollisionSession(t)
 	metrics := &fakeCollisionMetrics{}
 	h := &Handler{log: slog.Default()}
 	h.SetCollisionMetrics(metrics)
-	active, dec := sess.ProcedureTracker().Begin(collision.Request{
+	_, dec := sess.ProcedureTracker().Begin(collision.Request{
 		Procedure: collision.ProcedureCreateBearer,
 		Owner:     collision.OwnerPGW,
 		EBIs:      []uint8{5},
@@ -277,21 +277,18 @@ func TestBeginProcedureRejectsS11SessionWideCollision(t *testing.T) {
 	}
 	addr := &net.UDPAddr{IP: net.ParseIP("10.90.250.77"), Port: 30096}
 	proc, ok := h.beginProcedure(sess, mmeProcedureRequest(collision.ProcedureDeleteSession, addr, sess.SGWS11FTEID.TEID, 0x10205, []uint8{5}))
-	if ok {
-		t.Fatalf("beginProcedure returned ok with proc %+v; want collision rejection", proc)
+	if !ok {
+		t.Fatalf("beginProcedure returned !ok; want Delete Session accepted during active bearer procedure")
+	}
+	if proc.ID == 0 || proc.Procedure != collision.ProcedureDeleteSession {
+		t.Fatalf("beginProcedure proc = %+v; want Delete Session active procedure", proc)
 	}
 	activeNow := sess.ProcedureTracker().Active()
-	if len(activeNow) != 1 || activeNow[0].ID != active.ID {
-		t.Fatalf("active procedures after S11 collision = %+v; want original proc only", activeNow)
+	if len(activeNow) != 2 {
+		t.Fatalf("active procedures after Delete Session = %+v; want original bearer proc plus Delete Session", activeNow)
 	}
-	if metrics.decisions != 1 {
-		t.Fatalf("collision metric decisions = %d; want 1", metrics.decisions)
-	}
-	if metrics.lastDecision.Action != collision.ActionRejectNew {
-		t.Fatalf("collision metric action = %s; want %s", metrics.lastDecision.Action, collision.ActionRejectNew)
-	}
-	if metrics.lastActive.ID != active.ID {
-		t.Fatalf("collision metric active ID = %d; want %d", metrics.lastActive.ID, active.ID)
+	if metrics.decisions != 0 {
+		t.Fatalf("collision metric decisions = %d; want 0", metrics.decisions)
 	}
 }
 

@@ -1,6 +1,5 @@
 [Unit]
 Description=VectorCore SGW-C
-Documentation=/opt/vectorcore/docs/production-controls.md
 After=network-online.target
 Wants=network-online.target
 
@@ -15,7 +14,6 @@ LimitNOFILE=1048576
 NoNewPrivileges=true
 ProtectSystem=full
 ProtectHome=true
-ReadWritePaths=/var/lib/vectorcore-sgw /var/log/vectorcore /opt/vectorcore/log
 
 [Install]
 WantedBy=multi-user.target

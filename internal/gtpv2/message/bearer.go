@@ -216,7 +216,10 @@ type UpdateBearerResponse struct {
 	Header
 	// Cause: M per Table 7.2.16-1
 	Cause *ie.IE
-	// BearerContexts: M per Table 7.2.16-1
+	// BearerContexts: normally present per TS 29.274 Table 7.2.16-1. Some EPC
+	// peers return only a top-level accepted Cause when every requested bearer
+	// is accepted; callers must tolerate an empty list and treat it as "no
+	// per-bearer result supplied".
 	BearerContexts []*ie.IE
 }
 
@@ -240,9 +243,6 @@ func ParseUpdateBearerResponse(b []byte) (*UpdateBearerResponse, error) {
 	}
 	if resp.Cause == nil {
 		return nil, fmt.Errorf("UpdateBearerResponse: missing M-IE Cause per Table 7.2.16-1")
-	}
-	if len(resp.BearerContexts) == 0 {
-		return nil, fmt.Errorf("UpdateBearerResponse: missing M-IE Bearer Contexts per Table 7.2.16-1")
 	}
 	return resp, nil
 }

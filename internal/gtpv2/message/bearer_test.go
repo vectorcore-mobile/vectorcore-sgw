@@ -198,6 +198,25 @@ func TestDeleteBearerResponseRoundtrip(t *testing.T) {
 	}
 }
 
+func TestParseUpdateBearerResponseAllowsAcceptedCauseOnlyInterop(t *testing.T) {
+	causeIE := ie.NewCause(ie.CauseRequestAccepted, 0, 0, 0, nil)
+	raw, err := message.MarshalUpdateBearerResponse(0xDEADBEEF, 3, causeIE)
+	if err != nil {
+		t.Fatalf("MarshalUpdateBearerResponse: %v", err)
+	}
+	parsed, err := message.ParseUpdateBearerResponse(raw)
+	if err != nil {
+		t.Fatalf("ParseUpdateBearerResponse: %v", err)
+	}
+	cause, _ := parsed.Cause.CauseValue()
+	if cause != ie.CauseRequestAccepted {
+		t.Fatalf("Cause = %d; want %d", cause, ie.CauseRequestAccepted)
+	}
+	if len(parsed.BearerContexts) != 0 {
+		t.Fatalf("BearerContexts = %d; want 0", len(parsed.BearerContexts))
+	}
+}
+
 // ── Update Bearer Request wire test (C14) ─────────────────────────────────────
 
 func TestUpdateBearerRequestRoundtrip(t *testing.T) {
@@ -317,16 +336,16 @@ func TestBearerMessageTypeConstants(t *testing.T) {
 
 func TestBearerQoSARPFlagWire(t *testing.T) {
 	cases := []struct {
-		name    string
+		name     string
 		pci, pvi uint8
-		pl      uint8
-		want    byte // expected ARP octet
+		pl       uint8
+		want     byte // expected ARP octet
 	}{
-		{"PCI=0,PL=9,PVI=0", 0, 0, 9, 0x24},  // 0<<6 | 9<<2 | 0 = 0x24
-		{"PCI=1,PL=9,PVI=0", 1, 0, 9, 0x64},  // 1<<6 | 9<<2 | 0 = 0x64
-		{"PCI=0,PL=9,PVI=1", 0, 1, 9, 0x25},  // 0<<6 | 9<<2 | 1 = 0x25
-		{"PCI=1,PL=9,PVI=1", 1, 1, 9, 0x65},  // 1<<6 | 9<<2 | 1 = 0x65
-		{"PCI=1,PL=1,PVI=1", 1, 1, 1, 0x45},  // 1<<6 | 1<<2 | 1 = 0x45
+		{"PCI=0,PL=9,PVI=0", 0, 0, 9, 0x24},   // 0<<6 | 9<<2 | 0 = 0x24
+		{"PCI=1,PL=9,PVI=0", 1, 0, 9, 0x64},   // 1<<6 | 9<<2 | 0 = 0x64
+		{"PCI=0,PL=9,PVI=1", 0, 1, 9, 0x25},   // 0<<6 | 9<<2 | 1 = 0x25
+		{"PCI=1,PL=9,PVI=1", 1, 1, 9, 0x65},   // 1<<6 | 9<<2 | 1 = 0x65
+		{"PCI=1,PL=1,PVI=1", 1, 1, 1, 0x45},   // 1<<6 | 1<<2 | 1 = 0x45
 		{"PCI=1,PL=15,PVI=1", 1, 1, 15, 0xFD}, // 1<<6 | 15<<2 | 1 = 0x40|0x3C|0x01=0x7D — wait: 1<<6=0x40, 15<<2=0x3C, so 0x40|0x3C|0x01=0x7D
 	}
 	// Fix the last case: 1<<6=64=0x40, 15<<2=60=0x3C, 1=0x01; total=0x7D

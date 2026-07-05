@@ -5,18 +5,15 @@ import (
 	"time"
 )
 
-func TestTrackerRejectsDeleteSessionDuringCreateBearer(t *testing.T) {
+func TestTrackerAllowsDeleteSessionDuringCreateBearer(t *testing.T) {
 	tr := NewTracker()
-	cb, dec := tr.Begin(Request{Procedure: ProcedureCreateBearer, Owner: OwnerPGW, EBIs: []uint8{6}})
+	_, dec := tr.Begin(Request{Procedure: ProcedureCreateBearer, Owner: OwnerPGW, EBIs: []uint8{6}})
 	if dec.Action != ActionAllow {
 		t.Fatalf("Create Bearer decision = %s, want allow", dec.Action)
 	}
 	_, dec = tr.Begin(Request{Procedure: ProcedureDeleteSession, Owner: OwnerMME})
-	if dec.Action != ActionRejectNew {
-		t.Fatalf("Delete Session decision = %s, want reject_new", dec.Action)
-	}
-	if dec.Current.ID != cb.ID {
-		t.Fatalf("current collision ID = %d, want %d", dec.Current.ID, cb.ID)
+	if dec.Action != ActionAllow {
+		t.Fatalf("Delete Session decision = %s, want allow; decision=%+v", dec.Action, dec)
 	}
 }
 
@@ -41,6 +38,30 @@ func TestTrackerRejectsSameBearerProcedures(t *testing.T) {
 	_, dec = tr.Begin(Request{Procedure: ProcedureDeleteBearer, Owner: OwnerPGW, EBIs: []uint8{7}})
 	if dec.Action != ActionRejectNew {
 		t.Fatalf("Delete Bearer same EBI decision = %s, want reject_new", dec.Action)
+	}
+}
+
+func TestTrackerAllowsReleaseAccessBearersDuringPGWBearerTeardown(t *testing.T) {
+	tr := NewTracker()
+	_, dec := tr.Begin(Request{Procedure: ProcedureDeleteBearer, Owner: OwnerPGW, EBIs: []uint8{9}})
+	if dec.Action != ActionAllow {
+		t.Fatalf("Delete Bearer decision = %s, want allow", dec.Action)
+	}
+	_, dec = tr.Begin(Request{Procedure: ProcedureReleaseAccessBearers, Owner: OwnerMME})
+	if dec.Action != ActionAllow {
+		t.Fatalf("Release Access Bearers during Delete Bearer decision = %s, want allow; decision=%+v", dec.Action, dec)
+	}
+}
+
+func TestTrackerAllowsPGWBearerTeardownDuringReleaseAccessBearers(t *testing.T) {
+	tr := NewTracker()
+	_, dec := tr.Begin(Request{Procedure: ProcedureReleaseAccessBearers, Owner: OwnerMME})
+	if dec.Action != ActionAllow {
+		t.Fatalf("Release Access Bearers decision = %s, want allow", dec.Action)
+	}
+	_, dec = tr.Begin(Request{Procedure: ProcedureDeleteBearer, Owner: OwnerPGW, EBIs: []uint8{9}})
+	if dec.Action != ActionAllow {
+		t.Fatalf("Delete Bearer during Release Access Bearers decision = %s, want allow; decision=%+v", dec.Action, dec)
 	}
 }
 
@@ -149,6 +170,20 @@ func TestProcedurePairDecisionMatrix(t *testing.T) {
 			next:    Request{Procedure: ProcedureCreateBearerResponse, Owner: OwnerMME, EBIs: []uint8{7}},
 			want:    ActionAllow,
 			wantPol: PolicyAllowResponse,
+		},
+		{
+			name:    "delete session allowed during create bearer",
+			active:  ActiveProcedure{Procedure: ProcedureCreateBearer, Owner: OwnerPGW, EBIs: []uint8{7}},
+			next:    Request{Procedure: ProcedureDeleteSession, Owner: OwnerMME, EBIs: []uint8{6}},
+			want:    ActionAllow,
+			wantPol: PolicyNone,
+		},
+		{
+			name:    "release access bearers allowed during delete bearer",
+			active:  ActiveProcedure{Procedure: ProcedureDeleteBearer, Owner: OwnerPGW, EBIs: []uint8{9}},
+			next:    Request{Procedure: ProcedureReleaseAccessBearers, Owner: OwnerMME},
+			want:    ActionAllow,
+			wantPol: PolicyNone,
 		},
 	}
 	for _, tt := range tests {

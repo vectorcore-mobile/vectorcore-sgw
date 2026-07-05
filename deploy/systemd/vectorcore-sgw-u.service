@@ -1,6 +1,5 @@
 [Unit]
 Description=VectorCore SGW-U
-Documentation=/opt/vectorcore/docs/production-controls.md
 After=network-online.target
 Wants=network-online.target
 
@@ -11,14 +10,13 @@ Restart=on-failure
 RestartSec=5s
 User=root
 Group=root
-AmbientCapabilities=CAP_BPF CAP_NET_ADMIN CAP_NET_RAW
-CapabilityBoundingSet=CAP_BPF CAP_NET_ADMIN CAP_NET_RAW
+AmbientCapabilities=CAP_BPF CAP_NET_ADMIN CAP_NET_RAW CAP_SYS_RESOURCE CAP_SYS_ADMIN
+CapabilityBoundingSet=CAP_BPF CAP_NET_ADMIN CAP_NET_RAW CAP_SYS_RESOURCE CAP_SYS_ADMIN
 LimitMEMLOCK=infinity
 LimitNOFILE=1048576
 NoNewPrivileges=true
 ProtectSystem=full
 ProtectHome=true
-ReadWritePaths=/var/log/vectorcore /opt/vectorcore/log
 
 [Install]
 WantedBy=multi-user.target

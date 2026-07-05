@@ -243,9 +243,28 @@ func (h *Handler) handle(conn *transport.Conn, addr *net.UDPAddr, hdr message.He
 	case message.MsgTypeReleaseAccessBearersRequest:
 		h.observeGTPPeer(peerhealth.RoleMME, addr, hdr, ies)
 		h.handleReleaseAccessBearersRequest(conn, addr, hdr, ies)
+	case message.MsgTypeUpdateBearerResponse, message.MsgTypeDeleteBearerResponse:
+		h.observeGTPPeer(peerhealth.RoleMME, addr, hdr, ies)
+		h.handleLateBearerResponse(addr, hdr, ies)
 	default:
 		h.log.Warn("S11: unhandled message type", "from", addr, "msg_type", hdr.MessageType)
 	}
+}
+
+func (h *Handler) handleLateBearerResponse(addr *net.UDPAddr, hdr message.Header, ies []*ie.IE) {
+	cause := uint8(0)
+	if causeIE := ie.FindFirst(ies, ie.TypeCause); causeIE != nil {
+		if v, err := causeIE.CauseValue(); err == nil {
+			cause = v
+		}
+	}
+	h.log.Warn("S11: late or unsolicited bearer response",
+		"from", addr,
+		"msg_type", hdr.MessageType,
+		"teid", fmt.Sprintf("0x%08X", hdr.TEID),
+		"seq", hdr.SequenceNumber,
+		"cause", cause,
+	)
 }
 
 func (h *Handler) observeGTPPeer(role peerhealth.Role, addr *net.UDPAddr, hdr message.Header, ies []*ie.IE) {
@@ -850,10 +869,22 @@ func (h *Handler) handleModifyBearerRequest(conn *transport.Conn, addr *net.UDPA
 		// PFCP Session Modification: upgrade Core→Access FAR from DROP to FORW
 		// with the eNB TEID as Outer Header Creation per TS 29.244 Rel-15 §7.5.4.
 		// Default bearer FAR 2 is established at session creation; dedicated bearers
-		// carry their own PFCP rule IDs from Create Bearer acceptance.
-		pdrID, farID := uint16(b.PDRIDs[1]), b.FARIDs[1]
-		if pdrID == 0 || farID == 0 {
-			pdrID, farID = 2, 2
+		// must carry their own PFCP rule IDs from Create Bearer acceptance.
+		pdrID, farID, ok := downlinkPFCPRuleIDs(sess, b)
+		if !ok {
+			h.log.Warn("S11: Modify Bearer — missing downlink PFCP rule IDs; rejecting bearer update",
+				"session_id", sess.SessionID,
+				"imsi", sess.IMSI,
+				"apn", sess.APN,
+				"default_ebi", sess.DefaultBearerID,
+				"ebi", ebi,
+				"pdr_ids", b.PDRIDs,
+				"far_ids", b.FARIDs,
+			)
+			b.ENBS1UFTEID = oldENBFTEID
+			sess.SetBearer(b)
+			results = append(results, mbResult{ebi: ebi, cause: ie.CauseSystemFailure})
+			continue
 		}
 		pfcpErr := h.pfcp.ModifySessionOnPeer(context.TODO(),
 			sess.PFCP.SGWUAddr,
@@ -1257,24 +1288,58 @@ func (h *Handler) knownS11BearerState(sgwS11TEID uint32) ([]uint8, []map[string]
 	return ebis, pdns
 }
 
+func downlinkPFCPRuleIDs(sess *session.SGWSession, b *bearer.Bearer) (uint16, uint32, bool) {
+	if sess == nil || b == nil {
+		return 0, 0, false
+	}
+	pdrID, farID := uint16(b.PDRIDs[1]), b.FARIDs[1]
+	if pdrID != 0 && farID != 0 {
+		return pdrID, farID, true
+	}
+	if b.EBI == sess.DefaultBearerID {
+		// Default bearer PFCP rules are established with legacy IDs 1/2 and are
+		// not stored on the bearer object in older sessions. Only the default
+		// bearer may use this compatibility fallback.
+		return 2, 2, true
+	}
+	return 0, 0, false
+}
+
+func releaseAccessBearerFARUpdates(sess *session.SGWSession) ([]pfcpclient.FARUpdate, error) {
+	var updates []pfcpclient.FARUpdate
+	for _, b := range sess.BearerList() {
+		pdrID, farID, ok := downlinkPFCPRuleIDs(sess, b)
+		if !ok {
+			return nil, fmt.Errorf("missing downlink PFCP rule IDs for EBI %d", b.EBI)
+		}
+		updates = append(updates, pfcpclient.FARUpdate{
+			FARID:       farID,
+			PDRID:       pdrID,
+			ApplyAction: pfcpie.ApplyActionDROP,
+		})
+	}
+	return updates, nil
+}
+
 func (h *Handler) handleReleaseAccessBearersRequest(conn *transport.Conn, addr *net.UDPAddr, hdr message.Header, ies []*ie.IE) {
 	req := message.ParseReleaseAccessBearersRequest(hdr, ies)
 
-	sess := h.sessions.FindByS11TEID(hdr.TEID)
-	if sess == nil {
+	sessions := h.sessions.FindAllByS11TEID(hdr.TEID)
+	if len(sessions) == 0 {
 		h.log.Warn("S11: Release Access Bearers — session not found", "teid", fmt.Sprintf("0x%08X", hdr.TEID))
 		// RABReq carries no Sender F-TEID; MME TEID unavailable without session.
 		resp, _ := message.MarshalReleaseAccessBearersResponse(req, 0, ie.CauseContextNotFound)
 		conn.Reply(addr, resp) //nolint:errcheck
 		return
 	}
-	rabProc, ok := h.beginProcedure(sess, mmeProcedureRequest(collision.ProcedureReleaseAccessBearers, addr, hdr.TEID, hdr.SequenceNumber, nil))
+	controlSess := sessions[len(sessions)-1]
+	rabProc, ok := h.beginProcedure(controlSess, mmeProcedureRequest(collision.ProcedureReleaseAccessBearers, addr, hdr.TEID, hdr.SequenceNumber, nil))
 	if !ok {
-		resp, _ := message.MarshalReleaseAccessBearersResponse(req, sess.MMEControlFTEID.TEID, ie.CauseRequestRejected)
+		resp, _ := message.MarshalReleaseAccessBearersResponse(req, controlSess.MMEControlFTEID.TEID, ie.CauseRequestRejected)
 		conn.Reply(addr, resp) //nolint:errcheck
 		return
 	}
-	defer finishProcedure(sess, rabProc)
+	defer finishProcedure(controlSess, rabProc)
 
 	// R15-005 FIX: update SGW-U forwarding state before responding to the MME.
 	// Per TS 23.401 Rel-15 §5.3.5: "The SGW shall [...] store the packet(s) that
@@ -1282,31 +1347,58 @@ func (h *Handler) handleReleaseAccessBearersRequest(conn *transport.Conn, addr *
 	// bearers." In a CUPS SGW the UP function must apply the idle-state FAR
 	// (DROP here; full BUFF+DDN requires BAR support, deferred) before the
 	// control-plane procedure completes.
-	if sess.PFCP.Established && sess.PFCP.SGWUFSEID.SEID != 0 {
+	for _, sess := range sessions {
+		if !sess.PFCP.Established || sess.PFCP.SGWUFSEID.SEID == 0 {
+			h.log.Warn("S11: Release Access Bearers — PFCP binding unavailable; clearing local access state only",
+				"session_id", sess.SessionID,
+				"imsi", sess.IMSI,
+				"apn", sess.APN,
+			)
+			continue
+		}
+		updates, updateErr := releaseAccessBearerFARUpdates(sess)
+		if updateErr != nil {
+			h.log.Warn("S11: Release Access Bearers — missing downlink PFCP rule IDs",
+				"session_id", sess.SessionID,
+				"imsi", sess.IMSI,
+				"apn", sess.APN,
+				"error", updateErr,
+			)
+			resp, _ := message.MarshalReleaseAccessBearersResponse(req, controlSess.MMEControlFTEID.TEID, ie.CauseSystemFailure)
+			conn.Reply(addr, resp) //nolint:errcheck
+			return
+		}
+		if len(updates) == 0 {
+			continue
+		}
 		pfcpErr := h.pfcp.ModifySessionOnPeer(context.TODO(),
 			sess.PFCP.SGWUAddr,
 			sess.PFCP.LocalFSEID.SEID,
 			sess.PFCP.SGWUFSEID.SEID,
-			[]pfcpclient.FARUpdate{{
-				FARID:       2, // Core→Access (downlink) FAR — was FORW to eNB, now DROP
-				PDRID:       2,
-				ApplyAction: pfcpie.ApplyActionDROP,
-			}},
+			updates,
 		)
 		if pfcpErr != nil {
 			h.log.Warn("S11: PFCP Session Modification for Release Access Bearers failed — SGW-U may continue forwarding to released eNB",
 				"session_id", sess.SessionID, "error", pfcpErr)
-			resp, _ := message.MarshalReleaseAccessBearersResponse(req, sess.MMEControlFTEID.TEID, ie.CauseSystemFailure)
+			resp, _ := message.MarshalReleaseAccessBearersResponse(req, controlSess.MMEControlFTEID.TEID, ie.CauseSystemFailure)
 			conn.Reply(addr, resp) //nolint:errcheck
 			return
 		}
 	}
 
 	// PFCP updated — now clear local eNB FTEIDs per TS 23.401 §5.3.5.
-	sess.ClearENBFTEIDs()
-	h.log.Info("S11: Release Access Bearers Request — eNodeB FTEIDs cleared, SGW-U FAR set to DROP",
-		"session_id", sess.SessionID,
-		"imsi", sess.IMSI,
+	for _, sess := range sessions {
+		sess.ClearENBFTEIDs()
+	}
+	knownEBIs, knownPDNs := h.knownS11BearerState(hdr.TEID)
+	h.log.Info("S11: Release Access Bearers Request — eNodeB FTEIDs cleared, SGW-U FARs set to DROP",
+		"imsi", controlSess.IMSI,
+		"sgw_s11_teid", fmt.Sprintf("0x%08X", hdr.TEID),
+		"pdn_count_after", len(sessions),
+		"known_ebis", knownEBIs,
+		"known_pdns", knownPDNs,
+		"session_preserved", true,
+		"pfcp_preserved", true,
 	)
 
 	// Include Recovery IE per TS 29.274 §7.2.0 on first contact with this MME.
@@ -1319,7 +1411,7 @@ func (h *Handler) handleReleaseAccessBearersRequest(conn *transport.Conn, addr *
 		Version:        2,
 		HasTEID:        true,
 		MessageType:    message.MsgTypeReleaseAccessBearersResponse,
-		TEID:           sess.MMEControlFTEID.TEID,
+		TEID:           controlSess.MMEControlFTEID.TEID,
 		SequenceNumber: req.Header.SequenceNumber,
 	}
 	resp, err := message.Marshal(rabHdr, rabIEs)

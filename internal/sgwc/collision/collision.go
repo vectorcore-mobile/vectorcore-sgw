@@ -220,6 +220,24 @@ type pairRule struct {
 var procedurePairRules = map[pairKey]pairRule{
 	{ProcedureCreateBearer, ProcedureCreateBearerResponse}: {policy: PolicyAllowResponse},
 	{ProcedureCreateBearerResponse, ProcedureCreateBearer}: {policy: PolicyAllowResponse},
+	// Delete Session is terminal for a PDN connection. If the MME starts PDN
+	// teardown while a bearer-scoped procedure is still active, the SGW must not
+	// reject the teardown and leave stale SGW/PGW state behind. The reverse
+	// direction is intentionally not allowed: once Delete Session is active, new
+	// bearer procedures remain blocked by the session-wide overlap rule.
+	{ProcedureModifyBearer, ProcedureDeleteSession}:         {policy: PolicyNone},
+	{ProcedureCreateBearer, ProcedureDeleteSession}:         {policy: PolicyNone},
+	{ProcedureCreateBearerResponse, ProcedureDeleteSession}: {policy: PolicyNone},
+	{ProcedureUpdateBearer, ProcedureDeleteSession}:         {policy: PolicyNone},
+	{ProcedureDeleteBearer, ProcedureDeleteSession}:         {policy: PolicyNone},
+	// Release Access Bearers is an access-side idle transition. It must not be
+	// rejected solely because the PGW is concurrently updating or deleting
+	// bearer state for the same PDN; the RAB handler only drops access FARs and
+	// preserves the core session/bearer ownership.
+	{ProcedureDeleteBearer, ProcedureReleaseAccessBearers}: {policy: PolicyNone},
+	{ProcedureReleaseAccessBearers, ProcedureDeleteBearer}: {policy: PolicyNone},
+	{ProcedureUpdateBearer, ProcedureReleaseAccessBearers}: {policy: PolicyNone},
+	{ProcedureReleaseAccessBearers, ProcedureUpdateBearer}: {policy: PolicyNone},
 }
 
 func decide(mode Mode, cur ActiveProcedure, req Request) Decision {
