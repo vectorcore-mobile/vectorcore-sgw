@@ -20,6 +20,7 @@ import (
 	"vectorcore-sgw/internal/gtpv2/transport"
 	"vectorcore-sgw/internal/log"
 	"vectorcore-sgw/internal/metrics"
+	"vectorcore-sgw/internal/sgwc/ddncontrol"
 	"vectorcore-sgw/internal/sgwc/mmerestoration"
 	"vectorcore-sgw/internal/sgwc/peerhealth"
 	"vectorcore-sgw/internal/sgwc/pfcpclient"
@@ -100,6 +101,7 @@ func main() {
 		"enabled", cfg.GTPC.NSADCNR.Enabled,
 		"forward_secondary_rat_usage_reports", cfg.GTPC.NSADCNR.ForwardSecondaryRATUsageReports,
 	)
+	ddnControlState := ddncontrol.NewState(ddnControlConfig(cfg.GTPC.DDNControl))
 
 	ctx, cancel := context.WithCancel(context.Background())
 	sigCh := make(chan os.Signal, 1)
@@ -192,10 +194,14 @@ func main() {
 		EnforceDeletePolicy:    cfg.GTPC.MMERestoration.EnforceDeletePolicy,
 		TriggerDDN:             cfg.GTPC.MMERestoration.TriggerDDN,
 		CleanupTimeout:         time.Duration(cfg.GTPC.MMERestoration.CleanupTimeoutSeconds) * time.Second,
+		DelayedQueueMax:        cfg.GTPC.DDNControl.DelayedQueueMax,
+		DelayedQueuePerMME:     cfg.GTPC.DDNControl.DelayedQueuePerMME,
+		DelayedMaxAge:          time.Duration(cfg.GTPC.DDNControl.DelayedMaxAgeSeconds) * time.Second,
 		DefaultAction:          mmeRestorationPolicyAction(cfg.GTPC.MMERestoration.DefaultAction),
 		Preserve:               mmeRestorationPolicyRules(cfg.GTPC.MMERestoration.Preserve),
 		Delete:                 mmeRestorationPolicyRules(cfg.GTPC.MMERestoration.Delete),
 	}, s5cClient, pfcpClient, logger.Logger)
+	mmeRestorationHandler.SetDDNControl(ddnControlState)
 	gtpcPeers.SetEventHandler(peerhealth.MultiHandler{pgwFailureHandler, mmeRestorationHandler})
 
 	metricsSrv := metrics.NewServer(cfg.Metrics.Listen, logger.Logger)
@@ -211,6 +217,7 @@ func main() {
 	metrics.NewGTPCPeerMetrics(metricsSrv.Registry(), gtpcPeers)
 	metrics.NewPGWFailureMetrics(metricsSrv.Registry(), pgwFailureHandler)
 	metrics.NewMMERestorationMetrics(metricsSrv.Registry(), mmeRestorationHandler)
+	metrics.NewDDNControlMetrics(metricsSrv.Registry(), ddnControlState)
 	pfcpClient.SetPeerStateCallback(func(peerName, peerAddr string, state pfcpclient.PeerState) {
 		pfcpMetrics.OnPeerStateChange(peerName, peerAddr, string(state))
 		if state == pfcpclient.PeerStateDown {
@@ -237,6 +244,7 @@ func main() {
 	api.RegisterGTPCPeerRoutes(apiSrv.HumaAPI(), gtpcPeers)
 	api.RegisterPGWFailureRoutes(apiSrv.HumaAPI(), pgwFailureHandler)
 	api.RegisterMMERestorationRoutes(apiSrv.HumaAPI(), mmeRestorationHandler)
+	api.RegisterDDNControlRoutes(apiSrv.HumaAPI(), ddnControlState)
 	if err := apiSrv.Start(ctx); err != nil {
 		logger.Error("API server failed to start", "error", err)
 		os.Exit(1)
@@ -253,6 +261,7 @@ func main() {
 		}
 	}
 	mmeRestorationHandler.SetDDNSender(s11Handler)
+	s11Handler.SetDDNControl(ddnControlState)
 	s11Handler.SetBaseContext(ctx)
 	s11Handler.SetPeerHealth(gtpcPeers)
 	s11Handler.SetCollisionMetrics(collisionMetrics)
@@ -364,6 +373,34 @@ func mmeRestorationPolicyRules(rules []sgwcconfig.MMERestorationPolicyRuleConfig
 	out := make([]mmerestoration.PolicyRule, 0, len(rules))
 	for _, rule := range rules {
 		out = append(out, mmerestoration.PolicyRule{
+			APN:            rule.APN,
+			QCI:            rule.QCI,
+			ARPPriorityMin: rule.ARPPriorityMin,
+			ARPPriorityMax: rule.ARPPriorityMax,
+			Reason:         rule.Reason,
+		})
+	}
+	return out
+}
+
+func ddnControlConfig(cfg sgwcconfig.DDNControlConfig) ddncontrol.Config {
+	return ddncontrol.Config{
+		Enabled:                       cfg.Enabled,
+		PerMMERateLimitPerSecond:      cfg.PerMMERateLimitPerSecond,
+		PerMMEBurst:                   cfg.PerMMEBurst,
+		PerUESuppression:              time.Duration(cfg.PerUESuppressionSeconds) * time.Second,
+		HonorMMELowPriorityThrottling: cfg.HonorMMELowPriorityThrottling,
+		LowPriorityThrottle:           time.Duration(cfg.LowPriorityThrottleSeconds) * time.Second,
+		HighPriorityBypass:            cfg.HighPriorityBypass,
+		HighPriority:                  ddnControlPriorityRules(cfg.HighPriority),
+		LowPriority:                   ddnControlPriorityRules(cfg.LowPriority),
+	}
+}
+
+func ddnControlPriorityRules(rules []sgwcconfig.DDNControlPriorityRuleConfig) []ddncontrol.PriorityRule {
+	out := make([]ddncontrol.PriorityRule, 0, len(rules))
+	for _, rule := range rules {
+		out = append(out, ddncontrol.PriorityRule{
 			APN:            rule.APN,
 			QCI:            rule.QCI,
 			ARPPriorityMin: rule.ARPPriorityMin,

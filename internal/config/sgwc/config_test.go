@@ -201,6 +201,52 @@ func TestDefaultMMERestorationConfig(t *testing.T) {
 	}
 }
 
+func TestDefaultDDNControlConfig(t *testing.T) {
+	cfg := Default()
+	if !cfg.GTPC.DDNControl.Enabled {
+		t.Fatal("default DDN control disabled; want enabled")
+	}
+	if cfg.GTPC.DDNControl.PerMMERateLimitPerSecond != 50 {
+		t.Fatalf("default per_mme_rate_limit_per_second = %d; want 50", cfg.GTPC.DDNControl.PerMMERateLimitPerSecond)
+	}
+	if cfg.GTPC.DDNControl.PerMMEBurst != 100 {
+		t.Fatalf("default per_mme_burst = %d; want 100", cfg.GTPC.DDNControl.PerMMEBurst)
+	}
+	if cfg.GTPC.DDNControl.PerUESuppressionSeconds != 10 {
+		t.Fatalf("default per_ue_suppression_seconds = %d; want 10", cfg.GTPC.DDNControl.PerUESuppressionSeconds)
+	}
+	if !cfg.GTPC.DDNControl.HonorMMELowPriorityThrottling {
+		t.Fatal("default honor_mme_low_priority_throttling disabled; want enabled")
+	}
+	if cfg.GTPC.DDNControl.LowPriorityThrottleSeconds != 30 {
+		t.Fatalf("default low_priority_throttle_seconds = %d; want 30", cfg.GTPC.DDNControl.LowPriorityThrottleSeconds)
+	}
+	if !cfg.GTPC.DDNControl.HighPriorityBypass {
+		t.Fatal("default high_priority_bypass disabled; want enabled")
+	}
+	if cfg.GTPC.DDNControl.DelayedQueueMax != 1000 {
+		t.Fatalf("default delayed_queue_max = %d; want 1000", cfg.GTPC.DDNControl.DelayedQueueMax)
+	}
+	if cfg.GTPC.DDNControl.DelayedQueuePerMME != 200 {
+		t.Fatalf("default delayed_queue_per_mme = %d; want 200", cfg.GTPC.DDNControl.DelayedQueuePerMME)
+	}
+	if cfg.GTPC.DDNControl.DelayedMaxAgeSeconds != 30 {
+		t.Fatalf("default delayed_max_age_seconds = %d; want 30", cfg.GTPC.DDNControl.DelayedMaxAgeSeconds)
+	}
+	if cfg.GTPC.DDNControl.StopPagingEnabled {
+		t.Fatal("default stop_paging_enabled enabled; want disabled until ISR lab validation")
+	}
+	if cfg.GTPC.DDNControl.StopPagingOnDDNAck {
+		t.Fatal("default stop_paging_on_ddn_ack enabled; want disabled until ISR lab validation")
+	}
+	if len(cfg.GTPC.DDNControl.HighPriority) == 0 {
+		t.Fatal("default DDN high-priority policy is empty")
+	}
+	if len(cfg.GTPC.DDNControl.LowPriority) == 0 {
+		t.Fatal("default DDN low-priority policy is empty")
+	}
+}
+
 func TestValidateRejectsInvalidPeerHealthConfig(t *testing.T) {
 	cfg := validTestConfig()
 	cfg.GTPC.PeerHealth.EchoTimeoutSeconds = cfg.GTPC.PeerHealth.EchoIntervalSeconds
@@ -247,6 +293,63 @@ func TestValidateRejectsInvalidMMERestorationPolicy(t *testing.T) {
 	cfg.GTPC.MMERestoration.CleanupTimeoutSeconds = 0
 	if err := cfg.Validate(); err == nil {
 		t.Fatal("Validate succeeded with invalid MME restoration cleanup timeout")
+	}
+}
+
+func TestValidateRejectsInvalidDDNControlPolicy(t *testing.T) {
+	cfg := validTestConfig()
+	cfg.GTPC.DDNControl.PerMMERateLimitPerSecond = 0
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("Validate succeeded with invalid DDN per-MME rate limit")
+	}
+
+	cfg = validTestConfig()
+	cfg.GTPC.DDNControl.PerMMEBurst = 0
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("Validate succeeded with invalid DDN per-MME burst")
+	}
+
+	cfg = validTestConfig()
+	cfg.GTPC.DDNControl.PerUESuppressionSeconds = -1
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("Validate succeeded with negative DDN per-UE suppression")
+	}
+
+	cfg = validTestConfig()
+	cfg.GTPC.DDNControl.LowPriorityThrottleSeconds = -1
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("Validate succeeded with negative DDN low-priority throttle")
+	}
+
+	cfg = validTestConfig()
+	cfg.GTPC.DDNControl.HighPriority = []DDNControlPriorityRuleConfig{{ARPPriorityMin: 4, ARPPriorityMax: 3}}
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("Validate succeeded with inverted DDN ARP priority range")
+	}
+
+	cfg = validTestConfig()
+	cfg.GTPC.DDNControl.DelayedQueueMax = 0
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("Validate succeeded with invalid DDN delayed queue max")
+	}
+
+	cfg = validTestConfig()
+	cfg.GTPC.DDNControl.DelayedQueuePerMME = 0
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("Validate succeeded with invalid DDN delayed queue per MME")
+	}
+
+	cfg = validTestConfig()
+	cfg.GTPC.DDNControl.DelayedMaxAgeSeconds = 0
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("Validate succeeded with invalid DDN delayed max age")
+	}
+
+	cfg = validTestConfig()
+	cfg.GTPC.DDNControl.StopPagingEnabled = false
+	cfg.GTPC.DDNControl.StopPagingOnDDNAck = true
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("Validate succeeded with stop_paging_on_ddn_ack enabled without stop_paging_enabled")
 	}
 }
 

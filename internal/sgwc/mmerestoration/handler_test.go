@@ -11,6 +11,7 @@ import (
 
 	"vectorcore-sgw/internal/gtpv2/ie"
 	"vectorcore-sgw/internal/sgwc/bearer"
+	"vectorcore-sgw/internal/sgwc/ddncontrol"
 	"vectorcore-sgw/internal/sgwc/peerhealth"
 	"vectorcore-sgw/internal/sgwc/session"
 )
@@ -428,6 +429,183 @@ func TestHandlerTriggersDDNForPreservedSessionsOnly(t *testing.T) {
 	internetStatus := internet.MMERestorationSnapshot()
 	if internetStatus.DDNTriggered {
 		t.Fatalf("internet DDN status = %+v; delete-policy session must not receive DDN", internetStatus)
+	}
+}
+
+func TestHandlerAppliesDDNControlDelayDecision(t *testing.T) {
+	mgr := session.NewManager()
+	ims, _, err := mgr.Create(testSessionParamsWithPolicyFields("311430000000001", "10.90.250.77", "ims", 5, 1))
+	if err != nil {
+		t.Fatalf("Create IMS: %v", err)
+	}
+	ddn := &fakeDDNSender{seq: 0x1200}
+	handler := NewHandlerWithCleanup(mgr, Config{
+		Enabled:               true,
+		MarkSessionsOnRestart: true,
+		TriggerDDN:            true,
+		Preserve:              []PolicyRule{{APN: "ims", Reason: "preserve-ims"}},
+	}, nil, nil, slog.New(slog.DiscardHandler))
+	handler.SetDDNSender(ddn)
+	handler.SetDDNControl(ddncontrol.NewState(ddncontrol.Config{
+		Enabled:                  true,
+		PerMMERateLimitPerSecond: 1,
+		PerMMEBurst:              0,
+		HighPriorityBypass:       false,
+	}))
+
+	handler.OnPeerRestart(peerhealth.RestartEvent{
+		Role:        peerhealth.RoleMME,
+		Addr:        "10.90.250.77:2123",
+		OldRecovery: 1,
+		NewRecovery: 2,
+		At:          time.Unix(2650, 0).UTC(),
+	})
+
+	if ddn.calls != 0 {
+		t.Fatalf("DDN calls = %d; want delayed decision to skip immediate send", ddn.calls)
+	}
+	status := ims.MMERestorationSnapshot()
+	if status.DDNTriggered || status.DDNControlAction != string(ddncontrol.ActionDelay) ||
+		status.DDNControlReason != "per-mme-rate-limit" ||
+		status.DDNControlRetryAt.IsZero() {
+		t.Fatalf("IMS DDN status = %+v; want delayed DDN control decision", status)
+	}
+}
+
+func TestHandlerDelayedDDNQueueEventuallySends(t *testing.T) {
+	mgr := session.NewManager()
+	ims, _, err := mgr.Create(testSessionParamsWithPolicyFields("311430000000001", "10.90.250.77", "ims", 5, 1))
+	if err != nil {
+		t.Fatalf("Create IMS: %v", err)
+	}
+	ddn := &fakeDDNSender{seq: 0x1200}
+	handler := NewHandlerWithCleanup(mgr, Config{
+		Enabled:               true,
+		MarkSessionsOnRestart: true,
+		TriggerDDN:            true,
+		CleanupTimeout:        time.Second,
+		DelayedQueueMax:       10,
+		DelayedQueuePerMME:    10,
+		DelayedMaxAge:         time.Second,
+		Preserve:              []PolicyRule{{APN: "ims", Reason: "preserve-ims"}},
+	}, nil, nil, slog.New(slog.DiscardHandler))
+	handler.SetDDNSender(ddn)
+	handler.SetDDNControl(ddncontrol.NewState(ddncontrol.Config{
+		Enabled:                  true,
+		PerMMERateLimitPerSecond: 1000,
+		PerMMEBurst:              0,
+		HighPriorityBypass:       false,
+	}))
+
+	handler.OnPeerRestart(peerhealth.RestartEvent{
+		Role:        peerhealth.RoleMME,
+		Addr:        "10.90.250.77:2123",
+		OldRecovery: 1,
+		NewRecovery: 2,
+		At:          time.Now(),
+	})
+
+	deadline := time.Now().Add(300 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		if ddn.calls == 1 {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if ddn.calls != 1 || len(ddn.sessions) != 1 || ddn.sessions[0] != ims {
+		t.Fatalf("DDN calls = %d sessions=%v; want delayed DDN sent once", ddn.calls, ddn.sessions)
+	}
+	status := ims.MMERestorationSnapshot()
+	if !status.DDNTriggered || status.DDNSequence != 0x1200 {
+		t.Fatalf("IMS DDN status = %+v; want delayed trigger seq 0x1200", status)
+	}
+}
+
+func TestHandlerDelayedDDNQueueFullFailsClosed(t *testing.T) {
+	mgr := session.NewManager()
+	first, _, err := mgr.Create(testSessionParamsWithPolicyFields("311430000000001", "10.90.250.77", "ims", 5, 1))
+	if err != nil {
+		t.Fatalf("Create first IMS: %v", err)
+	}
+	second, _, err := mgr.Create(testSessionParamsWithPolicyFields("311430000000002", "10.90.250.77", "ims", 5, 1))
+	if err != nil {
+		t.Fatalf("Create second IMS: %v", err)
+	}
+	ddn := &fakeDDNSender{seq: 0x1200}
+	handler := NewHandlerWithCleanup(mgr, Config{
+		Enabled:               true,
+		MarkSessionsOnRestart: true,
+		TriggerDDN:            true,
+		CleanupTimeout:        time.Second,
+		DelayedQueueMax:       1,
+		DelayedQueuePerMME:    1,
+		DelayedMaxAge:         time.Second,
+		Preserve:              []PolicyRule{{APN: "ims", Reason: "preserve-ims"}},
+	}, nil, nil, slog.New(slog.DiscardHandler))
+	handler.SetDDNSender(ddn)
+	handler.SetDDNControl(ddncontrol.NewState(ddncontrol.Config{
+		Enabled:                  true,
+		PerMMERateLimitPerSecond: 1,
+		PerMMEBurst:              0,
+		HighPriorityBypass:       false,
+	}))
+
+	handler.OnPeerRestart(peerhealth.RestartEvent{
+		Role:        peerhealth.RoleMME,
+		Addr:        "10.90.250.77:2123",
+		OldRecovery: 1,
+		NewRecovery: 2,
+		At:          time.Now(),
+	})
+
+	firstStatus := first.MMERestorationSnapshot()
+	secondStatus := second.MMERestorationSnapshot()
+	if firstStatus.DDNFailureReason == "DDN delayed queue full" && secondStatus.DDNFailureReason == "DDN delayed queue full" {
+		t.Fatalf("both sessions failed queueing: first=%+v second=%+v", firstStatus, secondStatus)
+	}
+	if firstStatus.DDNFailureReason != "DDN delayed queue full" && secondStatus.DDNFailureReason != "DDN delayed queue full" {
+		t.Fatalf("no session recorded queue-full failure: first=%+v second=%+v", firstStatus, secondStatus)
+	}
+}
+
+func TestHandlerDDNControlHighPriorityBypassStillSends(t *testing.T) {
+	mgr := session.NewManager()
+	ims, _, err := mgr.Create(testSessionParamsWithPolicyFields("311430000000001", "10.90.250.77", "ims", 1, 1))
+	if err != nil {
+		t.Fatalf("Create IMS: %v", err)
+	}
+	ddn := &fakeDDNSender{seq: 0x1200}
+	handler := NewHandlerWithCleanup(mgr, Config{
+		Enabled:               true,
+		MarkSessionsOnRestart: true,
+		TriggerDDN:            true,
+		Preserve:              []PolicyRule{{APN: "ims", Reason: "preserve-ims"}},
+	}, nil, nil, slog.New(slog.DiscardHandler))
+	handler.SetDDNSender(ddn)
+	handler.SetDDNControl(ddncontrol.NewState(ddncontrol.Config{
+		Enabled:                  true,
+		PerMMERateLimitPerSecond: 1,
+		PerMMEBurst:              0,
+		HighPriorityBypass:       true,
+		HighPriority:             []ddncontrol.PriorityRule{{APN: "ims", Reason: "ims-priority"}},
+	}))
+
+	handler.OnPeerRestart(peerhealth.RestartEvent{
+		Role:        peerhealth.RoleMME,
+		Addr:        "10.90.250.77:2123",
+		OldRecovery: 1,
+		NewRecovery: 2,
+		At:          time.Unix(2660, 0).UTC(),
+	})
+
+	if ddn.calls != 1 || len(ddn.sessions) != 1 || ddn.sessions[0] != ims {
+		t.Fatalf("DDN calls = %d sessions=%v; want high-priority bypass send", ddn.calls, ddn.sessions)
+	}
+	status := ims.MMERestorationSnapshot()
+	if !status.DDNTriggered || status.DDNControlAction != string(ddncontrol.ActionSendNow) ||
+		status.DDNControlPriority != string(ddncontrol.PriorityHigh) ||
+		status.DDNControlReason != "high-priority-bypass" {
+		t.Fatalf("IMS DDN status = %+v; want high-priority bypass send decision", status)
 	}
 }
 

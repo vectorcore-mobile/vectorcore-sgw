@@ -20,6 +20,7 @@ import (
 	pfcpie "vectorcore-sgw/internal/pfcp/ie"
 	"vectorcore-sgw/internal/sgwc/bearer"
 	"vectorcore-sgw/internal/sgwc/collision"
+	"vectorcore-sgw/internal/sgwc/ddncontrol"
 	"vectorcore-sgw/internal/sgwc/peerhealth"
 	"vectorcore-sgw/internal/sgwc/pfcpclient"
 	"vectorcore-sgw/internal/sgwc/recovery"
@@ -179,6 +180,174 @@ func TestHandleDownlinkDataNotificationAckMarksRestorationSession(t *testing.T) 
 	status := sess.MMERestorationSnapshot()
 	if !status.DDNAcked || status.DDNAckCause != ie.CauseRequestAccepted {
 		t.Fatalf("DDN status = %+v; want acked cause accepted", status)
+	}
+}
+
+func TestHandleDownlinkDataNotificationAckDoesNotStopPagingByDefault(t *testing.T) {
+	mgr := session.NewManager()
+	sess, _, err := mgr.Create(session.CreateParams{
+		IMSI:           "311435300070599",
+		APN:            "ims",
+		RATType:        ie.RATTypeEUTRAN,
+		ServingNetwork: "311-435",
+		MMEControlFTEID: session.FTEID{
+			TEID: 0x11223344,
+			IPv4: netip.MustParseAddr("10.90.250.77"),
+		},
+		DefaultEBI: 6,
+		QCI:        5,
+		ARP:        bearer.ARP{PriorityLevel: 1},
+	})
+	if err != nil {
+		t.Fatalf("Create session: %v", err)
+	}
+	const ddnSeq uint32 = 0x1234
+	sess.MarkMMERestart("10.90.250.77:2123", 2, time.Unix(9, 0).UTC())
+	sess.SetMMERestorationPolicy(session.MMERestorationPolicyPreserve, "preserve-ims", time.Unix(9, 0).UTC())
+	sess.MarkMMERestorationDDNTriggered(ddnSeq, time.Unix(10, 0).UTC())
+	conn := &fakeGTPCConn{}
+	h := &Handler{cfg: sgwcconfig.Default(), conn: conn, sessions: mgr, log: slog.New(slog.NewTextHandler(os.Stdout, nil))}
+	ddn := &message.DownlinkDataNotification{Header: message.Header{SequenceNumber: ddnSeq}}
+	raw, err := message.MarshalDownlinkDataNotificationAck(ddn, sess.SGWS11FTEID.TEID, ie.CauseRequestAccepted)
+	if err != nil {
+		t.Fatalf("Marshal DDN Ack: %v", err)
+	}
+
+	h.handleDownlinkDataNotificationAck(&net.UDPAddr{IP: net.ParseIP("10.90.250.77"), Port: 2123}, raw)
+
+	if len(conn.replies) != 0 {
+		t.Fatalf("Stop Paging replies = %d; want 0 by default", len(conn.replies))
+	}
+	status := sess.MMERestorationSnapshot()
+	if status.StopPagingSent {
+		t.Fatalf("Stop Paging status = %+v; want not sent by default", status)
+	}
+}
+
+func TestHandleDownlinkDataNotificationAckStopPagingWhenEnabled(t *testing.T) {
+	mgr := session.NewManager()
+	sess, _, err := mgr.Create(session.CreateParams{
+		IMSI:           "311435300070599",
+		APN:            "ims",
+		RATType:        ie.RATTypeEUTRAN,
+		ServingNetwork: "311-435",
+		MMEControlFTEID: session.FTEID{
+			TEID: 0x11223344,
+			IPv4: netip.MustParseAddr("10.90.250.77"),
+		},
+		DefaultEBI: 6,
+		QCI:        5,
+		ARP:        bearer.ARP{PriorityLevel: 1},
+	})
+	if err != nil {
+		t.Fatalf("Create session: %v", err)
+	}
+	const ddnSeq uint32 = 0x1234
+	sess.MarkMMERestart("10.90.250.77:2123", 2, time.Unix(9, 0).UTC())
+	sess.SetMMERestorationPolicy(session.MMERestorationPolicyPreserve, "preserve-ims", time.Unix(9, 0).UTC())
+	sess.MarkMMERestorationDDNTriggered(ddnSeq, time.Unix(10, 0).UTC())
+	cfg := sgwcconfig.Default()
+	cfg.GTPC.DDNControl.StopPagingEnabled = true
+	cfg.GTPC.DDNControl.StopPagingOnDDNAck = true
+	conn := &fakeGTPCConn{}
+	h := &Handler{cfg: cfg, conn: conn, sessions: mgr, log: slog.New(slog.NewTextHandler(os.Stdout, nil))}
+	ddn := &message.DownlinkDataNotification{Header: message.Header{SequenceNumber: ddnSeq}}
+	raw, err := message.MarshalDownlinkDataNotificationAck(ddn, sess.SGWS11FTEID.TEID, ie.CauseRequestAccepted)
+	if err != nil {
+		t.Fatalf("Marshal DDN Ack: %v", err)
+	}
+
+	h.handleDownlinkDataNotificationAck(&net.UDPAddr{IP: net.ParseIP("10.90.250.77"), Port: 2123}, raw)
+
+	if len(conn.replies) != 1 {
+		t.Fatalf("Stop Paging replies = %d; want 1", len(conn.replies))
+	}
+	ind, err := message.ParseStopPagingIndication(conn.replies[0])
+	if err != nil {
+		t.Fatalf("Parse Stop Paging: %v", err)
+	}
+	if ind.TEID != sess.MMEControlFTEID.TEID {
+		t.Fatalf("Stop Paging TEID = 0x%08X; want 0x%08X", ind.TEID, sess.MMEControlFTEID.TEID)
+	}
+	status := sess.MMERestorationSnapshot()
+	if !status.StopPagingSent || status.StopPagingSequence == 0 {
+		t.Fatalf("Stop Paging status = %+v; want sent", status)
+	}
+}
+
+func TestHandleDownlinkDataNotificationAckRecordsLowPriorityThrottling(t *testing.T) {
+	mgr := session.NewManager()
+	sess, _, err := mgr.Create(session.CreateParams{
+		IMSI:           "311435300070599",
+		APN:            "ims",
+		RATType:        ie.RATTypeEUTRAN,
+		ServingNetwork: "311-435",
+		MMEControlFTEID: session.FTEID{
+			TEID: 0x11223344,
+			IPv4: netip.MustParseAddr("10.90.250.77"),
+		},
+		DefaultEBI: 6,
+		QCI:        5,
+		ARP:        bearer.ARP{PriorityLevel: 1},
+	})
+	if err != nil {
+		t.Fatalf("Create session: %v", err)
+	}
+	const ddnSeq uint32 = 0x1234
+	sess.MarkMMERestorationDDNTriggered(ddnSeq, time.Unix(10, 0).UTC())
+	ddnCtl := ddncontrol.NewState(ddncontrol.Config{
+		Enabled:                       true,
+		PerMMERateLimitPerSecond:      10,
+		PerMMEBurst:                   10,
+		HonorMMELowPriorityThrottling: true,
+		LowPriority:                   []ddncontrol.PriorityRule{{APN: "internet", QCI: 9}},
+	})
+	h := &Handler{
+		sessions: mgr,
+		log:      slog.New(slog.NewTextHandler(os.Stdout, nil)),
+		ddnCtl:   ddnCtl,
+	}
+	ddn := &message.DownlinkDataNotification{Header: message.Header{SequenceNumber: ddnSeq}}
+	raw, err := message.MarshalDownlinkDataNotificationAck(
+		ddn,
+		sess.SGWS11FTEID.TEID,
+		ie.CauseRequestAccepted,
+		&ie.IE{Type: ie.TypeThrottling, Value: []byte{40, 180}},
+	)
+	if err != nil {
+		t.Fatalf("Marshal DDN Ack: %v", err)
+	}
+
+	h.handleDownlinkDataNotificationAck(&net.UDPAddr{IP: net.ParseIP("10.90.250.77"), Port: 30032}, raw)
+
+	snap := ddnCtl.Snapshot()
+	if len(snap.MMEs) != 1 {
+		t.Fatalf("DDN MME states = %d; want 1", len(snap.MMEs))
+	}
+	if snap.MMEs[0].MMEAddr != "10.90.250.77:2123" ||
+		snap.MMEs[0].LowPriorityThrottleReason != "ddn-ack-low-priority-throttling" ||
+		snap.MMEs[0].LowPriorityThrottledUntil.IsZero() {
+		t.Fatalf("DDN MME state = %+v; want canonical MME throttle state", snap.MMEs[0])
+	}
+	decision := ddnCtl.Decide(ddncontrol.Candidate{
+		MMEAddr: "10.90.250.77:2123",
+		IMSI:    "311435300070600",
+		APN:     "internet",
+		EBI:     5,
+		QCI:     9,
+	}, time.Now())
+	if decision.Action != ddncontrol.ActionSuppress || decision.Reason != "mme-low-priority-throttling" {
+		t.Fatalf("DDN decision = %+v; want low-priority suppression from MME throttle", decision)
+	}
+}
+
+func TestDDNLowPriorityThrottleDurationUsesConfigFallback(t *testing.T) {
+	h := &Handler{cfg: &sgwcconfig.Config{}}
+	h.cfg.GTPC.DDNControl.LowPriorityThrottleSeconds = 55
+
+	got := h.ddnLowPriorityThrottleDuration(&ie.IE{Type: ie.TypeThrottling, Value: []byte{0, 180}})
+	if got != 55*time.Second {
+		t.Fatalf("throttle duration = %s; want 55s config fallback", got)
 	}
 }
 

@@ -173,6 +173,14 @@ if [[ -n "$LOG_FILE" ]]; then
       echo "WARN: SGW-C log does not contain expected marker: $pattern" >&2
     fi
   done
+  ddn_controlled=$(grep -Fc 'MME restoration DDN controlled' "$LOG_FILE" || true)
+  ddn_delayed=$(grep -Fc 'MME restoration DDN delayed' "$LOG_FILE" || true)
+  high_priority_bypass=$(grep -Fc 'high-priority-bypass' "$LOG_FILE" || true)
+  mme_low_priority_throttle=$(grep -Fc 'mme-low-priority-throttling' "$LOG_FILE" || true)
+  echo "SGW-C DDN controlled decisions: $ddn_controlled"
+  echo "SGW-C DDN delayed decisions: $ddn_delayed"
+  echo "SGW-C high-priority bypass decisions: $high_priority_bypass"
+  echo "SGW-C MME low-priority throttle suppressions: $mme_low_priority_throttle"
 fi
 
 if (( failed != 0 )); then

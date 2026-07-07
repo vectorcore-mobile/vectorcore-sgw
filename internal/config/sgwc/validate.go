@@ -66,6 +66,9 @@ func (c *Config) Validate() error {
 	if err := c.validateMMERestoration(); err != nil {
 		return err
 	}
+	if err := c.validateDDNControl(); err != nil {
+		return err
+	}
 	if err := validateDSCP("qos.outer_marking.gtpc.dscp", c.QoS.OuterMarking.GTPC.DSCP); err != nil {
 		return err
 	}
@@ -106,6 +109,58 @@ func (c *Config) validateMMERestoration() error {
 }
 
 func validateMMERestorationRule(path string, rule MMERestorationPolicyRuleConfig) error {
+	if rule.ARPPriorityMin > 15 {
+		return fmt.Errorf("%s.arp_priority_min must be in range 0-15, got %d", path, rule.ARPPriorityMin)
+	}
+	if rule.ARPPriorityMax > 15 {
+		return fmt.Errorf("%s.arp_priority_max must be in range 0-15, got %d", path, rule.ARPPriorityMax)
+	}
+	if rule.ARPPriorityMin != 0 && rule.ARPPriorityMax != 0 && rule.ARPPriorityMin > rule.ARPPriorityMax {
+		return fmt.Errorf("%s ARP priority min must be less than or equal to max", path)
+	}
+	return nil
+}
+
+func (c *Config) validateDDNControl() error {
+	ddn := c.GTPC.DDNControl
+	if ddn.PerMMERateLimitPerSecond <= 0 {
+		return fmt.Errorf("gtpc.ddn_control.per_mme_rate_limit_per_second must be positive")
+	}
+	if ddn.PerMMEBurst <= 0 {
+		return fmt.Errorf("gtpc.ddn_control.per_mme_burst must be positive")
+	}
+	if ddn.PerUESuppressionSeconds < 0 {
+		return fmt.Errorf("gtpc.ddn_control.per_ue_suppression_seconds must be non-negative")
+	}
+	if ddn.LowPriorityThrottleSeconds < 0 {
+		return fmt.Errorf("gtpc.ddn_control.low_priority_throttle_seconds must be non-negative")
+	}
+	if ddn.DelayedQueueMax <= 0 {
+		return fmt.Errorf("gtpc.ddn_control.delayed_queue_max must be positive")
+	}
+	if ddn.DelayedQueuePerMME <= 0 {
+		return fmt.Errorf("gtpc.ddn_control.delayed_queue_per_mme must be positive")
+	}
+	if ddn.DelayedMaxAgeSeconds <= 0 {
+		return fmt.Errorf("gtpc.ddn_control.delayed_max_age_seconds must be positive")
+	}
+	if ddn.StopPagingOnDDNAck && !ddn.StopPagingEnabled {
+		return fmt.Errorf("gtpc.ddn_control.stop_paging_on_ddn_ack requires stop_paging_enabled")
+	}
+	for i, rule := range ddn.HighPriority {
+		if err := validateDDNControlPriorityRule(fmt.Sprintf("gtpc.ddn_control.high_priority[%d]", i), rule); err != nil {
+			return err
+		}
+	}
+	for i, rule := range ddn.LowPriority {
+		if err := validateDDNControlPriorityRule(fmt.Sprintf("gtpc.ddn_control.low_priority[%d]", i), rule); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func validateDDNControlPriorityRule(path string, rule DDNControlPriorityRuleConfig) error {
 	if rule.ARPPriorityMin > 15 {
 		return fmt.Errorf("%s.arp_priority_min must be in range 0-15, got %d", path, rule.ARPPriorityMin)
 	}

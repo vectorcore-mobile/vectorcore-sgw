@@ -18,6 +18,7 @@ import (
 	pfcpie "vectorcore-sgw/internal/pfcp/ie"
 	"vectorcore-sgw/internal/sgwc/bearer"
 	"vectorcore-sgw/internal/sgwc/collision"
+	"vectorcore-sgw/internal/sgwc/ddncontrol"
 	"vectorcore-sgw/internal/sgwc/peerhealth"
 	"vectorcore-sgw/internal/sgwc/pfcpclient"
 	"vectorcore-sgw/internal/sgwc/recovery"
@@ -36,6 +37,7 @@ type Handler struct {
 	pfcp             pfcpClient
 	collisionMetrics collisionMetrics
 	nsaMetrics       nsaMetrics
+	ddnCtl           *ddncontrol.State
 	peerHealth       *peerhealth.Table
 	collisionMode    collision.Mode
 	collisionTimeout time.Duration
@@ -207,6 +209,10 @@ func (h *Handler) SetPeerHealth(table *peerhealth.Table) {
 	h.peerHealth = table
 }
 
+func (h *Handler) SetDDNControl(state *ddncontrol.State) {
+	h.ddnCtl = state
+}
+
 func (h *Handler) AllocSeq() uint32 {
 	return h.conn.AllocSeq()
 }
@@ -360,7 +366,10 @@ func (h *Handler) handleDownlinkDataNotificationAck(addr *net.UDPAddr, raw []byt
 			"cause", cause)
 		return
 	}
-	sess.MarkMMERestorationDDNAck(cause, time.Now())
+	now := time.Now()
+	sess.MarkMMERestorationDDNAck(cause, now)
+	throttleUntil := h.markDDNLowPriorityThrottle(addr, ack, now)
+	stopPagingSeq, stopPagingErr := h.maybeSendStopPagingAfterDDNAck(sess, cause, now)
 	h.log.Info("S11: Downlink Data Notification Ack received",
 		"from", addr,
 		"session_id", sess.SessionID,
@@ -371,7 +380,80 @@ func (h *Handler) handleDownlinkDataNotificationAck(addr *net.UDPAddr, raw []byt
 		"seq", ack.SequenceNumber,
 		"cause", cause,
 		"delay_present", ack.DataNotificationDelay != nil,
-		"throttling_present", ack.LowPriorityTrafficThrottling != nil)
+		"throttling_present", ack.LowPriorityTrafficThrottling != nil,
+		"low_priority_throttle_until", throttleUntil,
+		"stop_paging_seq", stopPagingSeq,
+		"stop_paging_error", stopPagingErr)
+}
+
+func (h *Handler) maybeSendStopPagingAfterDDNAck(sess *session.SGWSession, cause uint8, at time.Time) (uint32, string) {
+	if h == nil || h.cfg == nil || sess == nil {
+		return 0, ""
+	}
+	if !h.cfg.GTPC.DDNControl.StopPagingEnabled || !h.cfg.GTPC.DDNControl.StopPagingOnDDNAck {
+		return 0, ""
+	}
+	if cause != ie.CauseRequestAccepted {
+		return 0, ""
+	}
+	status := sess.MMERestorationSnapshot()
+	if !status.RestorationPending || !status.DDNTriggered || status.StopPagingSent || status.UserPlaneRestored {
+		return 0, ""
+	}
+	timeout := time.Duration(h.cfg.GTPC.MMERestoration.CleanupTimeoutSeconds) * time.Second
+	if timeout <= 0 {
+		timeout = 30 * time.Second
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	seq, err := h.SendStopPagingIndication(ctx, sess)
+	if err != nil {
+		h.log.Warn("S11: Stop Paging Indication skipped after DDN Ack",
+			"session_id", sess.SessionID,
+			"imsi", sess.IMSI,
+			"apn", sess.APN,
+			"default_ebi", sess.DefaultBearerID,
+			"error", err)
+		return 0, err.Error()
+	}
+	h.log.Info("S11: Stop Paging Indication triggered after DDN Ack",
+		"session_id", sess.SessionID,
+		"imsi", sess.IMSI,
+		"apn", sess.APN,
+		"default_ebi", sess.DefaultBearerID,
+		"seq", seq,
+		"at", at)
+	return seq, ""
+}
+
+func (h *Handler) markDDNLowPriorityThrottle(addr *net.UDPAddr, ack *message.DownlinkDataNotificationAck, at time.Time) time.Time {
+	if h == nil || h.ddnCtl == nil || ack == nil || ack.LowPriorityTrafficThrottling == nil {
+		return time.Time{}
+	}
+	duration := h.ddnLowPriorityThrottleDuration(ack.LowPriorityTrafficThrottling)
+	if duration <= 0 {
+		return time.Time{}
+	}
+	mmeAddr := ""
+	if addr != nil {
+		mmeAddr = session.CanonicalGTPCEndpoint(addr.String())
+	}
+	if mmeAddr == "" {
+		return time.Time{}
+	}
+	until := at.Add(duration)
+	h.ddnCtl.MarkMMELowPriorityThrottled(mmeAddr, "ddn-ack-low-priority-throttling", until, at)
+	return until
+}
+
+func (h *Handler) ddnLowPriorityThrottleDuration(throttling *ie.IE) time.Duration {
+	if throttling != nil && len(throttling.Value) > 0 && throttling.Value[0] != 0 {
+		return time.Duration(throttling.Value[0]) * time.Second
+	}
+	if h != nil && h.cfg != nil && h.cfg.GTPC.DDNControl.LowPriorityThrottleSeconds > 0 {
+		return time.Duration(h.cfg.GTPC.DDNControl.LowPriorityThrottleSeconds) * time.Second
+	}
+	return 0
 }
 
 func (h *Handler) handleDownlinkDataNotificationFailureIndication(addr *net.UDPAddr, raw []byte) {

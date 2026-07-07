@@ -112,6 +112,11 @@ type MMERestorationStatus struct {
 	DDNFailureAt        time.Time
 	DDNFailureCause     uint8
 	DDNFailureReason    string
+	DDNControlAction    string
+	DDNControlPriority  string
+	DDNControlReason    string
+	DDNControlRetryAt   time.Time
+	DDNControlDecidedAt time.Time
 	StopPagingSent      bool
 	StopPagingSentAt    time.Time
 	StopPagingSequence  uint32
@@ -493,6 +498,26 @@ func (s *SGWSession) MarkMMERestorationDDNFailed(reason string, at time.Time) {
 		at = time.Now()
 	}
 	s.MMERestoration.DDNFailureReason = reason
+	s.UpdatedAt = at
+}
+
+// MarkMMERestorationDDNControlDecision records the DDN throttling/priority
+// decision made before SGW-C attempts an S11 DDN send.
+func (s *SGWSession) MarkMMERestorationDDNControlDecision(action, priority, reason string, retryAfter time.Duration, at time.Time) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if at.IsZero() {
+		at = time.Now()
+	}
+	s.MMERestoration.DDNControlAction = action
+	s.MMERestoration.DDNControlPriority = priority
+	s.MMERestoration.DDNControlReason = reason
+	s.MMERestoration.DDNControlDecidedAt = at
+	if retryAfter > 0 {
+		s.MMERestoration.DDNControlRetryAt = at.Add(retryAfter)
+	} else {
+		s.MMERestoration.DDNControlRetryAt = time.Time{}
+	}
 	s.UpdatedAt = at
 }
 

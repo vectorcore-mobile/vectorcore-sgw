@@ -56,6 +56,7 @@ type GTPCConfig struct {
 	PeerHealth             PeerHealthConfig             `yaml:"peer_health"`
 	PGWFailure             PGWFailureConfig             `yaml:"pgw_failure"`
 	MMERestoration         MMERestorationConfig         `yaml:"mme_restoration"`
+	DDNControl             DDNControlConfig             `yaml:"ddn_control"`
 }
 
 type GTPCLogical struct {
@@ -116,6 +117,31 @@ type MMERestorationConfig struct {
 }
 
 type MMERestorationPolicyRuleConfig struct {
+	APN            string `yaml:"apn"`
+	QCI            uint8  `yaml:"qci"`
+	ARPPriorityMin uint8  `yaml:"arp_priority_min"`
+	ARPPriorityMax uint8  `yaml:"arp_priority_max"`
+	Reason         string `yaml:"reason"`
+}
+
+type DDNControlConfig struct {
+	Enabled                       bool                           `yaml:"enabled"`
+	PerMMERateLimitPerSecond      int                            `yaml:"per_mme_rate_limit_per_second"`
+	PerMMEBurst                   int                            `yaml:"per_mme_burst"`
+	PerUESuppressionSeconds       int                            `yaml:"per_ue_suppression_seconds"`
+	HonorMMELowPriorityThrottling bool                           `yaml:"honor_mme_low_priority_throttling"`
+	LowPriorityThrottleSeconds    int                            `yaml:"low_priority_throttle_seconds"`
+	HighPriorityBypass            bool                           `yaml:"high_priority_bypass"`
+	DelayedQueueMax               int                            `yaml:"delayed_queue_max"`
+	DelayedQueuePerMME            int                            `yaml:"delayed_queue_per_mme"`
+	DelayedMaxAgeSeconds          int                            `yaml:"delayed_max_age_seconds"`
+	StopPagingEnabled             bool                           `yaml:"stop_paging_enabled"`
+	StopPagingOnDDNAck            bool                           `yaml:"stop_paging_on_ddn_ack"`
+	HighPriority                  []DDNControlPriorityRuleConfig `yaml:"high_priority"`
+	LowPriority                   []DDNControlPriorityRuleConfig `yaml:"low_priority"`
+}
+
+type DDNControlPriorityRuleConfig struct {
 	APN            string `yaml:"apn"`
 	QCI            uint8  `yaml:"qci"`
 	ARPPriorityMin uint8  `yaml:"arp_priority_min"`
@@ -229,6 +255,28 @@ func Default() *Config {
 					{APN: "ims", Reason: "default-preserve-ims"},
 					{QCI: 1, Reason: "default-preserve-qci-1"},
 					{ARPPriorityMin: 1, ARPPriorityMax: 3, Reason: "default-preserve-high-priority-arp"},
+				},
+			},
+			DDNControl: DDNControlConfig{
+				Enabled:                       true,
+				PerMMERateLimitPerSecond:      50,
+				PerMMEBurst:                   100,
+				PerUESuppressionSeconds:       10,
+				HonorMMELowPriorityThrottling: true,
+				LowPriorityThrottleSeconds:    30,
+				HighPriorityBypass:            true,
+				DelayedQueueMax:               1000,
+				DelayedQueuePerMME:            200,
+				DelayedMaxAgeSeconds:          30,
+				StopPagingEnabled:             false,
+				StopPagingOnDDNAck:            false,
+				HighPriority: []DDNControlPriorityRuleConfig{
+					{APN: "ims", Reason: "default-high-priority-ims"},
+					{QCI: 1, Reason: "default-high-priority-qci-1"},
+					{ARPPriorityMin: 1, ARPPriorityMax: 3, Reason: "default-high-priority-arp"},
+				},
+				LowPriority: []DDNControlPriorityRuleConfig{
+					{APN: "internet", QCI: 9, Reason: "default-low-priority-internet-qci-9"},
 				},
 			},
 		},

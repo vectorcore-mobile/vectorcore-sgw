@@ -55,6 +55,31 @@ gtpc:
       - apn: "internet"
         qci: 9
         reason: "low-priority internet PDN can be released after MME restart"
+  ddn_control:
+    enabled: true
+    per_mme_rate_limit_per_second: 50
+    per_mme_burst: 100
+    per_ue_suppression_seconds: 10
+    honor_mme_low_priority_throttling: true
+    low_priority_throttle_seconds: 30
+    high_priority_bypass: true
+    delayed_queue_max: 1000
+    delayed_queue_per_mme: 200
+    delayed_max_age_seconds: 30
+    stop_paging_enabled: false
+    stop_paging_on_ddn_ack: false
+    high_priority:
+      - apn: "ims"
+        reason: "prioritize IMS paging"
+      - qci: 1
+        reason: "prioritize conversational bearer paging"
+      - arp_priority_min: 1
+        arp_priority_max: 3
+        reason: "prioritize high ARP paging"
+    low_priority:
+      - apn: "internet"
+        qci: 9
+        reason: "throttle low-priority internet DDN first"
 
 s11:
   t3_response_seconds: 3

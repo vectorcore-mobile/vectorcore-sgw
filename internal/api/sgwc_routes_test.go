@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"vectorcore-sgw/internal/sgwc/bearer"
+	"vectorcore-sgw/internal/sgwc/ddncontrol"
 	"vectorcore-sgw/internal/sgwc/mmerestoration"
 	"vectorcore-sgw/internal/sgwc/peerhealth"
 	"vectorcore-sgw/internal/sgwc/pgwfailure"
@@ -164,6 +165,7 @@ func TestSGWCRoutesExposeMMERestorationState(t *testing.T) {
 	sess.MarkMMERestart("10.1.1.1:2123", 7, at)
 	sess.SetMMERestorationPolicy(session.MMERestorationPolicyPreserve, "preserve-ims", at.Add(time.Second))
 	sess.MarkMMERestorationDDNTriggered(0x123456, at.Add(2*time.Second))
+	sess.MarkMMERestorationDDNControlDecision("send_now", "high", "high-priority-bypass", 0, at.Add(2*time.Second))
 	sess.MarkMMERestorationDDNAck(16, at.Add(3*time.Second))
 	sess.MarkMMERestorationUserPlaneRestored(5, at.Add(4*time.Second))
 
@@ -181,6 +183,9 @@ func TestSGWCRoutesExposeMMERestorationState(t *testing.T) {
 		got.DDNSequence != "0x123456" ||
 		!got.DDNAcked ||
 		got.DDNAckCause != 16 ||
+		got.DDNControlAction != "send_now" ||
+		got.DDNControlPriority != "high" ||
+		got.DDNControlReason != "high-priority-bypass" ||
 		!got.UserPlaneRestored ||
 		got.RestoredEBI != 5 {
 		t.Fatalf("MME restoration view = %+v; want completed preserved restoration", got)
@@ -273,6 +278,42 @@ func TestMMERestorationRoutesExposeSummary(t *testing.T) {
 		got.AffectedSessions != 1 || got.RecoveryCounter != 7 ||
 		got.Restarts != 1 || got.PathDownEvents != 1 {
 		t.Fatalf("MME restoration summary = %+v; want restarted affected MME", got)
+	}
+}
+
+func TestDDNControlRoutesExposeSnapshot(t *testing.T) {
+	state := ddncontrol.NewState(ddncontrol.Config{
+		Enabled:                  true,
+		PerMMERateLimitPerSecond: 10,
+		PerMMEBurst:              20,
+		HighPriorityBypass:       true,
+		HighPriority:             []ddncontrol.PriorityRule{{APN: "ims"}},
+	})
+	at := time.Unix(100, 0).UTC()
+	state.RecordSent(ddncontrol.Candidate{
+		MMEAddr:     "10.1.1.1:2123",
+		IMSI:        "311430000000001",
+		APN:         "ims",
+		EBI:         6,
+		QCI:         1,
+		ARPPriority: 1,
+	}, ddncontrol.PriorityHigh, at)
+	state.MarkMMELowPriorityThrottled("10.1.1.1:2123", "ddn-ack-low-priority-throttling", at.Add(30*time.Second), at)
+
+	srv := NewServer("127.0.0.1:0", BuildInfo{Version: "test", BuildDate: "now"}, slog.New(slog.DiscardHandler))
+	RegisterDDNControlRoutes(srv.HumaAPI(), state)
+	var out DDNControlOutput
+	getJSON(t, srv, "/gtpc/ddn-control", &out.Body)
+
+	if out.Body.MMETotal != 1 || out.Body.UETotal != 1 {
+		t.Fatalf("DDN control totals = mme:%d ue:%d; want 1/1", out.Body.MMETotal, out.Body.UETotal)
+	}
+	if got := out.Body.MMEs[0]; got.MMEAddr != "10.1.1.1:2123" || got.Sent != 1 ||
+		got.HighPriorityBypassed != 1 || got.LowPriorityThrottleReason != "ddn-ack-low-priority-throttling" {
+		t.Fatalf("DDN MME view = %+v; want sent/high-priority/throttle state", got)
+	}
+	if got := out.Body.UEs[0]; got.IMSI != "311430000000001" || got.LastPriority != "high" || got.LastEBI != 6 || got.Sent != 1 {
+		t.Fatalf("DDN UE view = %+v; want high-priority sent UE state", got)
 	}
 }
 

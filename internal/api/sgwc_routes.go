@@ -75,6 +75,11 @@ type MMERestorationView struct {
 	DDNFailureAt        time.Time `json:"ddn_failure_at,omitempty"`
 	DDNFailureCause     uint8     `json:"ddn_failure_cause,omitempty"`
 	DDNFailureReason    string    `json:"ddn_failure_reason,omitempty"`
+	DDNControlAction    string    `json:"ddn_control_action,omitempty"`
+	DDNControlPriority  string    `json:"ddn_control_priority,omitempty"`
+	DDNControlReason    string    `json:"ddn_control_reason,omitempty"`
+	DDNControlRetryAt   time.Time `json:"ddn_control_retry_at,omitempty"`
+	DDNControlDecidedAt time.Time `json:"ddn_control_decided_at,omitempty"`
 	StopPagingSent      bool      `json:"stop_paging_sent"`
 	StopPagingSentAt    time.Time `json:"stop_paging_sent_at,omitempty"`
 	StopPagingSequence  string    `json:"stop_paging_sequence,omitempty"`
@@ -229,6 +234,11 @@ func mmeRestorationToView(status session.MMERestorationStatus) MMERestorationVie
 		DDNFailureAt:        status.DDNFailureAt,
 		DDNFailureCause:     status.DDNFailureCause,
 		DDNFailureReason:    status.DDNFailureReason,
+		DDNControlAction:    status.DDNControlAction,
+		DDNControlPriority:  status.DDNControlPriority,
+		DDNControlReason:    status.DDNControlReason,
+		DDNControlRetryAt:   status.DDNControlRetryAt,
+		DDNControlDecidedAt: status.DDNControlDecidedAt,
 		StopPagingSent:      status.StopPagingSent,
 		StopPagingSentAt:    status.StopPagingSentAt,
 		StopPagingSequence:  fmt.Sprintf("0x%06X", status.StopPagingSequence),
