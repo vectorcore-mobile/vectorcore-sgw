@@ -5,6 +5,7 @@ package message
 import (
 	"encoding/binary"
 	"fmt"
+	"math"
 
 	"vectorcore-sgw/internal/gtpv2/ie"
 )
@@ -295,7 +296,17 @@ func MarshalHeader(h Header, bodyLen int) []byte {
 func Marshal(h Header, ies []*ie.IE) ([]byte, error) {
 	var body []byte
 	for _, i := range ies {
+		if len(i.Value) > math.MaxUint16 {
+			return nil, fmt.Errorf("GTPv2-C IE type %d instance %d length %d exceeds uint16", i.Type, i.Instance, len(i.Value))
+		}
 		body = append(body, i.Marshal()...)
+	}
+	headerBodyLen := len(body) + headerLenWithoutTEID - 4
+	if h.HasTEID {
+		headerBodyLen = len(body) + headerLenWithTEID - 4
+	}
+	if headerBodyLen > math.MaxUint16 {
+		return nil, fmt.Errorf("GTPv2-C message type %d length %d exceeds uint16", h.MessageType, headerBodyLen)
 	}
 	hdr := MarshalHeader(h, len(body))
 	return append(hdr, body...), nil
@@ -351,7 +362,7 @@ func MarshalInvalidLengthResponse(reqHdr Header, peerTEID uint32) ([]byte, error
 	}
 	h := Header{
 		Version:        2,
-		HasTEID:        true,
+		HasTEID:        respType != MsgTypeEchoResponse,
 		MessageType:    respType,
 		TEID:           peerTEID,
 		SequenceNumber: reqHdr.SequenceNumber,

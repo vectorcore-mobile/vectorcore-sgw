@@ -45,6 +45,11 @@ type BPFRuleInstaller interface {
 	RemoveSession(sess *sgwusession.Session) error
 }
 
+// PathPeerTracker receives remote GTP-U peer addresses that should be echo-probed.
+type PathPeerTracker interface {
+	Add(peer netip.Addr)
+}
+
 type parsedFARUpdate struct {
 	farID       uint32
 	applyAction *pfcpie.IE
@@ -99,6 +104,7 @@ type Server struct {
 	log         *slog.Logger
 	emSender    EndMarkerSender  // optional; wired after both server and forwarder are created
 	bpfInstall  BPFRuleInstaller // optional; wired when eBPF dataplane is active
+	pathPeers   PathPeerTracker  // optional; learns remote GTP-U peers from FARs
 }
 
 // SetEndMarkerSender wires the GTP-U forwarder so that PFCP-triggered tunnel
@@ -112,6 +118,11 @@ func (s *Server) SetEndMarkerSender(sender EndMarkerSender) {
 // reflected in the kernel BPF forwarding maps.
 func (s *Server) SetBPFInstaller(installer BPFRuleInstaller) {
 	s.bpfInstall = installer
+}
+
+// SetPathPeerTracker wires GTP-U path probing to PFCP session state.
+func (s *Server) SetPathPeerTracker(tracker PathPeerTracker) {
+	s.pathPeers = tracker
 }
 
 // New creates an SGW-U PFCP server ready to serve.
@@ -681,6 +692,7 @@ func (s *Server) handleSessionEstablishment(conn *pfcptransport.Conn, addr *net.
 			return
 		}
 	}
+	s.trackSessionPathPeers(sess)
 
 	s.log.Info("PFCP session established",
 		"from", addr,
@@ -824,6 +836,7 @@ func (s *Server) handleSessionModification(conn *pfcptransport.Conn, addr *net.U
 		s.replySessionModRuleFailure(conn, addr, req)
 		return
 	}
+	s.trackSessionPathPeers(sess)
 
 	for _, ev := range endMarkers {
 		if s.emSender == nil {
@@ -1005,6 +1018,22 @@ func (s *Server) applySessionModification(sess *sgwusession.Session, req *pfcpms
 	sess.PDRs = candidate.PDRs
 	sess.FARs = candidate.FARs
 	return createdPDRIEs, endMarkers, nil
+}
+
+func (s *Server) trackSessionPathPeers(sess *sgwusession.Session) {
+	if s.pathPeers == nil || sess == nil {
+		return
+	}
+	sess.Mu.RLock()
+	defer sess.Mu.RUnlock()
+	seen := make(map[netip.Addr]bool, len(sess.FARs))
+	for _, far := range sess.FARs {
+		if !far.OuterIP.IsValid() || !far.OuterIP.Is4() || seen[far.OuterIP] {
+			continue
+		}
+		seen[far.OuterIP] = true
+		s.pathPeers.Add(far.OuterIP)
+	}
 }
 
 func parseCreatePDR(cpdrIE *pfcpie.IE) (sgwusession.PDR, bool, error) {

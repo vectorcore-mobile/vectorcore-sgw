@@ -8,6 +8,8 @@ import (
 	"net"
 	"net/netip"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -25,9 +27,9 @@ func TestInboundRetransmitResendsCachedResponseBytes(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = conn.Close() })
 
-	handlerCalls := 0
+	var handlerCalls atomic.Int32
 	conn.SetHandler(func(c *Conn, addr *net.UDPAddr, hdr message.Header, raw []byte) {
-		handlerCalls++
+		calls := handlerCalls.Add(1)
 		respHdr := message.Header{
 			Version:        2,
 			HasTEID:        true,
@@ -37,7 +39,7 @@ func TestInboundRetransmitResendsCachedResponseBytes(t *testing.T) {
 		}
 		resp, err := message.Marshal(respHdr, []*ie.IE{
 			ie.NewCause(ie.CauseRequestAccepted, 0, 0, 0, nil),
-			ie.NewRecovery(uint8(handlerCalls)),
+			ie.NewRecovery(uint8(calls)),
 		})
 		if err != nil {
 			t.Errorf("Marshal response: %v", err)
@@ -90,8 +92,8 @@ func TestInboundRetransmitResendsCachedResponseBytes(t *testing.T) {
 	if !bytes.Equal(first, second) {
 		t.Fatalf("cached retransmit bytes differ\nfirst:  % X\nsecond: % X", first, second)
 	}
-	if handlerCalls != 1 {
-		t.Fatalf("handler calls = %d; want 1 (duplicate must use cached response)", handlerCalls)
+	if calls := handlerCalls.Load(); calls != 1 {
+		t.Fatalf("handler calls = %d; want 1 (duplicate must use cached response)", calls)
 	}
 }
 
@@ -105,9 +107,9 @@ func TestInboundRetransmitResendsCachedPiggybackedResponseBytes(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = conn.Close() })
 
-	handlerCalls := 0
+	var handlerCalls atomic.Int32
 	conn.SetHandler(func(c *Conn, addr *net.UDPAddr, hdr message.Header, raw []byte) {
-		handlerCalls++
+		handlerCalls.Add(1)
 		primary, err := message.Marshal(message.Header{
 			Version:        2,
 			HasTEID:        true,
@@ -191,8 +193,8 @@ func TestInboundRetransmitResendsCachedPiggybackedResponseBytes(t *testing.T) {
 	if frames[0].Header.MessageType != message.MsgTypeCreateSessionResponse || frames[1].Header.MessageType != message.MsgTypeCreateBearerRequest {
 		t.Fatalf("cached frame types = %d/%d; want 33/95", frames[0].Header.MessageType, frames[1].Header.MessageType)
 	}
-	if handlerCalls != 1 {
-		t.Fatalf("handler calls = %d; want 1", handlerCalls)
+	if calls := handlerCalls.Load(); calls != 1 {
+		t.Fatalf("handler calls = %d; want 1", calls)
 	}
 }
 
@@ -206,9 +208,14 @@ func TestInboundRetransmitCacheDoesNotMatchDifferentMessageTypeSameSequence(t *t
 	}
 	t.Cleanup(func() { _ = conn.Close() })
 
-	var handled []uint8
+	var (
+		handledMu sync.Mutex
+		handled   []uint8
+	)
 	conn.SetHandler(func(c *Conn, addr *net.UDPAddr, hdr message.Header, raw []byte) {
+		handledMu.Lock()
 		handled = append(handled, hdr.MessageType)
+		handledMu.Unlock()
 		respType, ok := message.ResponseTypeFor(hdr.MessageType)
 		if !ok {
 			t.Errorf("ResponseTypeFor(%d): !ok", hdr.MessageType)
@@ -291,8 +298,11 @@ func TestInboundRetransmitCacheDoesNotMatchDifferentMessageTypeSameSequence(t *t
 	if secondHdr.MessageType != message.MsgTypeModifyBearerResponse {
 		t.Fatalf("second response type = %d; want MBResp, not cached CSResp", secondHdr.MessageType)
 	}
-	if len(handled) != 2 || handled[0] != message.MsgTypeCreateSessionRequest || handled[1] != message.MsgTypeModifyBearerRequest {
-		t.Fatalf("handled message types = %v; want CSR then MBR", handled)
+	handledMu.Lock()
+	gotHandled := append([]uint8(nil), handled...)
+	handledMu.Unlock()
+	if len(gotHandled) != 2 || gotHandled[0] != message.MsgTypeCreateSessionRequest || gotHandled[1] != message.MsgTypeModifyBearerRequest {
+		t.Fatalf("handled message types = %v; want CSR then MBR", gotHandled)
 	}
 }
 

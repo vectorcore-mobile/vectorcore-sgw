@@ -239,6 +239,7 @@ func main() {
 			os.Exit(1)
 		}
 	}
+	s11Handler.SetBaseContext(ctx)
 	s11Handler.SetPeerHealth(gtpcPeers)
 	s11Handler.SetCollisionMetrics(collisionMetrics)
 	s11Handler.SetNSAMetrics(nsaMetrics)

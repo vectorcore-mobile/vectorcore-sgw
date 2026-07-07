@@ -16,6 +16,7 @@ import (
 	sgwcconfig "vectorcore-sgw/internal/config/sgwc"
 	"vectorcore-sgw/internal/gtpv2/ie"
 	"vectorcore-sgw/internal/gtpv2/message"
+	"vectorcore-sgw/internal/gtpv2/transport"
 	pfcpie "vectorcore-sgw/internal/pfcp/ie"
 	"vectorcore-sgw/internal/sgwc/bearer"
 	"vectorcore-sgw/internal/sgwc/collision"
@@ -268,7 +269,7 @@ func TestHandleS5CDeleteBearerRejectsTransactionCollision(t *testing.T) {
 	}
 }
 
-func TestHandleS11DeleteBearerCommandRelaysToPGWAndRemovesBearer(t *testing.T) {
+func TestHandleS11DeleteBearerCommandRelaysToPGWAndPreservesBearerUntilOutcome(t *testing.T) {
 	mgr, sess := testCollisionSession(t)
 	sess.SetBearer(&bearer.Bearer{
 		EBI:    7,
@@ -304,11 +305,14 @@ func TestHandleS11DeleteBearerCommandRelaysToPGWAndRemovesBearer(t *testing.T) {
 
 	h.handle(nil, mmeAddr, hdr, raw)
 
-	if sess.GetBearer(7) != nil {
-		t.Fatal("dedicated bearer EBI 7 still exists after Delete Bearer Command")
+	if sess.GetBearer(7) == nil {
+		t.Fatal("dedicated bearer EBI 7 was removed before PGW outcome")
 	}
-	if pfcpFake.removes != 1 {
-		t.Fatalf("PFCP RemoveBearerRules calls = %d; want 1", pfcpFake.removes)
+	if pfcpFake.removes != 0 {
+		t.Fatalf("PFCP RemoveBearerRules calls = %d; want 0 before PGW outcome", pfcpFake.removes)
+	}
+	if len(h.dbCmds) != 1 {
+		t.Fatalf("pending Delete Bearer Command entries = %d; want 1", len(h.dbCmds))
 	}
 	if len(s5cFake.replies) != 1 {
 		t.Fatalf("S5C sends = %d; want 1 Delete Bearer Command to PGW", len(s5cFake.replies))
@@ -328,6 +332,128 @@ func TestHandleS11DeleteBearerCommandRelaysToPGWAndRemovesBearer(t *testing.T) {
 	}
 	if len(gtpc.replies) != 0 {
 		t.Fatalf("S11 failure indications = %d; want 0 on successful command", len(gtpc.replies))
+	}
+}
+
+func TestHandleS5CDeleteBearerFailureClearsPendingCommandWithoutDeletingBearer(t *testing.T) {
+	mgr, sess := testCollisionSession(t)
+	sess.SetBearer(&bearer.Bearer{
+		EBI:    7,
+		QCI:    1,
+		State:  bearer.BearerStateActive,
+		PDRIDs: [2]uint32{3, 4},
+		FARIDs: [2]uint32{3, 4},
+	})
+	gtpc := &fakeGTPCConn{}
+	h := &Handler{
+		conn:     gtpc,
+		log:      slog.Default(),
+		sessions: mgr,
+		s5c:      &fakeS5CClient{},
+		pfcp:     &fakePFCPClient{},
+		localIP:  netip.MustParseAddr("10.90.250.59"),
+		dbCmds:   make(map[deleteBearerCommandPendingKey]deleteBearerCommandPending),
+	}
+	h.markDeleteBearerCommandPending(sess, message.Header{
+		TEID:           sess.SGWS11FTEID.TEID,
+		SequenceNumber: 0x222222,
+	}, []uint8{7})
+	if len(h.dbCmds) != 1 {
+		t.Fatalf("pending Delete Bearer Command entries before failure = %d; want 1", len(h.dbCmds))
+	}
+	pgwAddr := &net.UDPAddr{IP: net.ParseIP("10.90.250.92"), Port: 2123}
+	hdr := message.Header{
+		Version:        2,
+		HasTEID:        true,
+		MessageType:    message.MsgTypeDeleteBearerFailureIndication,
+		TEID:           sess.SGWS5CFTEID.TEID,
+		SequenceNumber: 0x444444,
+	}
+	raw, err := message.MarshalDeleteBearerFailureIndication(hdr.TEID, hdr.SequenceNumber,
+		ie.NewCause(ie.CauseRequestRejected, 0, 0, 0, nil),
+		ie.NewBearerContext(0, ie.NewEBI(7), ie.NewCause(ie.CauseRequestRejected, 0, 0, 0, nil)),
+	)
+	if err != nil {
+		t.Fatalf("Marshal Delete Bearer Failure Indication: %v", err)
+	}
+
+	h.HandleS5CInbound(nil, pgwAddr, hdr, raw)
+
+	if len(h.dbCmds) != 0 {
+		t.Fatalf("pending Delete Bearer Command entries after failure = %d; want 0", len(h.dbCmds))
+	}
+	if sess.GetBearer(7) == nil {
+		t.Fatal("dedicated bearer EBI 7 was deleted after PGW failure indication")
+	}
+	if len(gtpc.replies) != 1 {
+		t.Fatalf("relayed S11 failure indications = %d; want 1", len(gtpc.replies))
+	}
+}
+
+func TestHandleS11DeleteBearerCommandParseErrorSendsFailureWithMMETEID(t *testing.T) {
+	mgr, sess := testCollisionSession(t)
+	gtpc := &fakeGTPCConn{}
+	conn, err := transport.Listen("127.0.0.1:0", 1, 1, slog.Default())
+	if err != nil {
+		t.Fatalf("Listen: %v", err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+	client, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 0})
+	if err != nil {
+		t.Fatalf("client ListenUDP: %v", err)
+	}
+	t.Cleanup(func() { _ = client.Close() })
+	if err := client.SetReadDeadline(time.Now().Add(2 * time.Second)); err != nil {
+		t.Fatalf("SetReadDeadline: %v", err)
+	}
+	h := &Handler{
+		conn:     gtpc,
+		log:      slog.Default(),
+		sessions: mgr,
+		s5c:      &fakeS5CClient{},
+		pfcp:     &fakePFCPClient{},
+		localIP:  netip.MustParseAddr("10.90.250.59"),
+	}
+	mmeAddr := client.LocalAddr().(*net.UDPAddr)
+	hdr := message.Header{
+		Version:        2,
+		HasTEID:        true,
+		MessageType:    message.MsgTypeDeleteBearerCommand,
+		TEID:           sess.SGWS11FTEID.TEID,
+		SequenceNumber: 0x333333,
+	}
+	raw, err := message.MarshalDeleteBearerCommand(hdr.TEID, hdr.SequenceNumber)
+	if err != nil {
+		t.Fatalf("Marshal malformed Delete Bearer Command: %v", err)
+	}
+
+	h.handleDeleteBearerCommand(conn, mmeAddr, hdr, raw)
+
+	buf := make([]byte, 1500)
+	n, _, err := client.ReadFromUDP(buf)
+	if err != nil {
+		t.Fatalf("Read failure indication: %v", err)
+	}
+	respHdr, respIEs, err := message.Parse(buf[:n])
+	if err != nil {
+		t.Fatalf("Parse Delete Bearer Failure Indication: %v", err)
+	}
+	if respHdr.MessageType != message.MsgTypeDeleteBearerFailureIndication {
+		t.Fatalf("response type = %d; want Delete Bearer Failure Indication", respHdr.MessageType)
+	}
+	if respHdr.TEID != sess.MMEControlFTEID.TEID {
+		t.Fatalf("response TEID = 0x%08X; want MME TEID 0x%08X", respHdr.TEID, sess.MMEControlFTEID.TEID)
+	}
+	causeIE := ie.FindFirst(respIEs, ie.TypeCause)
+	if causeIE == nil {
+		t.Fatal("Delete Bearer Failure Indication missing Cause")
+	}
+	cause, err := causeIE.CauseValue()
+	if err != nil {
+		t.Fatalf("CauseValue: %v", err)
+	}
+	if cause != ie.CauseInvalidMessageFormat {
+		t.Fatalf("cause = %d; want Invalid Message Format", cause)
 	}
 }
 

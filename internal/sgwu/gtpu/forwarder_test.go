@@ -344,6 +344,22 @@ func TestForwarderDropAction(t *testing.T) {
 	}
 }
 
+func TestForwarderGroupCreatesUniqueListeners(t *testing.T) {
+	store := sgwusession.NewStore()
+	group, err := NewGroup([]Endpoint{
+		{Listen: "127.0.0.1:0", LocalIP: netip.MustParseAddr("127.0.0.1")},
+		{Listen: "127.0.0.2:0", LocalIP: netip.MustParseAddr("127.0.0.2")},
+	}, store, discardSlog())
+	if err != nil {
+		t.Fatalf("NewGroup: %v", err)
+	}
+	defer group.Close() //nolint:errcheck
+
+	if got := len(group.Forwarders()); got != 2 {
+		t.Fatalf("forwarders = %d; want 2", got)
+	}
+}
+
 func FuzzForwarderHandleWithLocalIP(f *testing.F) {
 	f.Add([]byte{})
 	f.Add([]byte{0x30, MsgTypeGPDU, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00})

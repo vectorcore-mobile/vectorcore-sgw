@@ -293,8 +293,8 @@ func TestPathProberRecordResponseNoMatch(t *testing.T) {
 	prober, closeFn := newTestProber(t, peerPort, 2)
 	defer closeFn()
 
-	failCount := 0
-	prober.PathFailed = func(netip.Addr) { failCount++ }
+	failed := make(chan struct{}, 1)
+	prober.PathFailed = func(netip.Addr) { failed <- struct{}{} }
 
 	peerIP := netip.MustParseAddr("127.0.0.1")
 	prober.Add(peerIP)
@@ -313,8 +313,9 @@ func TestPathProberRecordResponseNoMatch(t *testing.T) {
 		buf := make([]byte, 256)
 		peerConn.ReadFromUDP(buf) //nolint:errcheck
 	}
-	time.Sleep(20 * time.Millisecond)
-	if failCount == 0 {
+	select {
+	case <-failed:
+	case <-time.After(200 * time.Millisecond):
 		t.Error("PathFailed should fire when mismatched response doesn't satisfy probe")
 	}
 }

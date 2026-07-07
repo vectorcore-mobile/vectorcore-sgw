@@ -5,11 +5,49 @@ import (
 	"encoding/binary"
 	"errors"
 	"net/netip"
+	"strings"
 	"testing"
 
 	"vectorcore-sgw/internal/gtpv2/ie"
 	"vectorcore-sgw/internal/gtpv2/message"
 )
+
+func TestMarshalRejectsOversizedIE(t *testing.T) {
+	_, err := message.Marshal(message.Header{
+		Version:        2,
+		HasTEID:        true,
+		MessageType:    message.MsgTypeCreateSessionRequest,
+		SequenceNumber: 1,
+	}, []*ie.IE{{
+		Type:  ie.TypePCO,
+		Value: make([]byte, 1<<16),
+	}})
+	if err == nil || !strings.Contains(err.Error(), "exceeds uint16") {
+		t.Fatalf("Marshal oversized IE error = %v; want uint16 length error", err)
+	}
+}
+
+func TestMarshalInvalidLengthEchoResponseUsesNoTEIDHeader(t *testing.T) {
+	raw, err := message.MarshalInvalidLengthResponse(message.Header{
+		Version:        2,
+		HasTEID:        false,
+		MessageType:    message.MsgTypeEchoRequest,
+		SequenceNumber: 0x010203,
+	}, 0)
+	if err != nil {
+		t.Fatalf("MarshalInvalidLengthResponse: %v", err)
+	}
+	hdr, _, err := message.Parse(raw)
+	if err != nil {
+		t.Fatalf("Parse invalid-length Echo response: %v", err)
+	}
+	if hdr.MessageType != message.MsgTypeEchoResponse {
+		t.Fatalf("message type = %d; want Echo Response", hdr.MessageType)
+	}
+	if hdr.HasTEID {
+		t.Fatal("Echo invalid-length response has TEID; want T=0")
+	}
+}
 
 func TestHeaderRoundtripWithTEID(t *testing.T) {
 	h := message.Header{

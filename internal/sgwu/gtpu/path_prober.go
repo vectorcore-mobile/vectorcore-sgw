@@ -82,6 +82,9 @@ func NewPathProber(
 	if probeInterval < EchoMinInterval {
 		probeInterval = EchoMinInterval
 	}
+	if t3Response <= 0 {
+		t3Response = T3ResponseDefault
+	}
 	if n3Requests <= 0 {
 		n3Requests = N3RequestsDefault
 	}
@@ -219,9 +222,9 @@ func (p *PathProber) sendEchoLocked(peer netip.Addr, seq uint16) {
 	hdr := Header{
 		Version: 1,
 		PT:      true,
-		S:       true,              // §5.1: "For the Echo Request...S flag shall be set to '1'"
+		S:       true,               // §5.1: "For the Echo Request...S flag shall be set to '1'"
 		MsgType: MsgTypeEchoRequest, // Table 6.1-1: "1 | Echo Request | GTP-U: X"
-		TEID:    0,                 // §5.1: TEID=0 for Echo Request
+		TEID:    0,                  // §5.1: TEID=0 for Echo Request
 		SeqNum:  seq,
 	}
 	pkt := Marshal(hdr, 0)
@@ -229,5 +232,51 @@ func (p *PathProber) sendEchoLocked(peer netip.Addr, seq uint16) {
 	dst := &net.UDPAddr{IP: a4[:], Port: p.port}
 	if _, err := p.conn.WriteToUDP(pkt, dst); err != nil {
 		p.log.Warn("GTP-U: Echo Request send failed", "peer", peer, "seq", seq, "error", err)
+	}
+}
+
+// PathProberGroup broadcasts peer tracking to a set of per-socket probers.
+type PathProberGroup struct {
+	probers []*PathProber
+}
+
+func NewPathProberGroup(probers ...*PathProber) *PathProberGroup {
+	return &PathProberGroup{probers: append([]*PathProber(nil), probers...)}
+}
+
+func (g *PathProberGroup) Add(peer netip.Addr) {
+	if !peer.IsValid() || !peer.Is4() {
+		return
+	}
+	for _, p := range g.probers {
+		p.Add(peer)
+	}
+}
+
+func (g *PathProberGroup) Serve(ctx context.Context) error {
+	errCh := make(chan error, len(g.probers))
+	var wg sync.WaitGroup
+	for _, prober := range g.probers {
+		wg.Add(1)
+		go func(p *PathProber) {
+			defer wg.Done()
+			errCh <- p.Serve(ctx)
+		}(prober)
+	}
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-ctx.Done():
+		<-done
+		return nil
+	case err := <-errCh:
+		if err != nil {
+			return err
+		}
+		<-done
+		return nil
 	}
 }

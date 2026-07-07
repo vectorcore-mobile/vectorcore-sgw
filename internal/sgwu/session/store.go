@@ -215,24 +215,28 @@ func (s *Store) DeleteByCPNodeKey(nodeKey string) []*Session {
 	return deleted
 }
 
-// FindByLocalTEID looks up the Session and PDR for an incoming GTP-U G-PDU
-// by searching for a PDR whose LocalTEID matches teid.
-// Returns nil, nil, false when not found.
+// FindByLocalTEID looks up the Session and a copy of the PDR for an incoming
+// GTP-U G-PDU by searching for a PDR whose LocalTEID matches teid.
+// Returns nil, zero PDR, false when not found.
 // Used by the GTP-U forwarder (Phase 6) to resolve forwarding state.
-func (s *Store) FindByLocalTEID(teid uint32) (*Session, *PDR, bool) {
+func (s *Store) FindByLocalTEID(teid uint32) (*Session, PDR, bool) {
 	if teid == 0 {
-		return nil, nil, false
+		return nil, PDR{}, false
 	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	for _, sess := range s.byCPSEID {
+		sess.Mu.RLock()
 		for i := range sess.PDRs {
 			if sess.PDRs[i].LocalTEID == teid {
-				return sess, &sess.PDRs[i], true
+				pdr := sess.PDRs[i]
+				sess.Mu.RUnlock()
+				return sess, pdr, true
 			}
 		}
+		sess.Mu.RUnlock()
 	}
-	return nil, nil, false
+	return nil, PDR{}, false
 }
 
 // Count returns the number of active sessions. Used for diagnostics.

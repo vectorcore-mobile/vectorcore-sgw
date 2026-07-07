@@ -69,16 +69,21 @@ func (c *Compiler) RemoveSession(sess *session.Session) error {
 // syncRules installs or removes all BPF rules for a session.
 // When remove=true, all rules are deleted. When false, they are installed/updated.
 func (c *Compiler) syncRules(sess *session.Session, remove bool) error {
+	sess.Mu.RLock()
+	pdrs := append([]session.PDR(nil), sess.PDRs...)
+	fars := append([]session.FAR(nil), sess.FARs...)
+	sess.Mu.RUnlock()
+
 	// Build FAR lookup map from FAR ID → FAR (for O(1) resolution per PDR).
-	farByID := make(map[uint32]*session.FAR, len(sess.FARs))
-	for i := range sess.FARs {
-		farByID[sess.FARs[i].ID] = &sess.FARs[i]
+	farByID := make(map[uint32]*session.FAR, len(fars))
+	for i := range fars {
+		farByID[fars[i].ID] = &fars[i]
 	}
 
 	var firstErr error
 	var added, updated, removed, unchanged int
-	for i := range sess.PDRs {
-		pdr := &sess.PDRs[i]
+	for i := range pdrs {
+		pdr := &pdrs[i]
 		if pdr.LocalTEID == 0 {
 			// No local TEID allocated (e.g., predefined rules); skip.
 			continue

@@ -113,7 +113,7 @@ func main() {
 
 	// GTP-U dataplane setup: eBPF fast path with a userspace signalling socket.
 	// Port 2152 per TS 29.281 §4.4.2.1: "The port number for GTP-U request messages is 2152."
-	var gtpuFwd *gtpu.Forwarder
+	var gtpuFwd *gtpu.ForwarderGroup
 	// xdpDp stays nil if attach_on_start=false; the API layer reports an empty
 	// BPF rule list in that case.
 	var xdpDp *bpf.XDPDataplane
@@ -177,7 +177,10 @@ func main() {
 	// BPF redirects matched G-PDUs before they reach the socket; the userspace
 	// listener handles Echo Request/Response, Error Indication, End Marker, and
 	// G-PDUs for unknown TEIDs (Error Indication per TS 29.281 §7.3.1).
-	gtpuFwd, err = gtpu.New(cfg.GTPUListen(), s1uLocalIP, pfcpSrv.SessionStore(), logger.Logger)
+	gtpuFwd, err = gtpu.NewGroup([]gtpu.Endpoint{
+		{Listen: s1u.Listen, LocalIP: s1uLocalIP},
+		{Listen: s5u.Listen, LocalIP: s5uLocalIP},
+	}, pfcpSrv.SessionStore(), logger.Logger)
 	if err != nil {
 		logger.Error("GTP-U signalling listener failed to start", "error", err)
 		os.Exit(1)
@@ -192,19 +195,25 @@ func main() {
 	// Phase 11: wire PathProber to report GTP-U path failures to SGW-C via PFCP Node Report.
 	// PathProber uses the same GTP-U socket as the forwarder per TS 29.281 §11/§12.
 	if gtpuFwd != nil {
-		prober := gtpu.NewPathProber(
-			gtpuFwd.Conn(),
-			30*time.Second, // probeInterval: probe each peer every 30s
-			3*time.Second,  // T3-RESPONSE: wait 3s between retries
-			3,              // N3-REQUESTS: 3 attempts before declaring failure
-			logger.Logger,
-		)
-		prober.PathFailed = func(peer netip.Addr) {
-			go pfcpSrv.HandlePathFailure(ctx, peer)
+		var probers []*gtpu.PathProber
+		for _, fwd := range gtpuFwd.Forwarders() {
+			prober := gtpu.NewPathProber(
+				fwd.Conn(),
+				gtpu.EchoMinInterval,
+				3*time.Second, // T3-RESPONSE: wait 3s between retries
+				3,             // N3-REQUESTS: 3 attempts before declaring failure
+				logger.Logger,
+			)
+			prober.PathFailed = func(peer netip.Addr) {
+				go pfcpSrv.HandlePathFailure(ctx, peer)
+			}
+			fwd.SetPathProber(prober)
+			probers = append(probers, prober)
 		}
-		gtpuFwd.SetPathProber(prober)
+		proberGroup := gtpu.NewPathProberGroup(probers...)
+		pfcpSrv.SetPathPeerTracker(proberGroup)
 		go func() {
-			if err := prober.Serve(ctx); err != nil {
+			if err := proberGroup.Serve(ctx); err != nil {
 				logger.Error("GTP-U path prober error", "error", err)
 			}
 		}()
@@ -228,7 +237,8 @@ func main() {
 		"s1u_iface", s1u.Ifname,
 		"s5u_iface", s5u.Ifname,
 		"dataplane", "ebpf",
-		"gtpu_listen", cfg.GTPUListen(),
+		"s1u_gtpu_listen", s1u.Listen,
+		"s5u_gtpu_listen", s5u.Listen,
 		"api", cfg.API.Listen,
 		"metrics", cfg.Metrics.Listen,
 	)

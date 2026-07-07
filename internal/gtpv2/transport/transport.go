@@ -400,6 +400,11 @@ func (c *Conn) SendWithPiggybacks(ctx context.Context, addr *net.UDPAddr, raw []
 	key := transactionKey{addr: addr.String(), seq: reqHdr.SequenceNumber, responseType: respType}
 
 	c.pendingMu.Lock()
+	if _, exists := c.pending[key]; exists {
+		c.pendingMu.Unlock()
+		cancel()
+		return nil, nil, fmt.Errorf("GTPv2-C: duplicate pending transaction addr=%s seq=%d response_type=%d", key.addr, key.seq, key.responseType)
+	}
 	c.pending[key] = &pendingRequest{addr: addr, raw: raw, result: result, cancel: cancel}
 	c.pendingMu.Unlock()
 

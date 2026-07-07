@@ -16,6 +16,14 @@ type fakeBPFInstaller struct {
 	removed   []*sgwusession.Session
 }
 
+type fakePathPeerTracker struct {
+	peers []netip.Addr
+}
+
+func (f *fakePathPeerTracker) Add(peer netip.Addr) {
+	f.peers = append(f.peers, peer)
+}
+
 func (f *fakeBPFInstaller) InstallSession(*sgwusession.Session) error {
 	return nil
 }
@@ -243,5 +251,28 @@ func TestApplyFARUpdatesCommitsAfterBPFSuccessAndReturnsEndMarker(t *testing.T) 
 	}
 	if endMarkers[0].teid != 0x11111111 || endMarkers[0].dstIP != netip.MustParseAddr("10.0.0.1") {
 		t.Fatalf("end marker = %+v; want old OHC", endMarkers[0])
+	}
+}
+
+func TestTrackSessionPathPeersAddsUniqueOuterIPs(t *testing.T) {
+	tracker := &fakePathPeerTracker{}
+	s := &Server{pathPeers: tracker}
+	sess := &sgwusession.Session{
+		FARs: []sgwusession.FAR{
+			{OuterIP: netip.MustParseAddr("10.0.0.1")},
+			{OuterIP: netip.MustParseAddr("10.0.0.1")},
+			{OuterIP: netip.Addr{}},
+			{OuterIP: netip.MustParseAddr("10.0.0.2")},
+		},
+	}
+
+	s.trackSessionPathPeers(sess)
+
+	if len(tracker.peers) != 2 {
+		t.Fatalf("tracked peers = %v; want two unique peers", tracker.peers)
+	}
+	if tracker.peers[0] != netip.MustParseAddr("10.0.0.1") ||
+		tracker.peers[1] != netip.MustParseAddr("10.0.0.2") {
+		t.Fatalf("tracked peers = %v; want 10.0.0.1 and 10.0.0.2", tracker.peers)
 	}
 }

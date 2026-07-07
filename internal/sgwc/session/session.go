@@ -168,6 +168,34 @@ func (s *SGWSession) PFCPBinding() PFCPSessionBinding {
 	return s.PFCP
 }
 
+func (s *SGWSession) SetSGWS5CFTEID(f FTEID) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.SGWS5CFTEID = f
+	s.UpdatedAt = time.Now()
+}
+
+func (s *SGWSession) SetPGWControlFTEID(f FTEID) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.PGWControlFTEID = f
+	s.UpdatedAt = time.Now()
+}
+
+func (s *SGWSession) SetUEIPv4(addr netip.Addr) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.UEIPv4 = addr
+	s.UpdatedAt = time.Now()
+}
+
+func (s *SGWSession) SetPFCPBinding(binding PFCPSessionBinding) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.PFCP = binding
+	s.UpdatedAt = time.Now()
+}
+
 // GetBearer returns the bearer for the given EBI, or nil.
 func (s *SGWSession) GetBearer(ebi uint8) *bearer.Bearer {
 	s.mu.RLock()

@@ -12,7 +12,6 @@
 package s11
 
 import (
-	"context"
 	"crypto/sha256"
 	"fmt"
 	"net"
@@ -210,7 +209,30 @@ type preparedCreateBearerRelay struct {
 	linkedEBI   uint8
 }
 
+type deleteBearerCommandPendingKey struct {
+	sessionID string
+	ebi       uint8
+}
+
+type deleteBearerCommandPending struct {
+	sessionID  string
+	imsi       string
+	apn        string
+	defaultEBI uint8
+	ebi        uint8
+	sgwS11TEID uint32
+	mmeS11TEID uint32
+	sgwS5CTEID uint32
+	pgwS5CTEID uint32
+	seq        uint32
+	createdAt  time.Time
+	expiresAt  time.Time
+}
+
 func (h *Handler) prepareCreateBearerRelay(pgwAddr *net.UDPAddr, hdr message.Header, raw []byte) (*preparedCreateBearerRelay, bool) {
+	opCtx, cancelOp := h.operationContext()
+	defer cancelOp()
+
 	cbReq, err := message.ParseCreateBearerRequest(raw)
 	if err != nil {
 		h.log.Warn("S5C: Create Bearer Request invalid", "from", pgwAddr, "error", err)
@@ -339,7 +361,7 @@ func (h *Handler) prepareCreateBearerRelay(pgwAddr *net.UDPAddr, hdr message.Hea
 			pfcpie.NewApplyAction(pfcpie.ApplyActionDROP),
 		))
 	}
-	createdPDRs, pfcpErr := h.pfcp.AddBearerRulesOnPeer(context.Background(),
+	createdPDRs, pfcpErr := h.pfcp.AddBearerRulesOnPeer(opCtx,
 		sess.PFCP.SGWUAddr, sess.PFCP.LocalFSEID.SEID, sess.PFCP.SGWUFSEID.SEID, createPDRs, createFARs)
 	if pfcpErr != nil {
 		h.replyCreateBearerTxnError(txn.key, pgwAddr, hdr, cbReq, sess.PGWControlFTEID.TEID, ie.CauseSystemFailure)
@@ -495,6 +517,9 @@ func (h *Handler) handlePiggybackCreateBearerResponse(conn *transport.Conn, mmeA
 }
 
 func (h *Handler) completeCreateBearerFromS11Response(pending *pendingS11CreateBearer, raw []byte) {
+	opCtx, cancelOp := h.operationContext()
+	defer cancelOp()
+
 	defer finishProcedure(pending.sess, pending.activeProc)
 	cbResp, err := message.ParseCreateBearerResponse(raw)
 	if err != nil {
@@ -559,7 +584,7 @@ func (h *Handler) completeCreateBearerFromS11Response(pending *pendingS11CreateB
 		}
 		cleanedProvisioning := false
 		if bcCause == ie.CauseRequestAccepted && matchedProv != nil && enbFTEID.TEID != 0 && pending.sess.PFCP.Established {
-			pfcpModErr := h.pfcp.ModifySessionOnPeer(context.Background(),
+			pfcpModErr := h.pfcp.ModifySessionOnPeer(opCtx,
 				pending.sess.PFCP.SGWUAddr,
 				pending.sess.PFCP.LocalFSEID.SEID, pending.sess.PFCP.SGWUFSEID.SEID,
 				[]pfcpclient.FARUpdate{{
@@ -650,6 +675,9 @@ func (h *Handler) completeCreateBearerFromS11Response(pending *pendingS11CreateB
 // ── Create Bearer ─────────────────────────────────────────────────────────────
 
 func (h *Handler) handleCreateBearer(pgwAddr *net.UDPAddr, hdr message.Header, raw []byte) {
+	opCtx, cancelOp := h.operationContext()
+	defer cancelOp()
+
 	cbReq, err := message.ParseCreateBearerRequest(raw)
 	if err != nil {
 		h.log.Warn("S5C: Create Bearer Request invalid", "from", pgwAddr, "error", err)
@@ -882,7 +910,7 @@ func (h *Handler) handleCreateBearer(pgwAddr *net.UDPAddr, hdr message.Header, r
 		))
 	}
 
-	createdPDRs, pfcpErr := h.pfcp.AddBearerRulesOnPeer(context.Background(),
+	createdPDRs, pfcpErr := h.pfcp.AddBearerRulesOnPeer(opCtx,
 		sess.PFCP.SGWUAddr,
 		sess.PFCP.LocalFSEID.SEID, sess.PFCP.SGWUFSEID.SEID,
 		createPDRs, createFARs)
@@ -982,7 +1010,7 @@ func (h *Handler) handleCreateBearer(pgwAddr *net.UDPAddr, hdr message.Header, r
 	mmeIP4 := sess.MMEControlFTEID.IPv4.As4()
 	mmeAddr := &net.UDPAddr{IP: mmeIP4[:], Port: 2123}
 
-	s11CBRespRaw, err := h.conn.Send(context.Background(), mmeAddr, s11CBReqRaw)
+	s11CBRespRaw, err := h.conn.Send(opCtx, mmeAddr, s11CBReqRaw)
 	if err != nil {
 		h.log.Error("S5C: Create Bearer — Send S11 CBReq to MME failed", "error", err)
 		h.removeAllCreateBearerTxnProvisioning(txn.key, sess, bearerProvs)
@@ -1093,7 +1121,7 @@ func (h *Handler) handleCreateBearer(pgwAddr *net.UDPAddr, hdr message.Header, r
 		cleanedProvisioning := false
 		// Update PFCP DL FAR with eNB TEID.
 		if bcCause == ie.CauseRequestAccepted && matchedProv != nil && enbFTEID.TEID != 0 && sess.PFCP.Established {
-			pfcpModErr := h.pfcp.ModifySessionOnPeer(context.Background(),
+			pfcpModErr := h.pfcp.ModifySessionOnPeer(opCtx,
 				sess.PFCP.SGWUAddr,
 				sess.PFCP.LocalFSEID.SEID, sess.PFCP.SGWUFSEID.SEID,
 				[]pfcpclient.FARUpdate{{
@@ -1198,6 +1226,9 @@ func (h *Handler) handleCreateBearer(pgwAddr *net.UDPAddr, hdr message.Header, r
 // ── Update Bearer ─────────────────────────────────────────────────────────────
 
 func (h *Handler) handleUpdateBearer(pgwAddr *net.UDPAddr, hdr message.Header, raw []byte) {
+	opCtx, cancelOp := h.operationContext()
+	defer cancelOp()
+
 	ubReq, err := message.ParseUpdateBearerRequest(raw)
 	if err != nil {
 		h.log.Warn("S5C: Update Bearer Request invalid", "from", pgwAddr, "error", err)
@@ -1238,7 +1269,7 @@ func (h *Handler) handleUpdateBearer(pgwAddr *net.UDPAddr, hdr message.Header, r
 
 	mmeIP4 := sess.MMEControlFTEID.IPv4.As4()
 	mmeAddr := &net.UDPAddr{IP: mmeIP4[:], Port: 2123}
-	s11UBRespRaw, err := h.conn.Send(context.Background(), mmeAddr, s11UBReqRaw)
+	s11UBRespRaw, err := h.conn.Send(opCtx, mmeAddr, s11UBReqRaw)
 	if err != nil {
 		h.log.Error("S5C: Update Bearer — Send S11 UBReq failed", "error", err)
 		h.replyBearerError(pgwAddr, hdr, message.MsgTypeUpdateBearerResponse,
@@ -1363,6 +1394,9 @@ func acceptedUpdateBearerContextsFromRequest(reqBCs []*ie.IE) []*ie.IE {
 // ── Delete Bearer ─────────────────────────────────────────────────────────────
 
 func (h *Handler) handleDeleteBearer(pgwAddr *net.UDPAddr, hdr message.Header, raw []byte) {
+	opCtx, cancelOp := h.operationContext()
+	defer cancelOp()
+
 	dbReq, err := message.ParseDeleteBearerRequest(raw)
 	if err != nil {
 		h.log.Warn("S5C: Delete Bearer Request invalid", "from", pgwAddr, "error", err)
@@ -1408,7 +1442,7 @@ func (h *Handler) handleDeleteBearer(pgwAddr *net.UDPAddr, hdr message.Header, r
 
 	mmeIP4 := sess.MMEControlFTEID.IPv4.As4()
 	mmeAddr := &net.UDPAddr{IP: mmeIP4[:], Port: 2123}
-	s11DBRespRaw, err := h.conn.Send(context.Background(), mmeAddr, s11DBReqRaw)
+	s11DBRespRaw, err := h.conn.Send(opCtx, mmeAddr, s11DBReqRaw)
 	if err != nil {
 		h.log.Error("S5C: Delete Bearer — Send S11 DBReq failed", "error", err)
 		h.replyBearerError(pgwAddr, hdr, message.MsgTypeDeleteBearerResponse,
@@ -1448,7 +1482,7 @@ func (h *Handler) handleDeleteBearer(pgwAddr *net.UDPAddr, hdr message.Header, r
 				// Remove PFCP PDR/FAR rules for this bearer.
 				pdrIDs := []uint32{b.PDRIDs[0], b.PDRIDs[1]}
 				farIDs := []uint32{b.FARIDs[0], b.FARIDs[1]}
-				if pfcpErr := h.pfcp.RemoveBearerRulesOnPeer(context.Background(),
+				if pfcpErr := h.pfcp.RemoveBearerRulesOnPeer(opCtx,
 					sess.PFCP.SGWUAddr,
 					sess.PFCP.LocalFSEID.SEID, sess.PFCP.SGWUFSEID.SEID,
 					pdrIDs, farIDs); pfcpErr != nil {
@@ -1485,6 +1519,7 @@ func (h *Handler) handleDeleteBearerCommand(conn *transport.Conn, mmeAddr *net.U
 	cmd, err := message.ParseDeleteBearerCommand(raw)
 	if err != nil {
 		h.log.Warn("S11: Delete Bearer Command invalid", "from", mmeAddr, "error", err)
+		h.replyDeleteBearerFailureIndication(conn, mmeAddr, hdr, h.mmePeerTEIDForLocalS11(hdr.TEID), ie.CauseInvalidMessageFormat, nil)
 		return
 	}
 	ebis, failedBCs := deleteBearerCommandEBIs(cmd.BearerContexts)
@@ -1493,7 +1528,7 @@ func (h *Handler) handleDeleteBearerCommand(conn *transport.Conn, mmeAddr *net.U
 			"from", mmeAddr,
 			"sgw_s11_teid", fmt.Sprintf("0x%08X", hdr.TEID),
 		)
-		h.replyDeleteBearerFailureIndication(conn, mmeAddr, hdr, 0, ie.CauseMandatoryIEMissing, failedBCs)
+		h.replyDeleteBearerFailureIndication(conn, mmeAddr, hdr, h.mmePeerTEIDForLocalS11(hdr.TEID), ie.CauseMandatoryIEMissing, failedBCs)
 		return
 	}
 
@@ -1580,15 +1615,18 @@ func (h *Handler) handleDeleteBearerCommand(conn *transport.Conn, mmeAddr *net.U
 			return
 		}
 
-		for _, ebi := range group.ebis {
-			h.removeBearerRulesAndState(sess, ebi, "delete-bearer-command")
-		}
-		h.log.Info("S11: Delete Bearer Command handled",
+		h.markDeleteBearerCommandPending(sess, hdr, group.ebis)
+		h.log.Info("S11: Delete Bearer Command relayed to PGW",
 			"session_id", sess.SessionID,
 			"imsi", sess.IMSI,
 			"apn", sess.APN,
+			"default_ebi", sess.DefaultBearerID,
 			"ebis", group.ebis,
 			"pgw", pgwAddr.String(),
+			"sgw_s5c_teid", fmt.Sprintf("0x%08X", sess.SGWS5CFTEID.TEID),
+			"pgw_s5c_teid", fmt.Sprintf("0x%08X", sess.PGWControlFTEID.TEID),
+			"cleanup_now", false,
+			"reason", "pending-pgw-outcome",
 		)
 	}
 }
@@ -1606,6 +1644,19 @@ func (h *Handler) handleS5CDeleteBearerFailureIndication(pgwAddr *net.UDPAddr, h
 			"from", pgwAddr,
 		)
 		return
+	}
+	failedEBIs := bearerContextEBIs(ind.BearerContexts)
+	clearedPending := h.clearDeleteBearerCommandPending(sess, failedEBIs)
+	if len(failedEBIs) > 0 {
+		h.log.Warn("S5C: Delete Bearer Failure Indication received",
+			"session_id", sess.SessionID,
+			"imsi", sess.IMSI,
+			"apn", sess.APN,
+			"target_ebis", failedEBIs,
+			"pending_entries_cleared", clearedPending,
+			"local_state_was_removed", false,
+			"rollback_required", false,
+		)
 	}
 	if !sess.MMEControlFTEID.IPv4.IsValid() {
 		h.log.Warn("S5C: Delete Bearer Failure Indication — MME address unavailable",
@@ -1626,13 +1677,72 @@ func (h *Handler) handleS5CDeleteBearerFailureIndication(pgwAddr *net.UDPAddr, h
 	}
 }
 
+func (h *Handler) markDeleteBearerCommandPending(sess *session.SGWSession, hdr message.Header, ebis []uint8) {
+	if h == nil || sess == nil || len(ebis) == 0 {
+		return
+	}
+	h.dbCmdMu.Lock()
+	defer h.dbCmdMu.Unlock()
+	if h.dbCmds == nil {
+		h.dbCmds = make(map[deleteBearerCommandPendingKey]deleteBearerCommandPending)
+	}
+	now := time.Now()
+	expiresAt := now.Add(h.operationTimeout())
+	h.sweepExpiredDeleteBearerCommandPendingLocked(now)
+	for _, ebi := range ebis {
+		h.dbCmds[deleteBearerCommandPendingKey{sessionID: sess.SessionID, ebi: ebi}] = deleteBearerCommandPending{
+			sessionID:  sess.SessionID,
+			imsi:       sess.IMSI,
+			apn:        sess.APN,
+			defaultEBI: sess.DefaultBearerID,
+			ebi:        ebi,
+			sgwS11TEID: hdr.TEID,
+			mmeS11TEID: sess.MMEControlFTEID.TEID,
+			sgwS5CTEID: sess.SGWS5CFTEID.TEID,
+			pgwS5CTEID: sess.PGWControlFTEID.TEID,
+			seq:        hdr.SequenceNumber,
+			createdAt:  now,
+			expiresAt:  expiresAt,
+		}
+	}
+}
+
+func (h *Handler) clearDeleteBearerCommandPending(sess *session.SGWSession, ebis []uint8) int {
+	if h == nil || sess == nil || len(ebis) == 0 {
+		return 0
+	}
+	h.dbCmdMu.Lock()
+	defer h.dbCmdMu.Unlock()
+	h.sweepExpiredDeleteBearerCommandPendingLocked(time.Now())
+	cleared := 0
+	for _, ebi := range ebis {
+		key := deleteBearerCommandPendingKey{sessionID: sess.SessionID, ebi: ebi}
+		if _, ok := h.dbCmds[key]; ok {
+			delete(h.dbCmds, key)
+			cleared++
+		}
+	}
+	return cleared
+}
+
+func (h *Handler) sweepExpiredDeleteBearerCommandPendingLocked(now time.Time) {
+	for key, pending := range h.dbCmds {
+		if !pending.expiresAt.IsZero() && now.After(pending.expiresAt) {
+			delete(h.dbCmds, key)
+		}
+	}
+}
+
 func (h *Handler) removeBearerRulesAndState(sess *session.SGWSession, ebi uint8, reason string) {
+	opCtx, cancelOp := h.operationContext()
+	defer cancelOp()
+
 	b := sess.GetBearer(ebi)
 	if b == nil {
 		return
 	}
 	if b.PDRIDs[0] != 0 || b.PDRIDs[1] != 0 {
-		if err := h.pfcp.RemoveBearerRulesOnPeer(context.Background(),
+		if err := h.pfcp.RemoveBearerRulesOnPeer(opCtx,
 			sess.PFCP.SGWUAddr,
 			sess.PFCP.LocalFSEID.SEID, sess.PFCP.SGWUFSEID.SEID,
 			[]uint32{b.PDRIDs[0], b.PDRIDs[1]},
@@ -1718,7 +1828,15 @@ func (h *Handler) replyDeleteBearerFailureIndication(conn *transport.Conn, mmeAd
 		return
 	}
 	if peerTEID == 0 {
-		peerTEID = hdr.TEID
+		peerTEID = h.mmePeerTEIDForLocalS11(hdr.TEID)
+	}
+	if peerTEID == 0 {
+		h.log.Warn("S11: Delete Bearer Failure Indication not sent; MME peer TEID unavailable",
+			"to", mmeAddr,
+			"sgw_s11_teid", fmt.Sprintf("0x%08X", hdr.TEID),
+			"cause", cause,
+		)
+		return
 	}
 	if len(failedBCs) == 0 {
 		failedBCs = []*ie.IE{ie.NewBearerContext(0, ie.NewCause(cause, 0, 0, 0, nil))}
@@ -1734,6 +1852,16 @@ func (h *Handler) replyDeleteBearerFailureIndication(conn *transport.Conn, mmeAd
 	}
 }
 
+func (h *Handler) mmePeerTEIDForLocalS11(localTEID uint32) uint32 {
+	if h == nil || h.sessions == nil || localTEID == 0 {
+		return 0
+	}
+	if sess := h.sessions.FindByS11TEID(localTEID); sess != nil {
+		return sess.MMEControlFTEID.TEID
+	}
+	return 0
+}
+
 func pgwAddrForSession(sess *session.SGWSession) (*net.UDPAddr, error) {
 	if !sess.PGWControlFTEID.IPv4.IsValid() {
 		return nil, fmt.Errorf("PGW control F-TEID IPv4 missing")
@@ -1745,10 +1873,13 @@ func pgwAddrForSession(sess *session.SGWSession) (*net.UDPAddr, error) {
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 func (h *Handler) removeProvisionedBearerRules(sess *session.SGWSession, pdrUL, pdrDL uint16, farUL, farDL uint32) {
+	opCtx, cancelOp := h.operationContext()
+	defer cancelOp()
+
 	if !sess.PFCP.Established {
 		return
 	}
-	if err := h.pfcp.RemoveBearerRulesOnPeer(context.Background(),
+	if err := h.pfcp.RemoveBearerRulesOnPeer(opCtx,
 		sess.PFCP.SGWUAddr,
 		sess.PFCP.LocalFSEID.SEID, sess.PFCP.SGWUFSEID.SEID,
 		[]uint32{uint32(pdrUL), uint32(pdrDL)},
@@ -1759,6 +1890,9 @@ func (h *Handler) removeProvisionedBearerRules(sess *session.SGWSession, pdrUL, 
 }
 
 func (h *Handler) removeAllCreateBearerTxnProvisioning(key createBearerTxnKey, sess *session.SGWSession, provs []bearerProvisioning) {
+	opCtx, cancelOp := h.operationContext()
+	defer cancelOp()
+
 	var pdrIDs []uint32
 	var farIDs []uint32
 	for i := range provs {
@@ -1779,7 +1913,7 @@ func (h *Handler) removeAllCreateBearerTxnProvisioning(key createBearerTxnKey, s
 	if len(pdrIDs) == 0 || !sess.PFCP.Established {
 		return
 	}
-	if err := h.pfcp.RemoveBearerRulesOnPeer(context.Background(),
+	if err := h.pfcp.RemoveBearerRulesOnPeer(opCtx,
 		sess.PFCP.SGWUAddr,
 		sess.PFCP.LocalFSEID.SEID, sess.PFCP.SGWUFSEID.SEID,
 		pdrIDs, farIDs); err != nil {
