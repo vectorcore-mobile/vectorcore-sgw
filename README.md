@@ -5,7 +5,6 @@ SGW-U processes. It follows a CUPS design: SGW-C handles GTPv2-C and PFCP
 control-plane procedures, while SGW-U handles GTP-U forwarding with an eBPF
 dataplane.
 
-## This code is a work in progress and not stable at this point
 
 ## Components
 
