@@ -271,6 +271,95 @@ func (m *Manager) MarkPGWRestart(pgwAddr string, recovery uint8, at time.Time) i
 	return len(sessions)
 }
 
+// FindByMME returns all sessions whose MME control-plane F-TEID belongs to the
+// canonical MME endpoint. MME source ports may be transient; peerhealth uses
+// CanonicalGTPCEndpoint to normalize to UDP/2123.
+func (m *Manager) FindByMME(mmeAddr string) []*SGWSession {
+	canonical := CanonicalGTPCEndpoint(mmeAddr)
+	if canonical == "" {
+		return nil
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	out := make([]*SGWSession, 0)
+	for _, sess := range m.byID {
+		if sess.MMEControlFTEID.IPv4.IsValid() &&
+			CanonicalGTPCEndpoint(sess.MMEControlFTEID.IPv4.String()) == canonical {
+			out = append(out, sess)
+		}
+	}
+	return out
+}
+
+func (m *Manager) MarkMMEPathState(mmeAddr string, state MMERestorationState, at time.Time) int {
+	sessions := m.FindByMME(mmeAddr)
+	canonical := CanonicalGTPCEndpoint(mmeAddr)
+	for _, sess := range sessions {
+		sess.SetMMEPathState(state, canonical, at)
+	}
+	return len(sessions)
+}
+
+func (m *Manager) MarkMMERestart(mmeAddr string, recovery uint8, at time.Time) int {
+	sessions := m.FindByMME(mmeAddr)
+	canonical := CanonicalGTPCEndpoint(mmeAddr)
+	for _, sess := range sessions {
+		sess.MarkMMERestart(canonical, recovery, at)
+	}
+	return len(sessions)
+}
+
+// FindMMERestorationByDDN returns the session whose pending restoration DDN
+// matches the MME endpoint, SGW S11 TEID if present, and sequence number.
+func (m *Manager) FindMMERestorationByDDN(mmeAddr string, sgwS11TEID, seq uint32) *SGWSession {
+	canonical := CanonicalGTPCEndpoint(mmeAddr)
+	if canonical == "" || seq == 0 {
+		return nil
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	for _, sess := range m.byID {
+		if sgwS11TEID != 0 && sess.SGWS11FTEID.TEID != sgwS11TEID {
+			continue
+		}
+		if !sess.MMEControlFTEID.IPv4.IsValid() ||
+			CanonicalGTPCEndpoint(sess.MMEControlFTEID.IPv4.String()) != canonical {
+			continue
+		}
+		status := sess.MMERestorationSnapshot()
+		if status.DDNTriggered && status.DDNSequence == seq {
+			return sess
+		}
+	}
+	return nil
+}
+
+// FindMMERestorationByIMSI returns a pending restoration session for the IMSI
+// on the given MME endpoint. It is a fallback for DDN Failure Indications that
+// include IMSI but cannot be correlated by sequence.
+func (m *Manager) FindMMERestorationByIMSI(mmeAddr, imsi string) *SGWSession {
+	canonical := CanonicalGTPCEndpoint(mmeAddr)
+	if canonical == "" || imsi == "" {
+		return nil
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	for _, sess := range m.byID {
+		if sess.IMSI != imsi {
+			continue
+		}
+		if !sess.MMEControlFTEID.IPv4.IsValid() ||
+			CanonicalGTPCEndpoint(sess.MMEControlFTEID.IPv4.String()) != canonical {
+			continue
+		}
+		status := sess.MMERestorationSnapshot()
+		if status.DDNTriggered {
+			return sess
+		}
+	}
+	return nil
+}
+
 // FindByS5CTEID returns the session whose SGW S5/S8-C TEID matches, or nil.
 // This is the TEID the PGW addresses when sending CBReq/UBReq/DBReq.
 func (m *Manager) FindByS5CTEID(t uint32) *SGWSession {

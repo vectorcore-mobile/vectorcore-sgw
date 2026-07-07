@@ -43,6 +43,26 @@ gtpc:
     mark_sessions_on_restart: true
     block_new_procedures_to_down_pgw: false
     notify_mme_on_pgw_restart: false
+  mme_restoration:
+    enabled: true
+    mark_sessions_on_path_down: true
+    mark_sessions_on_restart: true
+    enforce_delete_policy: true
+    trigger_ddn: true
+    cleanup_timeout_seconds: 30
+    default_action: preserve
+    preserve:
+      - apn: "ims"
+        reason: "preserve IMS PDN for network triggered service restoration"
+      - qci: 1
+        reason: "preserve conversational bearer"
+      - arp_priority_min: 1
+        arp_priority_max: 3
+        reason: "preserve high-priority ARP sessions"
+    delete:
+      - apn: "internet"
+        qci: 9
+        reason: "low-priority internet PDN can be released after MME restart"
 
 s11:
   t3_response_seconds: 3

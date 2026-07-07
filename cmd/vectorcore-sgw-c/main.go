@@ -20,6 +20,7 @@ import (
 	"vectorcore-sgw/internal/gtpv2/transport"
 	"vectorcore-sgw/internal/log"
 	"vectorcore-sgw/internal/metrics"
+	"vectorcore-sgw/internal/sgwc/mmerestoration"
 	"vectorcore-sgw/internal/sgwc/peerhealth"
 	"vectorcore-sgw/internal/sgwc/pfcpclient"
 	"vectorcore-sgw/internal/sgwc/pgwfailure"
@@ -137,8 +138,6 @@ func main() {
 		MarkSessionsOnPathDown: cfg.GTPC.PGWFailure.MarkSessionsOnPathDown,
 		MarkSessionsOnRestart:  cfg.GTPC.PGWFailure.MarkSessionsOnRestart,
 	}, logger.Logger)
-	gtpcPeers.SetEventHandler(pgwFailureHandler)
-
 	pfcpClient, err := pfcpclient.New(cfg, time.Now(), logger.Logger)
 	if err != nil {
 		logger.Error("PFCP client failed to start", "error", err)
@@ -186,6 +185,18 @@ func main() {
 		}()
 	}
 	s5cClient.SetPeerHealth(gtpcPeers)
+	mmeRestorationHandler := mmerestoration.NewHandlerWithCleanup(sessions, mmerestoration.Config{
+		Enabled:                cfg.GTPC.MMERestoration.Enabled,
+		MarkSessionsOnPathDown: cfg.GTPC.MMERestoration.MarkSessionsOnPathDown,
+		MarkSessionsOnRestart:  cfg.GTPC.MMERestoration.MarkSessionsOnRestart,
+		EnforceDeletePolicy:    cfg.GTPC.MMERestoration.EnforceDeletePolicy,
+		TriggerDDN:             cfg.GTPC.MMERestoration.TriggerDDN,
+		CleanupTimeout:         time.Duration(cfg.GTPC.MMERestoration.CleanupTimeoutSeconds) * time.Second,
+		DefaultAction:          mmeRestorationPolicyAction(cfg.GTPC.MMERestoration.DefaultAction),
+		Preserve:               mmeRestorationPolicyRules(cfg.GTPC.MMERestoration.Preserve),
+		Delete:                 mmeRestorationPolicyRules(cfg.GTPC.MMERestoration.Delete),
+	}, s5cClient, pfcpClient, logger.Logger)
+	gtpcPeers.SetEventHandler(peerhealth.MultiHandler{pgwFailureHandler, mmeRestorationHandler})
 
 	metricsSrv := metrics.NewServer(cfg.Metrics.Listen, logger.Logger)
 	if err := metricsSrv.Start(ctx); err != nil {
@@ -199,6 +210,7 @@ func main() {
 	nsaMetrics := metrics.NewNSAMetrics(metricsSrv.Registry())
 	metrics.NewGTPCPeerMetrics(metricsSrv.Registry(), gtpcPeers)
 	metrics.NewPGWFailureMetrics(metricsSrv.Registry(), pgwFailureHandler)
+	metrics.NewMMERestorationMetrics(metricsSrv.Registry(), mmeRestorationHandler)
 	pfcpClient.SetPeerStateCallback(func(peerName, peerAddr string, state pfcpclient.PeerState) {
 		pfcpMetrics.OnPeerStateChange(peerName, peerAddr, string(state))
 		if state == pfcpclient.PeerStateDown {
@@ -224,6 +236,7 @@ func main() {
 	api.RegisterPFCPRoutes(apiSrv.HumaAPI(), pfcpClient)
 	api.RegisterGTPCPeerRoutes(apiSrv.HumaAPI(), gtpcPeers)
 	api.RegisterPGWFailureRoutes(apiSrv.HumaAPI(), pgwFailureHandler)
+	api.RegisterMMERestorationRoutes(apiSrv.HumaAPI(), mmeRestorationHandler)
 	if err := apiSrv.Start(ctx); err != nil {
 		logger.Error("API server failed to start", "error", err)
 		os.Exit(1)
@@ -239,6 +252,7 @@ func main() {
 			os.Exit(1)
 		}
 	}
+	mmeRestorationHandler.SetDDNSender(s11Handler)
 	s11Handler.SetBaseContext(ctx)
 	s11Handler.SetPeerHealth(gtpcPeers)
 	s11Handler.SetCollisionMetrics(collisionMetrics)
@@ -335,6 +349,29 @@ func isPGWInitiatedBearerRequest(msgType uint8) bool {
 	default:
 		return false
 	}
+}
+
+func mmeRestorationPolicyAction(action string) session.MMERestorationPolicyAction {
+	switch action {
+	case "delete":
+		return session.MMERestorationPolicyDelete
+	default:
+		return session.MMERestorationPolicyPreserve
+	}
+}
+
+func mmeRestorationPolicyRules(rules []sgwcconfig.MMERestorationPolicyRuleConfig) []mmerestoration.PolicyRule {
+	out := make([]mmerestoration.PolicyRule, 0, len(rules))
+	for _, rule := range rules {
+		out = append(out, mmerestoration.PolicyRule{
+			APN:            rule.APN,
+			QCI:            rule.QCI,
+			ARPPriorityMin: rule.ARPPriorityMin,
+			ARPPriorityMax: rule.ARPPriorityMax,
+			Reason:         rule.Reason,
+		})
+	}
+	return out
 }
 
 func waitComponent(logger *log.Logger, component string, timeout time.Duration, stop func() error) {

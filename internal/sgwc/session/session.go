@@ -68,6 +68,58 @@ type PGWFailureStatus struct {
 	RecoveryCounter   uint8
 }
 
+// MMERestorationState records SGW-C's view of the S11/S4 MME path for
+// TS 23.007 MME restoration / Network Triggered Service Restoration.
+type MMERestorationState string
+
+const (
+	MMERestorationStateUnknown            MMERestorationState = "unknown"
+	MMERestorationStateUp                 MMERestorationState = "up"
+	MMERestorationStateDegraded           MMERestorationState = "degraded"
+	MMERestorationStateSuspect            MMERestorationState = "suspect"
+	MMERestorationStateDown               MMERestorationState = "down"
+	MMERestorationStateRestarted          MMERestorationState = "restarted"
+	MMERestorationStateRestorationPending MMERestorationState = "restoration_pending"
+)
+
+// MMERestorationPolicyAction records the operator policy decision for an
+// MME restoration candidate. Later restoration phases enforce this decision.
+type MMERestorationPolicyAction string
+
+const (
+	MMERestorationPolicyUnknown  MMERestorationPolicyAction = "unknown"
+	MMERestorationPolicyPreserve MMERestorationPolicyAction = "preserve"
+	MMERestorationPolicyDelete   MMERestorationPolicyAction = "delete"
+)
+
+// MMERestorationStatus is an API-safe snapshot of MME restart/path state.
+type MMERestorationStatus struct {
+	State               MMERestorationState
+	MMEAddr             string
+	PathDownAt          time.Time
+	RestartDetectedAt   time.Time
+	RecoverySeen        bool
+	RecoveryCounter     uint8
+	RestorationPending  bool
+	PolicyAction        MMERestorationPolicyAction
+	PolicyReason        string
+	DDNTriggered        bool
+	DDNTriggeredAt      time.Time
+	DDNSequence         uint32
+	DDNAcked            bool
+	DDNAckedAt          time.Time
+	DDNAckCause         uint8
+	DDNFailureAt        time.Time
+	DDNFailureCause     uint8
+	DDNFailureReason    string
+	StopPagingSent      bool
+	StopPagingSentAt    time.Time
+	StopPagingSequence  uint32
+	UserPlaneRestored   bool
+	UserPlaneRestoredAt time.Time
+	RestoredEBI         uint8
+}
+
 // SecondaryRATUsageDataReport records an opaque Rel-15 Secondary RAT Usage
 // Data Report IE payload received on S11. Interpretation/forwarding is handled
 // by higher procedure phases; session state keeps the exact report bytes.
@@ -107,6 +159,7 @@ type SGWSession struct {
 	Procedures                   *collision.Tracker
 	SecondaryRATUsageDataReports []SecondaryRATUsageDataReport
 	PGWFailure                   PGWFailureStatus
+	MMERestoration               MMERestorationStatus
 
 	State     SessionState
 	CreatedAt time.Time
@@ -324,6 +377,13 @@ func (s *SGWSession) PGWFailureSnapshot() PGWFailureStatus {
 	return s.PGWFailure
 }
 
+// MMERestorationSnapshot returns the current MME path/restart state for this session.
+func (s *SGWSession) MMERestorationSnapshot() MMERestorationStatus {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.MMERestoration
+}
+
 // SetPGWPathState updates this session's PGW path state.
 func (s *SGWSession) SetPGWPathState(state PGWPathState, pgwAddr string, at time.Time) {
 	s.mu.Lock()
@@ -356,6 +416,145 @@ func (s *SGWSession) MarkPGWRestart(pgwAddr string, recovery uint8, at time.Time
 	s.PGWFailure.RestartDetectedAt = at
 	s.PGWFailure.RecoverySeen = true
 	s.PGWFailure.RecoveryCounter = recovery
+	s.UpdatedAt = at
+}
+
+// SetMMEPathState updates this session's MME S11/S4 path state.
+func (s *SGWSession) SetMMEPathState(state MMERestorationState, mmeAddr string, at time.Time) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if at.IsZero() {
+		at = time.Now()
+	}
+	s.MMERestoration.State = state
+	if mmeAddr != "" {
+		s.MMERestoration.MMEAddr = mmeAddr
+	}
+	if state == MMERestorationStateDown && s.MMERestoration.PathDownAt.IsZero() {
+		s.MMERestoration.PathDownAt = at
+	}
+	if state == MMERestorationStateUp {
+		s.MMERestoration.PathDownAt = time.Time{}
+	}
+	s.UpdatedAt = at
+}
+
+// MarkMMERestart records that the owning MME advertised a changed Recovery IE.
+// TS 23.007 §16.1A.1 lets SGW either delete affected contexts or follow NTSR;
+// Phase 2 only marks the contexts so later phases can apply policy.
+func (s *SGWSession) MarkMMERestart(mmeAddr string, recovery uint8, at time.Time) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if at.IsZero() {
+		at = time.Now()
+	}
+	s.MMERestoration.State = MMERestorationStateRestorationPending
+	s.MMERestoration.MMEAddr = mmeAddr
+	s.MMERestoration.RestartDetectedAt = at
+	s.MMERestoration.RecoverySeen = true
+	s.MMERestoration.RecoveryCounter = recovery
+	s.MMERestoration.RestorationPending = true
+	s.UpdatedAt = at
+}
+
+// SetMMERestorationPolicy records the policy decision for a pending MME
+// restoration candidate without enforcing it.
+func (s *SGWSession) SetMMERestorationPolicy(action MMERestorationPolicyAction, reason string, at time.Time) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if at.IsZero() {
+		at = time.Now()
+	}
+	s.MMERestoration.PolicyAction = action
+	s.MMERestoration.PolicyReason = reason
+	s.UpdatedAt = at
+}
+
+// MarkMMERestorationDDNTriggered records that SGW-C sent a DDN for NTSR.
+func (s *SGWSession) MarkMMERestorationDDNTriggered(seq uint32, at time.Time) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if at.IsZero() {
+		at = time.Now()
+	}
+	s.MMERestoration.DDNTriggered = true
+	s.MMERestoration.DDNTriggeredAt = at
+	s.MMERestoration.DDNSequence = seq
+	s.MMERestoration.DDNFailureReason = ""
+	s.UpdatedAt = at
+}
+
+// MarkMMERestorationDDNFailed records that DDN trigger send failed before an
+// MME response could be expected.
+func (s *SGWSession) MarkMMERestorationDDNFailed(reason string, at time.Time) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if at.IsZero() {
+		at = time.Now()
+	}
+	s.MMERestoration.DDNFailureReason = reason
+	s.UpdatedAt = at
+}
+
+// MarkMMERestorationDDNAck records an MME DDN Ack response.
+func (s *SGWSession) MarkMMERestorationDDNAck(cause uint8, at time.Time) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if at.IsZero() {
+		at = time.Now()
+	}
+	s.MMERestoration.DDNAcked = true
+	s.MMERestoration.DDNAckedAt = at
+	s.MMERestoration.DDNAckCause = cause
+	s.MMERestoration.DDNFailureReason = ""
+	if cause == 16 && s.State != StateDeleting && s.State != StateDeleted {
+		s.State = StateRecovering
+	}
+	s.UpdatedAt = at
+}
+
+// MarkMMERestorationDDNFailureIndication records an MME DDN Failure Indication.
+func (s *SGWSession) MarkMMERestorationDDNFailureIndication(cause uint8, at time.Time) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if at.IsZero() {
+		at = time.Now()
+	}
+	s.MMERestoration.DDNFailureAt = at
+	s.MMERestoration.DDNFailureCause = cause
+	s.MMERestoration.DDNFailureReason = "ddn-failure-indication"
+	s.UpdatedAt = at
+}
+
+// MarkMMERestorationStopPagingSent records an SGW-C Stop Paging Indication.
+func (s *SGWSession) MarkMMERestorationStopPagingSent(seq uint32, at time.Time) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if at.IsZero() {
+		at = time.Now()
+	}
+	s.MMERestoration.StopPagingSent = true
+	s.MMERestoration.StopPagingSentAt = at
+	s.MMERestoration.StopPagingSequence = seq
+	s.UpdatedAt = at
+}
+
+// MarkMMERestorationUserPlaneRestored records that normal Modify Bearer resume
+// restored access-side forwarding for a preserved MME restoration session.
+func (s *SGWSession) MarkMMERestorationUserPlaneRestored(ebi uint8, at time.Time) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if at.IsZero() {
+		at = time.Now()
+	}
+	s.MMERestoration.UserPlaneRestored = true
+	s.MMERestoration.UserPlaneRestoredAt = at
+	s.MMERestoration.RestoredEBI = ebi
+	s.MMERestoration.RestorationPending = false
+	s.MMERestoration.State = MMERestorationStateUp
+	if s.State == StateRecovering {
+		s.State = StateActive
+	}
 	s.UpdatedAt = at
 }
 

@@ -79,6 +79,25 @@ type EventHandler interface {
 	OnPeerRestart(RestartEvent)
 }
 
+// MultiHandler fans peerhealth events out to multiple handlers.
+type MultiHandler []EventHandler
+
+func (m MultiHandler) OnPeerStateChange(event StateChangeEvent) {
+	for _, h := range m {
+		if h != nil {
+			h.OnPeerStateChange(event)
+		}
+	}
+}
+
+func (m MultiHandler) OnPeerRestart(event RestartEvent) {
+	for _, h := range m {
+		if h != nil {
+			h.OnPeerRestart(event)
+		}
+	}
+}
+
 type Target struct {
 	Role Role
 	Addr string

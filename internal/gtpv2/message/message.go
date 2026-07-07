@@ -17,17 +17,19 @@ const (
 	// MsgTypeVersionNotSupported is sent when an unsupported GTP version is received
 	// per TS 29.274 §7.7.2. Extracted from docs/specs/29274-f90.docx Table 5 (= Table 6.1-1):
 	// "3 | Version Not Supported Indication | Version Not Supported Indication"
-	MsgTypeVersionNotSupported           uint8 = 3
-	MsgTypeCreateSessionRequest          uint8 = 32
-	MsgTypeCreateSessionResponse         uint8 = 33
-	MsgTypeModifyBearerRequest           uint8 = 34
-	MsgTypeModifyBearerResponse          uint8 = 35
-	MsgTypeDeleteSessionRequest          uint8 = 36
-	MsgTypeDeleteSessionResponse         uint8 = 37
-	MsgTypeModifyBearerCommand           uint8 = 64
-	MsgTypeModifyBearerFailureIndication uint8 = 65
-	MsgTypeDeleteBearerCommand           uint8 = 66
-	MsgTypeDeleteBearerFailureIndication uint8 = 67
+	MsgTypeVersionNotSupported                       uint8 = 3
+	MsgTypeCreateSessionRequest                      uint8 = 32
+	MsgTypeCreateSessionResponse                     uint8 = 33
+	MsgTypeModifyBearerRequest                       uint8 = 34
+	MsgTypeModifyBearerResponse                      uint8 = 35
+	MsgTypeDeleteSessionRequest                      uint8 = 36
+	MsgTypeDeleteSessionResponse                     uint8 = 37
+	MsgTypeModifyBearerCommand                       uint8 = 64
+	MsgTypeModifyBearerFailureIndication             uint8 = 65
+	MsgTypeDeleteBearerCommand                       uint8 = 66
+	MsgTypeDeleteBearerFailureIndication             uint8 = 67
+	MsgTypeDownlinkDataNotificationFailureIndication uint8 = 70
+	MsgTypeStopPagingIndication                      uint8 = 73
 	// Dedicated bearer procedures per TS 29.274 Table 6.1-1 (docs/specs/29274-f90.docx Table 5):
 	// "95 | Create Bearer Request", "96 | Create Bearer Response",
 	// "97 | Update Bearer Request", "98 | Update Bearer Response",
@@ -40,6 +42,8 @@ const (
 	MsgTypeDeleteBearerResponse         uint8 = 100
 	MsgTypeReleaseAccessBearersRequest  uint8 = 170
 	MsgTypeReleaseAccessBearersResponse uint8 = 171
+	MsgTypeDownlinkDataNotification     uint8 = 176
+	MsgTypeDownlinkDataNotificationAck  uint8 = 177
 )
 
 // ResponseTypeFor returns the response message type for a given request type
@@ -63,6 +67,8 @@ func ResponseTypeFor(reqType uint8) (uint8, bool) {
 		return MsgTypeDeleteBearerResponse, true
 	case MsgTypeReleaseAccessBearersRequest:
 		return MsgTypeReleaseAccessBearersResponse, true
+	case MsgTypeDownlinkDataNotification:
+		return MsgTypeDownlinkDataNotificationAck, true
 	}
 	return 0, false
 }
@@ -87,6 +93,8 @@ func RequestTypeForResponse(respType uint8) (uint8, bool) {
 		return MsgTypeDeleteBearerRequest, true
 	case MsgTypeReleaseAccessBearersResponse:
 		return MsgTypeReleaseAccessBearersRequest, true
+	case MsgTypeDownlinkDataNotificationAck:
+		return MsgTypeDownlinkDataNotification, true
 	}
 	return 0, false
 }

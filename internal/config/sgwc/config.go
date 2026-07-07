@@ -55,6 +55,7 @@ type GTPCConfig struct {
 	NSADCNR                NSADCNRConfig                `yaml:"nsa_dcnr"`
 	PeerHealth             PeerHealthConfig             `yaml:"peer_health"`
 	PGWFailure             PGWFailureConfig             `yaml:"pgw_failure"`
+	MMERestoration         MMERestorationConfig         `yaml:"mme_restoration"`
 }
 
 type GTPCLogical struct {
@@ -100,6 +101,26 @@ type PGWFailureConfig struct {
 	MarkSessionsOnRestart       bool `yaml:"mark_sessions_on_restart"`
 	BlockNewProceduresToDownPGW bool `yaml:"block_new_procedures_to_down_pgw"`
 	NotifyMMEOnPGWRestart       bool `yaml:"notify_mme_on_pgw_restart"`
+}
+
+type MMERestorationConfig struct {
+	Enabled                bool                             `yaml:"enabled"`
+	MarkSessionsOnPathDown bool                             `yaml:"mark_sessions_on_path_down"`
+	MarkSessionsOnRestart  bool                             `yaml:"mark_sessions_on_restart"`
+	EnforceDeletePolicy    bool                             `yaml:"enforce_delete_policy"`
+	TriggerDDN             bool                             `yaml:"trigger_ddn"`
+	CleanupTimeoutSeconds  int                              `yaml:"cleanup_timeout_seconds"`
+	DefaultAction          string                           `yaml:"default_action"`
+	Preserve               []MMERestorationPolicyRuleConfig `yaml:"preserve"`
+	Delete                 []MMERestorationPolicyRuleConfig `yaml:"delete"`
+}
+
+type MMERestorationPolicyRuleConfig struct {
+	APN            string `yaml:"apn"`
+	QCI            uint8  `yaml:"qci"`
+	ARPPriorityMin uint8  `yaml:"arp_priority_min"`
+	ARPPriorityMax uint8  `yaml:"arp_priority_max"`
+	Reason         string `yaml:"reason"`
 }
 
 type S11Config struct {
@@ -195,6 +216,20 @@ func Default() *Config {
 				MarkSessionsOnRestart:       true,
 				BlockNewProceduresToDownPGW: false,
 				NotifyMMEOnPGWRestart:       false,
+			},
+			MMERestoration: MMERestorationConfig{
+				Enabled:                true,
+				MarkSessionsOnPathDown: true,
+				MarkSessionsOnRestart:  true,
+				EnforceDeletePolicy:    true,
+				TriggerDDN:             true,
+				CleanupTimeoutSeconds:  30,
+				DefaultAction:          "preserve",
+				Preserve: []MMERestorationPolicyRuleConfig{
+					{APN: "ims", Reason: "default-preserve-ims"},
+					{QCI: 1, Reason: "default-preserve-qci-1"},
+					{ARPPriorityMin: 1, ARPPriorityMax: 3, Reason: "default-preserve-high-priority-arp"},
+				},
 			},
 		},
 		QoS: QoSConfig{

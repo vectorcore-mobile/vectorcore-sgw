@@ -22,6 +22,7 @@ import (
 	"vectorcore-sgw/internal/sgwc/collision"
 	"vectorcore-sgw/internal/sgwc/peerhealth"
 	"vectorcore-sgw/internal/sgwc/pfcpclient"
+	"vectorcore-sgw/internal/sgwc/recovery"
 	"vectorcore-sgw/internal/sgwc/s5c"
 	"vectorcore-sgw/internal/sgwc/session"
 )
@@ -74,6 +75,324 @@ func (f *fakeGTPCConn) Serve(context.Context) error { return nil }
 func (f *fakeGTPCConn) Close() error                { return nil }
 func (f *fakeGTPCConn) LocalAddr() net.Addr         { return &net.UDPAddr{} }
 
+func TestSendDownlinkDataNotificationBuildsS11DDN(t *testing.T) {
+	mgr := session.NewManager()
+	sess, _, err := mgr.Create(session.CreateParams{
+		IMSI:           "311435300070599",
+		APN:            "ims",
+		RATType:        ie.RATTypeEUTRAN,
+		ServingNetwork: "311-435",
+		MMEControlFTEID: session.FTEID{
+			TEID: 0x11223344,
+			IPv4: netip.MustParseAddr("10.90.250.77"),
+		},
+		DefaultEBI: 6,
+		QCI:        5,
+		ARP: bearer.ARP{
+			PriorityLevel:           1,
+			PreemptionCapability:    true,
+			PreemptionVulnerability: false,
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create session: %v", err)
+	}
+	h := &Handler{
+		conn:    &fakeGTPCConn{},
+		localIP: netip.MustParseAddr("10.90.250.10"),
+		log:     slog.New(slog.NewTextHandler(os.Stdout, nil)),
+	}
+
+	seq, err := h.SendDownlinkDataNotification(context.Background(), sess)
+	if err != nil {
+		t.Fatalf("SendDownlinkDataNotification: %v", err)
+	}
+	if seq != 1 {
+		t.Fatalf("DDN seq = %d; want 1", seq)
+	}
+	raw := h.conn.(*fakeGTPCConn).replies[0]
+	ddn, err := message.ParseDownlinkDataNotification(raw)
+	if err != nil {
+		t.Fatalf("ParseDownlinkDataNotification: %v", err)
+	}
+	if ddn.TEID != sess.MMEControlFTEID.TEID || ddn.SequenceNumber != seq {
+		t.Fatalf("DDN header TEID=0x%08X seq=%d; want TEID=0x%08X seq=%d",
+			ddn.TEID, ddn.SequenceNumber, sess.MMEControlFTEID.TEID, seq)
+	}
+	if ddn.IMSI == nil {
+		t.Fatal("DDN IMSI missing")
+	}
+	if got, err := ddn.IMSI.IMSI(); err != nil || got != sess.IMSI {
+		t.Fatalf("DDN IMSI = %q err=%v; want %s", got, err, sess.IMSI)
+	}
+	if len(ddn.EBIs) != 1 {
+		t.Fatalf("DDN EBI count = %d; want 1", len(ddn.EBIs))
+	}
+	if got, err := ddn.EBIs[0].EBIValue(); err != nil || got != sess.DefaultBearerID {
+		t.Fatalf("DDN EBI = %d err=%v; want %d", got, err, sess.DefaultBearerID)
+	}
+	if ddn.ARP == nil || len(ddn.ARP.Value) != 1 || ddn.ARP.Value[0] != 0x44 {
+		t.Fatalf("DDN ARP = %#v; want value 0x44", ddn.ARP)
+	}
+	if ddn.SenderFTEID == nil {
+		t.Fatal("DDN Sender F-TEID missing")
+	}
+	fteid, err := ddn.SenderFTEID.FTEIDValue()
+	if err != nil {
+		t.Fatalf("DDN Sender F-TEID decode: %v", err)
+	}
+	if fteid.IntfType != ie.IFTypeS11S4SGW || fteid.TEID != sess.SGWS11FTEID.TEID || fteid.IPv4.String() != "10.90.250.10" {
+		t.Fatalf("DDN Sender F-TEID = %+v; want S11/S4 SGW TEID 0x%08X IP 10.90.250.10",
+			fteid, sess.SGWS11FTEID.TEID)
+	}
+}
+
+func TestHandleDownlinkDataNotificationAckMarksRestorationSession(t *testing.T) {
+	mgr := session.NewManager()
+	sess, _, err := mgr.Create(session.CreateParams{
+		IMSI:           "311435300070599",
+		APN:            "ims",
+		RATType:        ie.RATTypeEUTRAN,
+		ServingNetwork: "311-435",
+		MMEControlFTEID: session.FTEID{
+			TEID: 0x11223344,
+			IPv4: netip.MustParseAddr("10.90.250.77"),
+		},
+		DefaultEBI: 6,
+		QCI:        5,
+		ARP:        bearer.ARP{PriorityLevel: 1},
+	})
+	if err != nil {
+		t.Fatalf("Create session: %v", err)
+	}
+	const ddnSeq uint32 = 0x1234
+	sess.MarkMMERestorationDDNTriggered(ddnSeq, time.Unix(10, 0).UTC())
+	h := &Handler{sessions: mgr, log: slog.New(slog.NewTextHandler(os.Stdout, nil))}
+	ddn := &message.DownlinkDataNotification{Header: message.Header{SequenceNumber: ddnSeq}}
+	raw, err := message.MarshalDownlinkDataNotificationAck(ddn, sess.SGWS11FTEID.TEID, ie.CauseRequestAccepted)
+	if err != nil {
+		t.Fatalf("Marshal DDN Ack: %v", err)
+	}
+
+	h.handleDownlinkDataNotificationAck(&net.UDPAddr{IP: net.ParseIP("10.90.250.77"), Port: 2123}, raw)
+
+	status := sess.MMERestorationSnapshot()
+	if !status.DDNAcked || status.DDNAckCause != ie.CauseRequestAccepted {
+		t.Fatalf("DDN status = %+v; want acked cause accepted", status)
+	}
+}
+
+func TestHandleDownlinkDataNotificationAckMatchesTEIDZeroByIMSI(t *testing.T) {
+	mgr := session.NewManager()
+	sess, _, err := mgr.Create(session.CreateParams{
+		IMSI:           "311435300070599",
+		APN:            "ims",
+		RATType:        ie.RATTypeEUTRAN,
+		ServingNetwork: "311-435",
+		MMEControlFTEID: session.FTEID{
+			TEID: 0x11223344,
+			IPv4: netip.MustParseAddr("10.90.250.77"),
+		},
+		DefaultEBI: 6,
+		QCI:        5,
+		ARP:        bearer.ARP{PriorityLevel: 1},
+	})
+	if err != nil {
+		t.Fatalf("Create session: %v", err)
+	}
+	const ddnSeq uint32 = 0x1234
+	sess.MarkMMERestorationDDNTriggered(ddnSeq, time.Unix(10, 0).UTC())
+	h := &Handler{sessions: mgr, log: slog.New(slog.NewTextHandler(os.Stdout, nil))}
+	ddn := &message.DownlinkDataNotification{Header: message.Header{SequenceNumber: ddnSeq}}
+	raw, err := message.MarshalDownlinkDataNotificationAck(ddn, 0, ie.CauseRequestAccepted, ie.NewIMSI(sess.IMSI))
+	if err != nil {
+		t.Fatalf("Marshal DDN Ack: %v", err)
+	}
+
+	h.handleDownlinkDataNotificationAck(&net.UDPAddr{IP: net.ParseIP("10.90.250.77"), Port: 30032}, raw)
+
+	status := sess.MMERestorationSnapshot()
+	if !status.DDNAcked || status.DDNAckCause != ie.CauseRequestAccepted {
+		t.Fatalf("DDN status = %+v; want acked via TEID-zero/IMSI fallback", status)
+	}
+}
+
+func TestHandleDownlinkDataNotificationFailureMarksRestorationSession(t *testing.T) {
+	mgr := session.NewManager()
+	sess, _, err := mgr.Create(session.CreateParams{
+		IMSI:           "311435300070599",
+		APN:            "ims",
+		RATType:        ie.RATTypeEUTRAN,
+		ServingNetwork: "311-435",
+		MMEControlFTEID: session.FTEID{
+			TEID: 0x11223344,
+			IPv4: netip.MustParseAddr("10.90.250.77"),
+		},
+		DefaultEBI: 6,
+		QCI:        5,
+		ARP:        bearer.ARP{PriorityLevel: 1},
+	})
+	if err != nil {
+		t.Fatalf("Create session: %v", err)
+	}
+	const ddnSeq uint32 = 0x2233
+	sess.MarkMMERestorationDDNTriggered(ddnSeq, time.Unix(10, 0).UTC())
+	h := &Handler{sessions: mgr, log: slog.New(slog.NewTextHandler(os.Stdout, nil))}
+	raw, err := message.MarshalDownlinkDataNotificationFailureIndication(
+		sess.SGWS11FTEID.TEID,
+		ddnSeq,
+		ie.CauseRequestRejected,
+		ie.NewIMSI(sess.IMSI),
+	)
+	if err != nil {
+		t.Fatalf("Marshal DDN Failure Indication: %v", err)
+	}
+
+	h.handleDownlinkDataNotificationFailureIndication(&net.UDPAddr{IP: net.ParseIP("10.90.250.77"), Port: 2123}, raw)
+
+	status := sess.MMERestorationSnapshot()
+	if status.DDNFailureCause != ie.CauseRequestRejected || status.DDNFailureReason != "ddn-failure-indication" {
+		t.Fatalf("DDN status = %+v; want failure indication cause request rejected", status)
+	}
+}
+
+func TestSendStopPagingIndicationBuildsS11StopPaging(t *testing.T) {
+	mgr := session.NewManager()
+	sess, _, err := mgr.Create(session.CreateParams{
+		IMSI:           "311435300070599",
+		APN:            "ims",
+		RATType:        ie.RATTypeEUTRAN,
+		ServingNetwork: "311-435",
+		MMEControlFTEID: session.FTEID{
+			TEID: 0x11223344,
+			IPv4: netip.MustParseAddr("10.90.250.77"),
+		},
+		DefaultEBI: 6,
+		QCI:        5,
+		ARP:        bearer.ARP{PriorityLevel: 1},
+	})
+	if err != nil {
+		t.Fatalf("Create session: %v", err)
+	}
+	h := &Handler{
+		conn: &fakeGTPCConn{},
+		log:  slog.New(slog.NewTextHandler(os.Stdout, nil)),
+	}
+
+	seq, err := h.SendStopPagingIndication(context.Background(), sess)
+	if err != nil {
+		t.Fatalf("SendStopPagingIndication: %v", err)
+	}
+	raw := h.conn.(*fakeGTPCConn).replies[0]
+	ind, err := message.ParseStopPagingIndication(raw)
+	if err != nil {
+		t.Fatalf("ParseStopPagingIndication: %v", err)
+	}
+	if ind.TEID != sess.MMEControlFTEID.TEID || ind.SequenceNumber != seq {
+		t.Fatalf("Stop Paging header TEID=0x%08X seq=%d; want TEID=0x%08X seq=%d",
+			ind.TEID, ind.SequenceNumber, sess.MMEControlFTEID.TEID, seq)
+	}
+	if ind.IMSI == nil {
+		t.Fatal("Stop Paging IMSI missing")
+	}
+	if got, err := ind.IMSI.IMSI(); err != nil || got != sess.IMSI {
+		t.Fatalf("Stop Paging IMSI = %q err=%v; want %s", got, err, sess.IMSI)
+	}
+	status := sess.MMERestorationSnapshot()
+	if !status.StopPagingSent || status.StopPagingSequence != seq {
+		t.Fatalf("Stop Paging status = %+v; want sent seq %d", status, seq)
+	}
+}
+
+func TestModifyBearerCompletesMMERestorationAfterPFCPForwardingRestored(t *testing.T) {
+	mgr := session.NewManager()
+	sess, _, err := mgr.Create(session.CreateParams{
+		IMSI:           "311435300070599",
+		APN:            "ims",
+		RATType:        ie.RATTypeEUTRAN,
+		ServingNetwork: "311-435",
+		MMEControlFTEID: session.FTEID{
+			TEID: 0x11223344,
+			IPv4: netip.MustParseAddr("10.90.250.77"),
+		},
+		DefaultEBI: 6,
+		QCI:        5,
+		ARP:        bearer.ARP{PriorityLevel: 1},
+	})
+	if err != nil {
+		t.Fatalf("Create session: %v", err)
+	}
+	sess.SetPFCPBinding(session.PFCPSessionBinding{
+		LocalFSEID:  session.FSEID{SEID: 101, IPv4: netip.MustParseAddr("10.90.250.10")},
+		SGWUFSEID:   session.FSEID{SEID: 202, IPv4: netip.MustParseAddr("10.90.250.11")},
+		SGWUAddr:    "10.90.250.11:8805",
+		Established: true,
+	})
+	b := sess.GetBearer(6)
+	b.SGWS1UFTEID = bearer.FTEID{TEID: 0x90000002, IPv4: netip.MustParseAddr("10.90.250.11")}
+	sess.SetBearer(b)
+	sess.MarkMMERestart("10.90.250.77:2123", 3, time.Unix(10, 0).UTC())
+	sess.SetMMERestorationPolicy(session.MMERestorationPolicyPreserve, "preserve-ims", time.Unix(11, 0).UTC())
+	sess.MarkMMERestorationDDNTriggered(0x1234, time.Unix(12, 0).UTC())
+	sess.MarkMMERestorationDDNAck(ie.CauseRequestAccepted, time.Unix(13, 0).UTC())
+	if got := sess.GetState(); got != session.StateRecovering {
+		t.Fatalf("state after DDN Ack = %s; want recovering", got)
+	}
+
+	conn, err := transport.Listen("127.0.0.1:0", 1, 1, slog.Default())
+	if err != nil {
+		t.Fatalf("Listen: %v", err)
+	}
+	defer conn.Close() //nolint:errcheck
+	pfcp := &fakePFCPClient{}
+	h := &Handler{
+		log:      slog.Default(),
+		sessions: mgr,
+		pfcp:     pfcp,
+		recovery: recovery.New(0),
+	}
+	addr := &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 2123}
+	hdr := message.Header{
+		Version:        2,
+		HasTEID:        true,
+		MessageType:    message.MsgTypeModifyBearerRequest,
+		TEID:           sess.SGWS11FTEID.TEID,
+		SequenceNumber: 0x20202,
+	}
+	bc := ie.NewBearerContext(0,
+		ie.NewEBI(6),
+		ie.NewFTEID(0, ie.IFTypeS1UENB, 0xA0B0C0D0, netip.MustParseAddr("10.90.250.88")),
+	)
+	raw, err := message.Marshal(hdr, []*ie.IE{bc})
+	if err != nil {
+		t.Fatalf("Marshal MBReq: %v", err)
+	}
+	parsedHdr, ies, err := message.Parse(raw)
+	if err != nil {
+		t.Fatalf("Parse MBReq: %v", err)
+	}
+
+	h.handleModifyBearerRequest(conn, addr, parsedHdr, ies)
+
+	if pfcp.modifies != 1 {
+		t.Fatalf("PFCP modifies = %d; want 1", pfcp.modifies)
+	}
+	if len(pfcp.lastUpdates) != 1 ||
+		pfcp.lastUpdates[0].FARID != 2 ||
+		pfcp.lastUpdates[0].ApplyAction != pfcpie.ApplyActionFORW ||
+		pfcp.lastUpdates[0].OuterTEID != 0xA0B0C0D0 ||
+		pfcp.lastUpdates[0].OuterIP.String() != "10.90.250.88" {
+		t.Fatalf("PFCP update = %+v; want FAR 2 FORW to eNB", pfcp.lastUpdates)
+	}
+	status := sess.MMERestorationSnapshot()
+	if status.RestorationPending || !status.UserPlaneRestored || status.RestoredEBI != 6 {
+		t.Fatalf("restoration status = %+v; want pending cleared and user plane restored for EBI 6", status)
+	}
+	if got := sess.GetState(); got != session.StateActive {
+		t.Fatalf("state after Modify Bearer = %s; want active", got)
+	}
+}
+
 type fakeS5CClient struct {
 	replies                   [][]byte
 	deleteSessionFromS11Calls int
@@ -110,15 +429,19 @@ func (f *fakeS5CClient) AllocTEID() (uint32, error) { return 0x11112222, nil }
 func (f *fakeS5CClient) FreeTEID(uint32)            {}
 
 type fakePFCPClient struct {
-	adds    int
-	removes int
+	adds        int
+	removes     int
+	modifies    int
+	lastUpdates []pfcpclient.FARUpdate
 }
 
 func (f *fakePFCPClient) AllocCPSEID() uint64 { return 1 }
 func (f *fakePFCPClient) EstablishSession(context.Context, pfcpclient.SessionParams) (*pfcpclient.SessionResult, error) {
 	return nil, nil
 }
-func (f *fakePFCPClient) ModifySessionOnPeer(context.Context, string, uint64, uint64, []pfcpclient.FARUpdate) error {
+func (f *fakePFCPClient) ModifySessionOnPeer(_ context.Context, _ string, _, _ uint64, updates []pfcpclient.FARUpdate) error {
+	f.modifies++
+	f.lastUpdates = append([]pfcpclient.FARUpdate(nil), updates...)
 	return nil
 }
 func (f *fakePFCPClient) AddBearerRulesOnPeer(_ context.Context, _ string, _, _ uint64, createPDRs, _ []*pfcpie.IE) ([]*pfcpie.IE, error) {

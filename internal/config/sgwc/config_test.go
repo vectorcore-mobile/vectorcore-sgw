@@ -173,6 +173,34 @@ func TestDefaultPGWFailureConfig(t *testing.T) {
 	}
 }
 
+func TestDefaultMMERestorationConfig(t *testing.T) {
+	cfg := Default()
+	if !cfg.GTPC.MMERestoration.Enabled {
+		t.Fatal("default MME restoration tracking disabled; want enabled")
+	}
+	if !cfg.GTPC.MMERestoration.MarkSessionsOnPathDown {
+		t.Fatal("default mark_sessions_on_path_down disabled; want enabled")
+	}
+	if !cfg.GTPC.MMERestoration.MarkSessionsOnRestart {
+		t.Fatal("default mark_sessions_on_restart disabled; want enabled")
+	}
+	if !cfg.GTPC.MMERestoration.EnforceDeletePolicy {
+		t.Fatal("default enforce_delete_policy disabled; want enabled")
+	}
+	if !cfg.GTPC.MMERestoration.TriggerDDN {
+		t.Fatal("default trigger_ddn disabled; want enabled")
+	}
+	if cfg.GTPC.MMERestoration.CleanupTimeoutSeconds != 30 {
+		t.Fatalf("default cleanup_timeout_seconds = %d; want 30", cfg.GTPC.MMERestoration.CleanupTimeoutSeconds)
+	}
+	if cfg.GTPC.MMERestoration.DefaultAction != "preserve" {
+		t.Fatalf("default MME restoration action = %q; want preserve", cfg.GTPC.MMERestoration.DefaultAction)
+	}
+	if len(cfg.GTPC.MMERestoration.Preserve) == 0 {
+		t.Fatal("default MME restoration preserve policy is empty")
+	}
+}
+
 func TestValidateRejectsInvalidPeerHealthConfig(t *testing.T) {
 	cfg := validTestConfig()
 	cfg.GTPC.PeerHealth.EchoTimeoutSeconds = cfg.GTPC.PeerHealth.EchoIntervalSeconds
@@ -199,6 +227,26 @@ func TestValidateRejectsUnsupportedPGWRestartNotification(t *testing.T) {
 	cfg.GTPC.PGWFailure.NotifyMMEOnPGWRestart = true
 	if err := cfg.Validate(); err == nil {
 		t.Fatal("Validate succeeded with unsupported notify_mme_on_pgw_restart=true")
+	}
+}
+
+func TestValidateRejectsInvalidMMERestorationPolicy(t *testing.T) {
+	cfg := validTestConfig()
+	cfg.GTPC.MMERestoration.DefaultAction = "drop"
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("Validate succeeded with invalid MME restoration default_action")
+	}
+
+	cfg = validTestConfig()
+	cfg.GTPC.MMERestoration.Preserve = []MMERestorationPolicyRuleConfig{{ARPPriorityMin: 4, ARPPriorityMax: 3}}
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("Validate succeeded with inverted MME restoration ARP priority range")
+	}
+
+	cfg = validTestConfig()
+	cfg.GTPC.MMERestoration.CleanupTimeoutSeconds = 0
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("Validate succeeded with invalid MME restoration cleanup timeout")
 	}
 }
 

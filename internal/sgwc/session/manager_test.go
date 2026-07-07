@@ -355,6 +355,79 @@ func TestMarkPGWRestartUpdatesIndexedSessions(t *testing.T) {
 	}
 }
 
+func TestMarkMMERestartUpdatesMatchingMMESessions(t *testing.T) {
+	m := session.NewManager()
+	firstParams := defaultParams()
+	firstParams.MMEControlFTEID.IPv4 = netip.MustParseAddr("10.90.250.77")
+	first, _, err := m.Create(firstParams)
+	if err != nil {
+		t.Fatalf("Create first: %v", err)
+	}
+	secondParams := defaultParams()
+	secondParams.IMSI = "311430000000002"
+	secondParams.MMEControlFTEID.IPv4 = netip.MustParseAddr("10.90.250.77")
+	second, _, err := m.Create(secondParams)
+	if err != nil {
+		t.Fatalf("Create second: %v", err)
+	}
+	otherParams := defaultParams()
+	otherParams.IMSI = "311430000000003"
+	otherParams.MMEControlFTEID.IPv4 = netip.MustParseAddr("10.90.250.78")
+	other, _, err := m.Create(otherParams)
+	if err != nil {
+		t.Fatalf("Create other: %v", err)
+	}
+
+	restartAt := time.Unix(600, 0).UTC()
+	if got := m.MarkMMERestart("10.90.250.77:30032", 25, restartAt); got != 2 {
+		t.Fatalf("MarkMMERestart affected = %d; want 2", got)
+	}
+	for _, sess := range []*session.SGWSession{first, second} {
+		status := sess.MMERestorationSnapshot()
+		if status.State != session.MMERestorationStateRestorationPending ||
+			status.MMEAddr != "10.90.250.77:2123" ||
+			!status.RecoverySeen ||
+			status.RecoveryCounter != 25 ||
+			!status.RestartDetectedAt.Equal(restartAt) ||
+			!status.RestorationPending {
+			t.Fatalf("indexed session MME status = %+v; want restoration pending recovery 25", status)
+		}
+	}
+	if status := other.MMERestorationSnapshot(); status.RecoverySeen {
+		t.Fatalf("other MME session status = %+v; want unchanged", status)
+	}
+}
+
+func TestMarkMMEPathStateUpdatesMatchingMMESessions(t *testing.T) {
+	m := session.NewManager()
+	params := defaultParams()
+	params.MMEControlFTEID.IPv4 = netip.MustParseAddr("10.90.250.77")
+	sess, _, err := m.Create(params)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	downAt := time.Unix(700, 0).UTC()
+	if got := m.MarkMMEPathState("10.90.250.77:39999", session.MMERestorationStateDown, downAt); got != 1 {
+		t.Fatalf("MarkMMEPathState affected = %d; want 1", got)
+	}
+	status := sess.MMERestorationSnapshot()
+	if status.State != session.MMERestorationStateDown ||
+		status.MMEAddr != "10.90.250.77:2123" ||
+		!status.PathDownAt.Equal(downAt) {
+		t.Fatalf("down status = %+v; want down on canonical MME", status)
+	}
+
+	upAt := time.Unix(800, 0).UTC()
+	if got := m.MarkMMEPathState("10.90.250.77:2123", session.MMERestorationStateUp, upAt); got != 1 {
+		t.Fatalf("MarkMMEPathState up affected = %d; want 1", got)
+	}
+	status = sess.MMERestorationSnapshot()
+	if status.State != session.MMERestorationStateUp || !status.PathDownAt.IsZero() {
+		t.Fatalf("up status = %+v; want up with cleared PathDownAt", status)
+	}
+}
+
 func TestFindByIMSI(t *testing.T) {
 	m := session.NewManager()
 	sess, _, _ := m.Create(defaultParams())

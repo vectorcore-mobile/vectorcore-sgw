@@ -242,6 +242,186 @@ func (h *Handler) SendEcho(ctx context.Context, addr string, seq uint32) (*peerh
 	return &peerhealth.EchoResult{RTT: rtt, Recovery: recoveryIEValuePtr(resp.Recovery)}, nil
 }
 
+func (h *Handler) SendDownlinkDataNotification(ctx context.Context, sess *session.SGWSession) (uint32, error) {
+	if h == nil || h.conn == nil {
+		return 0, fmt.Errorf("S11 DDN sender unavailable")
+	}
+	if sess == nil {
+		return 0, fmt.Errorf("S11 DDN session is nil")
+	}
+	if sess.MMEControlFTEID.TEID == 0 || !sess.MMEControlFTEID.IPv4.IsValid() {
+		return 0, fmt.Errorf("S11 DDN missing MME S11 F-TEID")
+	}
+	b := sess.GetBearer(sess.DefaultBearerID)
+	if b == nil {
+		return 0, fmt.Errorf("S11 DDN missing default bearer EBI %d", sess.DefaultBearerID)
+	}
+
+	seq := h.conn.AllocSeq()
+	raw, err := message.MarshalDownlinkDataNotification(
+		sess.MMEControlFTEID.TEID,
+		seq,
+		ie.NewIMSI(sess.IMSI),
+		ie.NewEBI(sess.DefaultBearerID),
+		newARPFromBearer(b.ARP),
+		ie.NewFTEID(0, ie.IFTypeS11S4SGW, sess.SGWS11FTEID.TEID, h.localIP),
+	)
+	if err != nil {
+		return 0, fmt.Errorf("marshal S11 DDN: %w", err)
+	}
+
+	mmeIP4 := sess.MMEControlFTEID.IPv4.As4()
+	mmeAddr := &net.UDPAddr{IP: mmeIP4[:], Port: peerhealth.GTPControlPort}
+	select {
+	case <-ctx.Done():
+		return 0, ctx.Err()
+	default:
+	}
+	if err := h.conn.Reply(mmeAddr, raw); err != nil {
+		return 0, fmt.Errorf("send S11 DDN: %w", err)
+	}
+	h.log.Info("S11: Downlink Data Notification triggered for MME restoration",
+		"mme", mmeAddr,
+		"session_id", sess.SessionID,
+		"imsi", sess.IMSI,
+		"apn", sess.APN,
+		"default_ebi", sess.DefaultBearerID,
+		"mme_s11_teid", fmt.Sprintf("0x%08X", sess.MMEControlFTEID.TEID),
+		"sgw_s11_teid", fmt.Sprintf("0x%08X", sess.SGWS11FTEID.TEID),
+		"seq", seq)
+	return seq, nil
+}
+
+func newARPFromBearer(arp bearer.ARP) *ie.IE {
+	var pci, pvi uint8
+	if arp.PreemptionCapability {
+		pci = 1
+	}
+	if arp.PreemptionVulnerability {
+		pvi = 1
+	}
+	return &ie.IE{Type: ie.TypeARP, Value: []byte{((pci & 1) << 6) | ((arp.PriorityLevel & 0x0F) << 2) | (pvi & 1)}}
+}
+
+func (h *Handler) SendStopPagingIndication(ctx context.Context, sess *session.SGWSession) (uint32, error) {
+	if h == nil || h.conn == nil {
+		return 0, fmt.Errorf("S11 Stop Paging sender unavailable")
+	}
+	if sess == nil {
+		return 0, fmt.Errorf("S11 Stop Paging session is nil")
+	}
+	if sess.MMEControlFTEID.TEID == 0 || !sess.MMEControlFTEID.IPv4.IsValid() {
+		return 0, fmt.Errorf("S11 Stop Paging missing MME S11 F-TEID")
+	}
+
+	seq := h.conn.AllocSeq()
+	raw, err := message.MarshalStopPagingIndication(
+		sess.MMEControlFTEID.TEID,
+		seq,
+		ie.NewIMSI(sess.IMSI),
+	)
+	if err != nil {
+		return 0, fmt.Errorf("marshal S11 Stop Paging Indication: %w", err)
+	}
+	mmeIP4 := sess.MMEControlFTEID.IPv4.As4()
+	mmeAddr := &net.UDPAddr{IP: mmeIP4[:], Port: peerhealth.GTPControlPort}
+	select {
+	case <-ctx.Done():
+		return 0, ctx.Err()
+	default:
+	}
+	if err := h.conn.Reply(mmeAddr, raw); err != nil {
+		return 0, fmt.Errorf("send S11 Stop Paging Indication: %w", err)
+	}
+	sess.MarkMMERestorationStopPagingSent(seq, time.Now())
+	h.log.Info("S11: Stop Paging Indication sent for MME restoration",
+		"mme", mmeAddr,
+		"session_id", sess.SessionID,
+		"imsi", sess.IMSI,
+		"apn", sess.APN,
+		"default_ebi", sess.DefaultBearerID,
+		"seq", seq)
+	return seq, nil
+}
+
+func (h *Handler) handleDownlinkDataNotificationAck(addr *net.UDPAddr, raw []byte) {
+	ack, err := message.ParseDownlinkDataNotificationAck(raw)
+	if err != nil {
+		h.log.Warn("S11: Downlink Data Notification Ack invalid", "from", addr, "error", err)
+		return
+	}
+	cause, _ := ack.Cause.CauseValue()
+	sess := h.findDDNRestorationSession(addr, ack.Header, ack.IMSI)
+	if sess == nil {
+		h.log.Warn("S11: Downlink Data Notification Ack unmatched",
+			"from", addr,
+			"teid", fmt.Sprintf("0x%08X", ack.TEID),
+			"seq", ack.SequenceNumber,
+			"cause", cause)
+		return
+	}
+	sess.MarkMMERestorationDDNAck(cause, time.Now())
+	h.log.Info("S11: Downlink Data Notification Ack received",
+		"from", addr,
+		"session_id", sess.SessionID,
+		"imsi", sess.IMSI,
+		"apn", sess.APN,
+		"default_ebi", sess.DefaultBearerID,
+		"teid", fmt.Sprintf("0x%08X", ack.TEID),
+		"seq", ack.SequenceNumber,
+		"cause", cause,
+		"delay_present", ack.DataNotificationDelay != nil,
+		"throttling_present", ack.LowPriorityTrafficThrottling != nil)
+}
+
+func (h *Handler) handleDownlinkDataNotificationFailureIndication(addr *net.UDPAddr, raw []byte) {
+	ind, err := message.ParseDownlinkDataNotificationFailureIndication(raw)
+	if err != nil {
+		h.log.Warn("S11: Downlink Data Notification Failure Indication invalid", "from", addr, "error", err)
+		return
+	}
+	cause, _ := ind.Cause.CauseValue()
+	sess := h.findDDNRestorationSession(addr, ind.Header, ind.IMSI)
+	if sess == nil {
+		h.log.Warn("S11: Downlink Data Notification Failure Indication unmatched",
+			"from", addr,
+			"teid", fmt.Sprintf("0x%08X", ind.TEID),
+			"seq", ind.SequenceNumber,
+			"cause", cause)
+		return
+	}
+	sess.MarkMMERestorationDDNFailureIndication(cause, time.Now())
+	h.log.Warn("S11: Downlink Data Notification Failure Indication received",
+		"from", addr,
+		"session_id", sess.SessionID,
+		"imsi", sess.IMSI,
+		"apn", sess.APN,
+		"default_ebi", sess.DefaultBearerID,
+		"teid", fmt.Sprintf("0x%08X", ind.TEID),
+		"seq", ind.SequenceNumber,
+		"cause", cause)
+}
+
+func (h *Handler) findDDNRestorationSession(addr *net.UDPAddr, hdr message.Header, imsiIE *ie.IE) *session.SGWSession {
+	if h == nil || h.sessions == nil || addr == nil {
+		return nil
+	}
+	if sess := h.sessions.FindMMERestorationByDDN(addr.String(), hdr.TEID, hdr.SequenceNumber); sess != nil {
+		return sess
+	}
+	if hdr.TEID != 0 {
+		if sess := h.sessions.FindMMERestorationByDDN(addr.String(), 0, hdr.SequenceNumber); sess != nil {
+			return sess
+		}
+	}
+	if imsiIE != nil {
+		if imsi, err := imsiIE.IMSI(); err == nil {
+			return h.sessions.FindMMERestorationByIMSI(addr.String(), imsi)
+		}
+	}
+	return nil
+}
+
 // Handle dispatches one inbound S11 GTPv2-C request. It is exported so the
 // SGW-C shared control socket can route S11 messages without owning a second
 // UDP listener.
@@ -278,6 +458,12 @@ func (h *Handler) handle(conn *transport.Conn, addr *net.UDPAddr, hdr message.He
 	case message.MsgTypeDeleteBearerCommand:
 		h.observeGTPPeer(peerhealth.RoleMME, addr, hdr, ies)
 		h.handleDeleteBearerCommand(conn, addr, hdr, raw)
+	case message.MsgTypeDownlinkDataNotificationAck:
+		h.observeGTPPeer(peerhealth.RoleMME, addr, hdr, ies)
+		h.handleDownlinkDataNotificationAck(addr, raw)
+	case message.MsgTypeDownlinkDataNotificationFailureIndication:
+		h.observeGTPPeer(peerhealth.RoleMME, addr, hdr, ies)
+		h.handleDownlinkDataNotificationFailureIndication(addr, raw)
 	case message.MsgTypeUpdateBearerResponse, message.MsgTypeDeleteBearerResponse:
 		h.observeGTPPeer(peerhealth.RoleMME, addr, hdr, ies)
 		h.handleLateBearerResponse(addr, hdr, ies)
@@ -959,6 +1145,18 @@ func (h *Handler) handleModifyBearerRequest(conn *transport.Conn, addr *net.UDPA
 		if refreshedB := sess.GetBearer(ebi); refreshedB != nil {
 			sgwS1U = refreshedB.SGWS1UFTEID
 		}
+		if h.shouldCompleteMMERestorationOnModifyBearer(sess) {
+			sess.MarkMMERestorationUserPlaneRestored(ebi, time.Now())
+			h.log.Info("S11: MME restoration user plane restored by Modify Bearer",
+				"session_id", sess.SessionID,
+				"imsi", sess.IMSI,
+				"apn", sess.APN,
+				"default_ebi", sess.DefaultBearerID,
+				"ebi", ebi,
+				"far_id", farID,
+				"enb_teid", fmt.Sprintf("0x%08X", fteid.TEID),
+				"enb_ip", fteid.IPv4)
+		}
 		results = append(results, mbResult{ebi: ebi, cause: ie.CauseRequestAccepted, sgwS1UFTEID: sgwS1U})
 	}
 
@@ -1119,6 +1317,18 @@ func (h *Handler) captureSecondaryRATUsageReports(addr *net.UDPAddr, hdr message
 			"lookup_source", "s11_teid_bearer_owner",
 		)
 	}
+}
+
+func (h *Handler) shouldCompleteMMERestorationOnModifyBearer(sess *session.SGWSession) bool {
+	if sess == nil {
+		return false
+	}
+	status := sess.MMERestorationSnapshot()
+	return status.RestorationPending &&
+		status.PolicyAction == session.MMERestorationPolicyPreserve &&
+		status.DDNAcked &&
+		status.DDNAckCause == ie.CauseRequestAccepted &&
+		!status.UserPlaneRestored
 }
 
 func (h *Handler) secondaryRATReportTargetSessions(sgwS11TEID uint32, ebis []uint8, defaultSess *session.SGWSession, hasReports bool) []*session.SGWSession {

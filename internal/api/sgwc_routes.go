@@ -56,6 +56,33 @@ type PGWFailureView struct {
 	RecoveryCounter   uint8     `json:"recovery_counter"`
 }
 
+type MMERestorationView struct {
+	State               string    `json:"state"`
+	MMEAddr             string    `json:"mme_addr,omitempty"`
+	PathDownAt          time.Time `json:"path_down_at,omitempty"`
+	RestartDetectedAt   time.Time `json:"restart_detected_at,omitempty"`
+	RecoverySeen        bool      `json:"recovery_seen"`
+	RecoveryCounter     uint8     `json:"recovery_counter"`
+	RestorationPending  bool      `json:"restoration_pending"`
+	PolicyAction        string    `json:"policy_action,omitempty"`
+	PolicyReason        string    `json:"policy_reason,omitempty"`
+	DDNTriggered        bool      `json:"ddn_triggered"`
+	DDNTriggeredAt      time.Time `json:"ddn_triggered_at,omitempty"`
+	DDNSequence         string    `json:"ddn_sequence,omitempty"`
+	DDNAcked            bool      `json:"ddn_acked"`
+	DDNAckedAt          time.Time `json:"ddn_acked_at,omitempty"`
+	DDNAckCause         uint8     `json:"ddn_ack_cause,omitempty"`
+	DDNFailureAt        time.Time `json:"ddn_failure_at,omitempty"`
+	DDNFailureCause     uint8     `json:"ddn_failure_cause,omitempty"`
+	DDNFailureReason    string    `json:"ddn_failure_reason,omitempty"`
+	StopPagingSent      bool      `json:"stop_paging_sent"`
+	StopPagingSentAt    time.Time `json:"stop_paging_sent_at,omitempty"`
+	StopPagingSequence  string    `json:"stop_paging_sequence,omitempty"`
+	UserPlaneRestored   bool      `json:"user_plane_restored"`
+	UserPlaneRestoredAt time.Time `json:"user_plane_restored_at,omitempty"`
+	RestoredEBI         uint8     `json:"restored_ebi,omitempty"`
+}
+
 // SessionView is the API representation of an SGW-C session.
 type SessionView struct {
 	SessionID                    string                        `json:"session_id"`
@@ -76,6 +103,7 @@ type SessionView struct {
 	SecondaryRATUsageReportCount int                           `json:"secondary_rat_usage_report_count"`
 	SecondaryRATUsageDataReports []SecondaryRATUsageReportView `json:"secondary_rat_usage_data_reports"`
 	PGWFailure                   PGWFailureView                `json:"pgw_failure"`
+	MMERestoration               MMERestorationView            `json:"mme_restoration"`
 	CreatedAt                    time.Time                     `json:"created_at"`
 	UpdatedAt                    time.Time                     `json:"updated_at"`
 }
@@ -164,6 +192,7 @@ func sessionToView(s *session.SGWSession) SessionView {
 		SecondaryRATUsageReportCount: len(reports),
 		SecondaryRATUsageDataReports: reports,
 		PGWFailure:                   pgwFailureToView(s.PGWFailureSnapshot()),
+		MMERestoration:               mmeRestorationToView(s.MMERestorationSnapshot()),
 		CreatedAt:                    s.CreatedAt,
 		UpdatedAt:                    s.UpdatedAt,
 	}
@@ -177,6 +206,35 @@ func pgwFailureToView(status session.PGWFailureStatus) PGWFailureView {
 		RestartDetectedAt: status.RestartDetectedAt,
 		RecoverySeen:      status.RecoverySeen,
 		RecoveryCounter:   status.RecoveryCounter,
+	}
+}
+
+func mmeRestorationToView(status session.MMERestorationStatus) MMERestorationView {
+	return MMERestorationView{
+		State:               string(status.State),
+		MMEAddr:             status.MMEAddr,
+		PathDownAt:          status.PathDownAt,
+		RestartDetectedAt:   status.RestartDetectedAt,
+		RecoverySeen:        status.RecoverySeen,
+		RecoveryCounter:     status.RecoveryCounter,
+		RestorationPending:  status.RestorationPending,
+		PolicyAction:        string(status.PolicyAction),
+		PolicyReason:        status.PolicyReason,
+		DDNTriggered:        status.DDNTriggered,
+		DDNTriggeredAt:      status.DDNTriggeredAt,
+		DDNSequence:         fmt.Sprintf("0x%06X", status.DDNSequence),
+		DDNAcked:            status.DDNAcked,
+		DDNAckedAt:          status.DDNAckedAt,
+		DDNAckCause:         status.DDNAckCause,
+		DDNFailureAt:        status.DDNFailureAt,
+		DDNFailureCause:     status.DDNFailureCause,
+		DDNFailureReason:    status.DDNFailureReason,
+		StopPagingSent:      status.StopPagingSent,
+		StopPagingSentAt:    status.StopPagingSentAt,
+		StopPagingSequence:  fmt.Sprintf("0x%06X", status.StopPagingSequence),
+		UserPlaneRestored:   status.UserPlaneRestored,
+		UserPlaneRestoredAt: status.UserPlaneRestoredAt,
+		RestoredEBI:         status.RestoredEBI,
 	}
 }
 

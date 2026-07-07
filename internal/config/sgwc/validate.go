@@ -63,6 +63,9 @@ func (c *Config) Validate() error {
 	if err := c.validatePGWFailure(); err != nil {
 		return err
 	}
+	if err := c.validateMMERestoration(); err != nil {
+		return err
+	}
 	if err := validateDSCP("qos.outer_marking.gtpc.dscp", c.QoS.OuterMarking.GTPC.DSCP); err != nil {
 		return err
 	}
@@ -75,6 +78,42 @@ func (c *Config) Validate() error {
 func (c *Config) validatePGWFailure() error {
 	if c.GTPC.PGWFailure.NotifyMMEOnPGWRestart {
 		return fmt.Errorf("gtpc.pgw_failure.notify_mme_on_pgw_restart is not supported yet; PGW restart notification requires TS 29.274 message support and MME lab validation")
+	}
+	return nil
+}
+
+func (c *Config) validateMMERestoration() error {
+	mr := c.GTPC.MMERestoration
+	if mr.CleanupTimeoutSeconds <= 0 {
+		return fmt.Errorf("gtpc.mme_restoration.cleanup_timeout_seconds must be positive")
+	}
+	switch mr.DefaultAction {
+	case "", "preserve", "delete":
+	default:
+		return fmt.Errorf("gtpc.mme_restoration.default_action must be preserve or delete, got %q", mr.DefaultAction)
+	}
+	for i, rule := range mr.Preserve {
+		if err := validateMMERestorationRule(fmt.Sprintf("gtpc.mme_restoration.preserve[%d]", i), rule); err != nil {
+			return err
+		}
+	}
+	for i, rule := range mr.Delete {
+		if err := validateMMERestorationRule(fmt.Sprintf("gtpc.mme_restoration.delete[%d]", i), rule); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func validateMMERestorationRule(path string, rule MMERestorationPolicyRuleConfig) error {
+	if rule.ARPPriorityMin > 15 {
+		return fmt.Errorf("%s.arp_priority_min must be in range 0-15, got %d", path, rule.ARPPriorityMin)
+	}
+	if rule.ARPPriorityMax > 15 {
+		return fmt.Errorf("%s.arp_priority_max must be in range 0-15, got %d", path, rule.ARPPriorityMax)
+	}
+	if rule.ARPPriorityMin != 0 && rule.ARPPriorityMax != 0 && rule.ARPPriorityMin > rule.ARPPriorityMax {
+		return fmt.Errorf("%s ARP priority min must be less than or equal to max", path)
 	}
 	return nil
 }

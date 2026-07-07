@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"vectorcore-sgw/internal/sgwc/bearer"
+	"vectorcore-sgw/internal/sgwc/mmerestoration"
 	"vectorcore-sgw/internal/sgwc/peerhealth"
 	"vectorcore-sgw/internal/sgwc/pgwfailure"
 	"vectorcore-sgw/internal/sgwc/session"
@@ -153,6 +154,39 @@ func TestSGWCRoutesExposePGWFailureState(t *testing.T) {
 	}
 }
 
+func TestSGWCRoutesExposeMMERestorationState(t *testing.T) {
+	m := session.NewManager()
+	sess, _, err := m.Create(defaultSGWCSessionParams())
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	at := time.Unix(50, 0).UTC()
+	sess.MarkMMERestart("10.1.1.1:2123", 7, at)
+	sess.SetMMERestorationPolicy(session.MMERestorationPolicyPreserve, "preserve-ims", at.Add(time.Second))
+	sess.MarkMMERestorationDDNTriggered(0x123456, at.Add(2*time.Second))
+	sess.MarkMMERestorationDDNAck(16, at.Add(3*time.Second))
+	sess.MarkMMERestorationUserPlaneRestored(5, at.Add(4*time.Second))
+
+	srv := newTestSGWCAPI(m)
+	var out SessionGetOutput
+	getJSON(t, srv, "/sessions/"+sess.SessionID, &out.Body)
+
+	got := out.Body.MMERestoration
+	if got.State != "up" ||
+		got.MMEAddr != "10.1.1.1:2123" ||
+		got.RestorationPending ||
+		got.PolicyAction != "preserve" ||
+		got.PolicyReason != "preserve-ims" ||
+		!got.DDNTriggered ||
+		got.DDNSequence != "0x123456" ||
+		!got.DDNAcked ||
+		got.DDNAckCause != 16 ||
+		!got.UserPlaneRestored ||
+		got.RestoredEBI != 5 {
+		t.Fatalf("MME restoration view = %+v; want completed preserved restoration", got)
+	}
+}
+
 func TestSGWCRoutesExposeDefaultAndDedicatedBearerDetails(t *testing.T) {
 	m := session.NewManager()
 	sess, _, err := m.Create(defaultSGWCSessionParams())
@@ -196,6 +230,49 @@ func TestSGWCRoutesExposeDefaultAndDedicatedBearerDetails(t *testing.T) {
 		dedicated.UplinkPDRID != 3 || dedicated.DownlinkPDRID != 4 ||
 		dedicated.UplinkFARID != 3 || dedicated.DownlinkFARID != 4 {
 		t.Fatalf("dedicated bearer view = %+v; want QoS and PDR/FAR details", dedicated)
+	}
+}
+
+func TestMMERestorationRoutesExposeSummary(t *testing.T) {
+	m := session.NewManager()
+	_, _, err := m.Create(defaultSGWCSessionParams())
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	handler := mmerestoration.NewHandler(m, mmerestoration.Config{
+		Enabled:                true,
+		MarkSessionsOnPathDown: true,
+		MarkSessionsOnRestart:  true,
+	}, slog.New(slog.DiscardHandler))
+	handler.OnPeerStateChange(peerhealth.StateChangeEvent{
+		Role:     peerhealth.RoleMME,
+		Addr:     "10.1.1.1:2123",
+		OldState: peerhealth.StateUp,
+		NewState: peerhealth.StateDown,
+		Reason:   "echo_timeout",
+		At:       time.Unix(60, 0).UTC(),
+	})
+	handler.OnPeerRestart(peerhealth.RestartEvent{
+		Role:        peerhealth.RoleMME,
+		Addr:        "10.1.1.1:2123",
+		OldRecovery: 6,
+		NewRecovery: 7,
+		At:          time.Unix(70, 0).UTC(),
+	})
+
+	srv := NewServer("127.0.0.1:0", BuildInfo{Version: "test", BuildDate: "now"}, slog.New(slog.DiscardHandler))
+	RegisterMMERestorationRoutes(srv.HumaAPI(), handler)
+	var out MMERestorationListOutput
+	getJSON(t, srv, "/gtpc/mme-restorations", &out.Body)
+
+	if out.Body.Total != 1 || len(out.Body.MMERestorations) != 1 {
+		t.Fatalf("MME restorations = total %d len %d; want 1", out.Body.Total, len(out.Body.MMERestorations))
+	}
+	got := out.Body.MMERestorations[0]
+	if got.MMEAddr != "10.1.1.1:2123" || got.State != "restoration_pending" ||
+		got.AffectedSessions != 1 || got.RecoveryCounter != 7 ||
+		got.Restarts != 1 || got.PathDownEvents != 1 {
+		t.Fatalf("MME restoration summary = %+v; want restarted affected MME", got)
 	}
 }
 

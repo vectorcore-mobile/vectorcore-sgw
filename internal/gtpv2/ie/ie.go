@@ -29,6 +29,7 @@ const (
 	TypeBearerTFT      = 84 // TS 29.274 Table 8.1-1: "84 | EPS Bearer Level Traffic Flow Template (Bearer TFT) | Variable Length / 8.19"
 	TypeULI            = 86
 	TypeFTEID          = 87
+	TypeDelayValue     = 92
 	TypeBearerContext  = 93
 	TypeChargingID     = 94
 	TypeChargingChars  = 95
@@ -39,6 +40,11 @@ const (
 	// elsewhere in this codebase, so this was a latent wire-format bug, not yet triggered.
 	TypeUETimeZone                  = 114
 	TypeNodeType                    = 135
+	TypeThrottling                  = 154
+	TypeARP                         = 155
+	TypeEPCTimer                    = 156
+	TypePagingAndServiceInformation = 186
+	TypeIntegerNumber               = 187
 	TypeSelectionMode               = 128 // §8.58
 	TypeSecondaryRATUsageDataReport = 201 // §8.128, used for E-UTRAN NR DC / secondary RAT usage reporting.
 )
