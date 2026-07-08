@@ -247,6 +247,28 @@ func TestDefaultDDNControlConfig(t *testing.T) {
 	}
 }
 
+func TestDefaultSessionRecoveryConfig(t *testing.T) {
+	cfg := Default()
+	if cfg.GTPC.SessionRecovery.Enabled {
+		t.Fatal("default session recovery enabled; want disabled until restore/reconcile phases are complete")
+	}
+	if cfg.GTPC.SessionRecovery.Backend != "sqlite" {
+		t.Fatalf("default session recovery backend = %q; want sqlite", cfg.GTPC.SessionRecovery.Backend)
+	}
+	if cfg.GTPC.SessionRecovery.SQLitePath != "" {
+		t.Fatalf("default session recovery sqlite_path = %q; want empty to derive from sgwc.state_dir", cfg.GTPC.SessionRecovery.SQLitePath)
+	}
+	if !cfg.GTPC.SessionRecovery.RestoreOnStartup {
+		t.Fatal("default session recovery restore_on_startup disabled; want enabled")
+	}
+	if !cfg.GTPC.SessionRecovery.ReconcileOnStartup {
+		t.Fatal("default session recovery reconcile_on_startup disabled; want enabled")
+	}
+	if cfg.GTPC.SessionRecovery.CheckpointIntervalSeconds != 5 {
+		t.Fatalf("default session recovery checkpoint interval = %d; want 5", cfg.GTPC.SessionRecovery.CheckpointIntervalSeconds)
+	}
+}
+
 func TestValidateRejectsInvalidPeerHealthConfig(t *testing.T) {
 	cfg := validTestConfig()
 	cfg.GTPC.PeerHealth.EchoTimeoutSeconds = cfg.GTPC.PeerHealth.EchoIntervalSeconds
@@ -350,6 +372,33 @@ func TestValidateRejectsInvalidDDNControlPolicy(t *testing.T) {
 	cfg.GTPC.DDNControl.StopPagingOnDDNAck = true
 	if err := cfg.Validate(); err == nil {
 		t.Fatal("Validate succeeded with stop_paging_on_ddn_ack enabled without stop_paging_enabled")
+	}
+}
+
+func TestValidateRejectsInvalidSessionRecoveryConfig(t *testing.T) {
+	cfg := validTestConfig()
+	cfg.GTPC.SessionRecovery.Backend = "redis"
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("Validate succeeded with reserved redis session recovery backend")
+	}
+
+	cfg = validTestConfig()
+	cfg.GTPC.SessionRecovery.Backend = "bad"
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("Validate succeeded with invalid session recovery backend")
+	}
+
+	cfg = validTestConfig()
+	cfg.GTPC.SessionRecovery.CheckpointIntervalSeconds = 0
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("Validate succeeded with invalid session recovery checkpoint interval")
+	}
+
+	cfg = validTestConfig()
+	cfg.GTPC.SessionRecovery.RestoreOnStartup = false
+	cfg.GTPC.SessionRecovery.ReconcileOnStartup = true
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("Validate succeeded with reconcile_on_startup enabled without restore_on_startup")
 	}
 }
 

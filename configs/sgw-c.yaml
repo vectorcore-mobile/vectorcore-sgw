@@ -88,6 +88,13 @@ gtpc:
       - apn: "internet"
         qci: 9
         reason: "throttle low-priority internet DDN first"
+  session_recovery:
+    enabled: false
+    backend: "sqlite"
+    sqlite_path: "/opt/vectorcore/data/sgwc-db"
+    restore_on_startup: true
+    reconcile_on_startup: true
+    checkpoint_interval_seconds: 5
 
 s11:
   t3_response_seconds: 3

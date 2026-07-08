@@ -5,7 +5,6 @@ SGW-U processes. It follows a CUPS design: SGW-C handles GTPv2-C and PFCP
 control-plane procedures, while SGW-U handles GTP-U forwarding with an eBPF
 dataplane.
 
-
 ## Components
 
 - `sgw-c`: SGW Control Plane
@@ -35,6 +34,14 @@ dataplane.
 - PGW restart and S5/S8-C path-failure manager with PGW-to-session indexing,
   affected-session marking, API visibility, Prometheus metrics, and
   configurable warning/blocking policy for procedures toward a down PGW.
+- MME restoration and Network Triggered Service Restoration handling with
+  MME path/restart tracking, APN/QCI/ARP preserve/delete policy, optional
+  delete-policy cleanup, DDN triggering, DDN Ack/Failure handling, Modify
+  Bearer completion, API visibility, and Prometheus metrics.
+- Downlink Data Notification throttling and priority paging controls with
+  per-MME token buckets, per-UE suppression, high-priority IMS/QCI/ARP bypass,
+  MME low-priority throttling enforcement, bounded delayed DDN queue, optional
+  Stop Paging after DDN Ack, API visibility, and Prometheus metrics.
 - Static outer IP DSCP marking for SGW-C GTP-C, SGW-C PFCP, SGW-U PFCP, and
   SGW-U forwarded GTP-U.
 - QCI-aware GTP-U outer DSCP marking in SGW-U using operator-configured
@@ -151,6 +158,7 @@ bearers        list SGW-C sessions with bearer details
 pfcp           show SGW-C and SGW-U PFCP association status
 gtpc-peers     show SGW-C GTP-C peer health
 pgw-failures   show SGW-C PGW path and restart state
+recovery       show SGW-C checkpoint and recovery status
 bpf            show SGW-U BPF map state
 ```
 
@@ -209,6 +217,58 @@ gtpc:
     mark_sessions_on_restart: true
     block_new_procedures_to_down_pgw: false
     notify_mme_on_pgw_restart: false
+  mme_restoration:
+    enabled: true
+    mark_sessions_on_path_down: true
+    mark_sessions_on_restart: true
+    enforce_delete_policy: true
+    trigger_ddn: true
+    cleanup_timeout_seconds: 30
+    default_action: preserve
+    preserve:
+      - apn: "ims"
+        reason: "preserve IMS PDN for network triggered service restoration"
+      - qci: 1
+        reason: "preserve conversational bearer"
+      - arp_priority_min: 1
+        arp_priority_max: 3
+        reason: "preserve high-priority ARP sessions"
+    delete:
+      - apn: "internet"
+        qci: 9
+        reason: "low-priority internet PDN can be released after MME restart"
+  ddn_control:
+    enabled: true
+    per_mme_rate_limit_per_second: 50
+    per_mme_burst: 100
+    per_ue_suppression_seconds: 10
+    honor_mme_low_priority_throttling: true
+    low_priority_throttle_seconds: 30
+    high_priority_bypass: true
+    delayed_queue_max: 1000
+    delayed_queue_per_mme: 200
+    delayed_max_age_seconds: 30
+    stop_paging_enabled: false
+    stop_paging_on_ddn_ack: false
+    high_priority:
+      - apn: "ims"
+        reason: "prioritize IMS paging"
+      - qci: 1
+        reason: "prioritize conversational bearer paging"
+      - arp_priority_min: 1
+        arp_priority_max: 3
+        reason: "prioritize high ARP paging"
+    low_priority:
+      - apn: "internet"
+        qci: 9
+        reason: "throttle low-priority internet DDN first"
+  session_recovery:
+    enabled: false
+    backend: "sqlite"
+    sqlite_path: ""
+    restore_on_startup: true
+    reconcile_on_startup: true
+    checkpoint_interval_seconds: 5
 
 s11:
   t3_response_seconds: 3
@@ -278,6 +338,35 @@ SGW-C options:
 | `gtpc.pgw_failure.mark_sessions_on_restart` | Marks sessions indexed to a PGW when that PGW's Recovery IE restart counter changes. |
 | `gtpc.pgw_failure.block_new_procedures_to_down_pgw` | If true, rejects new PGW-owned S5/S8-C procedures toward a PGW currently marked down. Default false, warning-only. |
 | `gtpc.pgw_failure.notify_mme_on_pgw_restart` | Reserved for future TS 29.274 PGW Restart Notification support. Must be false in this release. |
+| `gtpc.mme_restoration.enabled` | Enables MME restoration/NTSR handling. |
+| `gtpc.mme_restoration.mark_sessions_on_path_down` | Marks sessions indexed to an MME when that MME transitions down or back up. |
+| `gtpc.mme_restoration.mark_sessions_on_restart` | Marks sessions indexed to an MME when that MME's Recovery IE restart counter changes. |
+| `gtpc.mme_restoration.enforce_delete_policy` | Enforces delete-policy sessions with S5/S8-C Delete Session and PFCP cleanup. PGW rejection retains local state. |
+| `gtpc.mme_restoration.trigger_ddn` | Sends S11 Downlink Data Notification for preserved sessions during NTSR. |
+| `gtpc.mme_restoration.cleanup_timeout_seconds` | Timeout for restoration cleanup and DDN send operations. Default 30. |
+| `gtpc.mme_restoration.default_action` | Policy action for unmatched sessions. `preserve` or `delete`. Default `preserve`. |
+| `gtpc.mme_restoration.preserve[]` | Preserve rules matched by APN, QCI, and/or ARP priority range. Preserve rules win over delete rules. |
+| `gtpc.mme_restoration.delete[]` | Delete rules matched by APN, QCI, and/or ARP priority range. |
+| `gtpc.ddn_control.enabled` | Enables DDN throttling and priority paging decisions. |
+| `gtpc.ddn_control.per_mme_rate_limit_per_second` | Per-MME DDN token refill rate. Default 50. |
+| `gtpc.ddn_control.per_mme_burst` | Per-MME DDN token bucket burst size. Default 100. |
+| `gtpc.ddn_control.per_ue_suppression_seconds` | Suppresses duplicate non-high-priority DDNs for the same UE within this window. Default 10. |
+| `gtpc.ddn_control.honor_mme_low_priority_throttling` | Applies MME-provided DDN Ack low-priority throttling to future low-priority DDN decisions. |
+| `gtpc.ddn_control.low_priority_throttle_seconds` | Fallback low-priority throttle duration when the MME throttling IE lacks a usable duration. Default 30. |
+| `gtpc.ddn_control.high_priority_bypass` | Allows high-priority DDNs to bypass an empty per-MME token bucket. |
+| `gtpc.ddn_control.delayed_queue_max` | Global bound for delayed DDN queue entries. Default 1000. |
+| `gtpc.ddn_control.delayed_queue_per_mme` | Per-MME bound for delayed DDN queue entries. Default 200. |
+| `gtpc.ddn_control.delayed_max_age_seconds` | Maximum age for queued delayed DDN work. Default 30. |
+| `gtpc.ddn_control.stop_paging_enabled` | Enables Stop Paging support. Default false until ISR lab validation. |
+| `gtpc.ddn_control.stop_paging_on_ddn_ack` | If true, sends Stop Paging after accepted DDN Ack when restoration state proves it is eligible. Requires `stop_paging_enabled`. |
+| `gtpc.ddn_control.high_priority[]` | High-priority DDN rules matched by APN, QCI, and/or ARP priority range. |
+| `gtpc.ddn_control.low_priority[]` | Low-priority DDN rules matched by APN, QCI, and/or ARP priority range. |
+| `gtpc.session_recovery.enabled` | Enables SGW-C session checkpoint/recovery. Default false until restore/reconcile phases are complete. |
+| `gtpc.session_recovery.backend` | Checkpoint backend. `sqlite` is the supported local restart-recovery backend; Redis/etcd are reserved for future HA. |
+| `gtpc.session_recovery.sqlite_path` | SQLite checkpoint DB path. Empty means derive from `sgwc.state_dir` in the SQLite backend phase. |
+| `gtpc.session_recovery.restore_on_startup` | Reload checkpointed SGW-C session state at startup. Restored sessions must reconcile before becoming active. |
+| `gtpc.session_recovery.reconcile_on_startup` | Reconcile restored sessions against SGW-U PFCP/eBPF state at startup. Requires `restore_on_startup`. |
+| `gtpc.session_recovery.checkpoint_interval_seconds` | Minimum periodic checkpoint cadence for dirty sessions. Default 5. |
 | `s11.t3_response_seconds` | GTPv2-C retransmission timeout. |
 | `s11.n3_requests` | GTPv2-C retransmission count. |
 | `pfcp.local_addr` | SGW-C PFCP local address. |
@@ -301,6 +390,20 @@ Required SGW-C fields include `sgwc.node_id`, `sgwc.plmn.mcc`,
 `sgwc.plmn.mnc`, `gtpc.s11.bind`, `gtpc.s5c.bind`, `pfcp.local_addr`, and at
 least one `pfcp.sgwu` entry.
 
+SGW-C exposes runtime state through its HTTP API listener:
+
+| Endpoint | Purpose |
+| --- | --- |
+| `/health` | SGW-C health response. |
+| `/sessions` | SGW-C session list. |
+| `/sessions/{session_id}` | Detailed SGW-C session and bearer state, including PGW failure, MME restoration, and DDN control decision fields. |
+| `/gtpc/peers` | Observed GTP-C peer health and Recovery IE state. |
+| `/gtpc/pgw-failures` | PGW path/restart state and affected session counts. |
+| `/gtpc/mme-restorations` | MME restoration/path/restart state and affected session counts. |
+| `/gtpc/ddn-control` | DDN throttling, priority paging, token, throttle, delay, suppress, and per-UE state. |
+| `/pfcp/associations` | SGW-C PFCP association state. |
+| `/recovery/status` | SGW-C checkpoint backend, restore counts, peer Recovery IE restore counts, and current recovery summary. |
+
 SGW-C exports the following control-plane metrics on its Prometheus listener:
 
 | Metric | Purpose |
@@ -317,6 +420,33 @@ SGW-C exports the following control-plane metrics on its Prometheus listener:
 | `sgwc_pgw_affected_sessions` | Current count of sessions affected by PGW path/restart state. |
 | `sgwc_pgw_restarts_total` | Count of PGW Recovery IE restart-counter changes handled by SGW-C. |
 | `sgwc_pgw_path_down_total` | Count of PGW path-down transitions handled by SGW-C. |
+| `sgwc_mme_restoration_state` | One-hot MME restoration/path/restart state gauge by MME and state. |
+| `sgwc_mme_restoration_affected_sessions` | Current count of sessions affected by MME restoration state. |
+| `sgwc_mme_restarts_total` | Count of MME Recovery IE restart-counter changes handled by SGW-C restoration. |
+| `sgwc_mme_path_down_total` | Count of MME path-down transitions handled by SGW-C restoration. |
+| `sgwc_ddn_control_tokens` | Current per-MME DDN control token count. |
+| `sgwc_ddn_control_sent_total` | Count of DDN sends allowed by DDN control per MME. |
+| `sgwc_ddn_control_delayed_total` | Count of DDN delay decisions per MME. |
+| `sgwc_ddn_control_suppressed_total` | Count of DDN suppress decisions per MME. |
+| `sgwc_ddn_control_high_priority_bypassed_total` | Count of high-priority DDN bypass sends per MME. |
+| `sgwc_ddn_control_low_priority_throttle_active` | Gauge showing whether MME low-priority DDN throttling is active. |
+| `sgwc_ddn_control_ue_sent_total` | Count of DDN sends allowed by DDN control per UE. |
+| `sgwc_ddn_control_ue_delayed_total` | Count of DDN delay decisions per UE. |
+| `sgwc_ddn_control_ue_suppressed_total` | Count of DDN suppress decisions per UE. |
+| `sgwc_checkpoint_enabled` | Gauge showing whether SGW-C session checkpointing is enabled. |
+| `sgwc_checkpoint_sessions_loaded` | Session snapshots loaded from checkpoint storage at startup. |
+| `sgwc_checkpoint_sessions_restored` | Session snapshots restored at startup. |
+| `sgwc_checkpoint_peer_snapshots_loaded` | Peer Recovery IE snapshots loaded at startup. |
+| `sgwc_checkpoint_gtpc_peers_restored` | MME/PGW Recovery IE snapshots restored at startup. |
+| `sgwc_checkpoint_pfcp_peers_restored` | SGW-U Recovery Time Stamp snapshots restored at startup. |
+| `sgwc_checkpoint_flushes_total` | Checkpoint writer flush attempts. |
+| `sgwc_checkpoint_flush_failures_total` | Checkpoint writer flush failures. |
+| `sgwc_checkpoint_session_saves_total` | Session snapshots saved by the checkpoint writer. |
+| `sgwc_checkpoint_session_deletes_total` | Session snapshots deleted by the checkpoint writer. |
+| `sgwc_checkpoint_peer_saves_total` | Peer Recovery IE snapshots saved by the checkpoint writer. |
+| `sgwc_recovery_sessions` | Current SGW-C sessions by recovery/session state. |
+| `sgwc_pfcp_reconciliation_sessions` | Current SGW-C sessions by PFCP reconciliation state. |
+| `sgwc_pfcp_repair_plan_sessions` | Current SGW-C sessions by PFCP repair plan action. |
 | `sgwc_nsa_secondary_rat_usage_reports_captured_total` | Count of Release 15 Secondary RAT Usage Data Report IEs captured on S11 by APN and source procedure. |
 | `sgwc_nsa_secondary_rat_usage_reports_forwarded_total` | Count of Release 15 Secondary RAT Usage Data Report IEs forwarded on S5/S8-C by APN and resulting cause. |
 
@@ -328,6 +458,12 @@ GTPv2-C peer health behavior and validation notes are in
 
 PGW restart and path-failure behavior and validation notes are in
 `docs/pgw-restart-path-failure.md`.
+
+MME restoration/NTSR behavior and live validation notes are in
+`docs/mme-ntsr-lab-validation.md`.
+
+DDN throttling and priority paging validation notes are in
+`docs/ddn-control-phase8-validation.md`.
 
 NSA/DCNR Secondary RAT report behavior and validation notes are in
 `docs/5g-nsa-dcnr-awareness.md`.

@@ -6,6 +6,8 @@ import (
 	"net"
 	"testing"
 	"time"
+
+	"vectorcore-sgw/internal/sgwc/sessioncheckpoint"
 )
 
 func testTable() *Table {
@@ -178,4 +180,58 @@ func TestSnapshotSortedByRoleAndAddr(t *testing.T) {
 			t.Fatalf("snapshot[%d] = %s %s; want %s %s", i, snaps[i].Role, snaps[i].Addr, want[i].role, want[i].addr)
 		}
 	}
+}
+
+func TestCheckpointSinkReceivesRecoverySnapshot(t *testing.T) {
+	tbl := testTable()
+	sink := &peerCheckpointRecorder{}
+	tbl.SetCheckpointSink(sink)
+	rec := uint8(9)
+
+	tbl.ObserveAddr(RoleMME, "10.90.250.77:30200", 32, 1, &rec)
+
+	if len(sink.snapshots) != 1 {
+		t.Fatalf("checkpoint snapshots = %d; want 1", len(sink.snapshots))
+	}
+	got := sink.snapshots[0]
+	if got.Role != "mme" || got.Addr != "10.90.250.77:2123" || got.RecoveryCounter != 9 {
+		t.Fatalf("checkpoint snapshot = %+v; want MME normalized recovery 9", got)
+	}
+}
+
+func TestRestoreCheckpointSnapshotSeedsRecoveryWithoutRestartEvent(t *testing.T) {
+	tbl := testTable()
+	recorder := &recordingHandler{}
+	tbl.SetEventHandler(recorder)
+	restored := tbl.RestoreCheckpointSnapshots([]sessioncheckpoint.PeerSnapshot{{
+		Role:            "pgw",
+		Addr:            "192.0.2.10:2123",
+		State:           "up",
+		RecoverySeen:    true,
+		RecoveryCounter: 3,
+		UpdatedAt:       time.Unix(100, 0).UTC(),
+	}})
+	if restored != 1 {
+		t.Fatalf("restored = %d; want 1", restored)
+	}
+	if len(recorder.restarts) != 0 {
+		t.Fatalf("restart events during restore = %d; want 0", len(recorder.restarts))
+	}
+
+	next := uint8(4)
+	tbl.ObserveAddr(RolePGW, "192.0.2.10:2123", 33, 2, &next)
+	if len(recorder.restarts) != 1 {
+		t.Fatalf("restart events after Recovery change = %d; want 1", len(recorder.restarts))
+	}
+	if recorder.restarts[0].OldRecovery != 3 || recorder.restarts[0].NewRecovery != 4 {
+		t.Fatalf("restart = %+v; want 3->4", recorder.restarts[0])
+	}
+}
+
+type peerCheckpointRecorder struct {
+	snapshots []sessioncheckpoint.PeerSnapshot
+}
+
+func (r *peerCheckpointRecorder) SavePeerSnapshot(snapshot sessioncheckpoint.PeerSnapshot) {
+	r.snapshots = append(r.snapshots, snapshot)
 }

@@ -56,6 +56,21 @@ type PGWFailureView struct {
 	RecoveryCounter   uint8     `json:"recovery_counter"`
 }
 
+type PFCPReconciliationView struct {
+	State  string    `json:"state"`
+	At     time.Time `json:"at,omitempty"`
+	Reason string    `json:"reason,omitempty"`
+}
+
+type PFCPRepairPlanView struct {
+	Action     string   `json:"action"`
+	Reason     string   `json:"reason"`
+	Repairable bool     `json:"repairable"`
+	BearerEBIs []uint8  `json:"bearer_ebis"`
+	PDRIDs     []uint32 `json:"pdr_ids"`
+	FARIDs     []uint32 `json:"far_ids"`
+}
+
 type MMERestorationView struct {
 	State               string    `json:"state"`
 	MMEAddr             string    `json:"mme_addr,omitempty"`
@@ -101,6 +116,8 @@ type SessionView struct {
 	PFCPUPSEID                   string                        `json:"pfcp_up_seid"`
 	PFCPSGWUName                 string                        `json:"pfcp_sgwu_name,omitempty"`
 	PFCPSGWUAddr                 string                        `json:"pfcp_sgwu_addr,omitempty"`
+	PFCPReconciliation           PFCPReconciliationView        `json:"pfcp_reconciliation"`
+	PFCPRepairPlan               PFCPRepairPlanView            `json:"pfcp_repair_plan"`
 	SGWS11TEID                   string                        `json:"sgw_s11_teid"`
 	MMEControlTEID               string                        `json:"mme_control_teid"`
 	BearerCount                  int                           `json:"bearer_count"`
@@ -190,6 +207,8 @@ func sessionToView(s *session.SGWSession) SessionView {
 		PFCPUPSEID:                   fmt.Sprintf("0x%016X", pfcp.SGWUFSEID.SEID),
 		PFCPSGWUName:                 pfcp.SGWUName,
 		PFCPSGWUAddr:                 pfcp.SGWUAddr,
+		PFCPReconciliation:           pfcpReconciliationToView(s.PFCPReconciliationSnapshot()),
+		PFCPRepairPlan:               pfcpRepairPlanToView(s.PFCPRepairPlan()),
 		SGWS11TEID:                   fmt.Sprintf("0x%08X", s.SGWS11FTEID.TEID),
 		MMEControlTEID:               fmt.Sprintf("0x%08X", s.MMEControlFTEID.TEID),
 		BearerCount:                  s.BearerCount(),
@@ -200,6 +219,25 @@ func sessionToView(s *session.SGWSession) SessionView {
 		MMERestoration:               mmeRestorationToView(s.MMERestorationSnapshot()),
 		CreatedAt:                    s.CreatedAt,
 		UpdatedAt:                    s.UpdatedAt,
+	}
+}
+
+func pfcpRepairPlanToView(plan session.PFCPRepairPlan) PFCPRepairPlanView {
+	return PFCPRepairPlanView{
+		Action:     string(plan.Action),
+		Reason:     plan.Reason,
+		Repairable: plan.Repairable,
+		BearerEBIs: append([]uint8(nil), plan.BearerEBIs...),
+		PDRIDs:     append([]uint32(nil), plan.PDRIDs...),
+		FARIDs:     append([]uint32(nil), plan.FARIDs...),
+	}
+}
+
+func pfcpReconciliationToView(status session.PFCPReconciliationStatus) PFCPReconciliationView {
+	return PFCPReconciliationView{
+		State:  string(status.State),
+		At:     status.At,
+		Reason: status.Reason,
 	}
 }
 

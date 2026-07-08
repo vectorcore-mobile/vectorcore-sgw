@@ -46,6 +46,23 @@ type PFCPSessionBinding struct {
 	Established bool
 }
 
+type PFCPReconciliationState string
+
+const (
+	PFCPReconciliationUnknown      PFCPReconciliationState = "unknown"
+	PFCPReconciliationMatched      PFCPReconciliationState = "matched"
+	PFCPReconciliationMissing      PFCPReconciliationState = "missing"
+	PFCPReconciliationMismatched   PFCPReconciliationState = "mismatched"
+	PFCPReconciliationUnverifiable PFCPReconciliationState = "unverifiable"
+	PFCPReconciliationNoBinding    PFCPReconciliationState = "no_binding"
+)
+
+type PFCPReconciliationStatus struct {
+	State  PFCPReconciliationState
+	At     time.Time
+	Reason string
+}
+
 // PGWPathState records SGW-C's view of the S5/S8-C PGW path for this PDN.
 type PGWPathState string
 
@@ -161,10 +178,12 @@ type SGWSession struct {
 
 	Bearers                      map[uint8]*bearer.Bearer // keyed by EBI
 	PFCP                         PFCPSessionBinding
+	PFCPReconciliation           PFCPReconciliationStatus
 	Procedures                   *collision.Tracker
 	SecondaryRATUsageDataReports []SecondaryRATUsageDataReport
 	PGWFailure                   PGWFailureStatus
 	MMERestoration               MMERestorationStatus
+	checkpointSink               CheckpointSink
 
 	State     SessionState
 	CreatedAt time.Time
@@ -194,12 +213,14 @@ func (s *SGWSession) AllocBearerRuleIDs() (pdrUL, pdrDL uint16, farUL, farDL uin
 // Returns false if the transition is not valid from the current state.
 func (s *SGWSession) Transition(next SessionState) bool {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if !validTransition(s.State, next) {
+		s.mu.Unlock()
 		return false
 	}
 	s.State = next
 	s.UpdatedAt = time.Now()
+	s.mu.Unlock()
+	s.checkpoint()
 	return true
 }
 
@@ -226,32 +247,65 @@ func (s *SGWSession) PFCPBinding() PFCPSessionBinding {
 	return s.PFCP
 }
 
+func (s *SGWSession) PFCPReconciliationSnapshot() PFCPReconciliationStatus {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.PFCPReconciliation
+}
+
 func (s *SGWSession) SetSGWS5CFTEID(f FTEID) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	s.SGWS5CFTEID = f
 	s.UpdatedAt = time.Now()
+	s.mu.Unlock()
+	s.checkpoint()
 }
 
 func (s *SGWSession) SetPGWControlFTEID(f FTEID) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	s.PGWControlFTEID = f
 	s.UpdatedAt = time.Now()
+	s.mu.Unlock()
+	s.checkpoint()
 }
 
 func (s *SGWSession) SetUEIPv4(addr netip.Addr) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	s.UEIPv4 = addr
 	s.UpdatedAt = time.Now()
+	s.mu.Unlock()
+	s.checkpoint()
 }
 
 func (s *SGWSession) SetPFCPBinding(binding PFCPSessionBinding) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	s.PFCP = binding
+	s.PFCPReconciliation = PFCPReconciliationStatus{}
 	s.UpdatedAt = time.Now()
+	s.mu.Unlock()
+	s.checkpoint()
+}
+
+func (s *SGWSession) MarkPFCPReconciliation(state PFCPReconciliationState, reason string, at time.Time) {
+	s.mu.Lock()
+	if at.IsZero() {
+		at = time.Now()
+	}
+	s.PFCPReconciliation = PFCPReconciliationStatus{State: state, At: at, Reason: reason}
+	switch state {
+	case PFCPReconciliationMatched:
+		if s.State == StateRecovering {
+			s.State = StateActive
+		}
+		s.PFCP.Established = true
+	case PFCPReconciliationMissing, PFCPReconciliationMismatched, PFCPReconciliationUnverifiable, PFCPReconciliationNoBinding:
+		if s.State != StateDeleting && s.State != StateDeleted {
+			s.State = StateRecovering
+		}
+	}
+	s.UpdatedAt = at
+	s.mu.Unlock()
+	s.checkpoint()
 }
 
 // GetBearer returns the bearer for the given EBI, or nil.
@@ -276,9 +330,10 @@ func (s *SGWSession) BearerList() []*bearer.Bearer {
 // SetBearer stores a bearer under its EBI.
 func (s *SGWSession) SetBearer(b *bearer.Bearer) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	s.Bearers[b.EBI] = b
 	s.UpdatedAt = time.Now()
+	s.mu.Unlock()
+	s.checkpoint()
 }
 
 // BearerCount returns the number of bearers currently in this session.
@@ -293,11 +348,12 @@ func (s *SGWSession) BearerCount() int {
 // eNodeB-related state while retaining all other session and bearer information.
 func (s *SGWSession) ClearENBFTEIDs() {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	for _, b := range s.Bearers {
 		b.ENBS1UFTEID = bearer.FTEID{}
 	}
 	s.UpdatedAt = time.Now()
+	s.mu.Unlock()
+	s.checkpoint()
 }
 
 // InvalidatePFCPBinding clears PFCP state learned from an SGW-U that has
@@ -306,12 +362,17 @@ func (s *SGWSession) ClearENBFTEIDs() {
 // is no longer safe to reuse; SGW-U allocated F-TEIDs must not be advertised.
 func (s *SGWSession) InvalidatePFCPBinding() bool {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	hadPFCP := s.PFCP.Established || s.PFCP.LocalFSEID.SEID != 0 || s.PFCP.SGWUFSEID.SEID != 0
 	if !hadPFCP {
+		s.mu.Unlock()
 		return false
 	}
 	s.PFCP = PFCPSessionBinding{}
+	s.PFCPReconciliation = PFCPReconciliationStatus{
+		State:  PFCPReconciliationMissing,
+		At:     time.Now(),
+		Reason: "pfcp-binding-invalidated",
+	}
 	for _, b := range s.Bearers {
 		b.SGWS1UFTEID = bearer.FTEID{}
 		b.SGWS5UFTEID = bearer.FTEID{}
@@ -320,6 +381,8 @@ func (s *SGWSession) InvalidatePFCPBinding() bool {
 		s.State = StateRecovering
 	}
 	s.UpdatedAt = time.Now()
+	s.mu.Unlock()
+	s.checkpoint()
 	return true
 }
 
@@ -339,9 +402,10 @@ func (s *SGWSession) InvalidatePFCPBindingForPeer(peerName, peerAddr string) boo
 // DeleteBearer removes the bearer with the given EBI.
 func (s *SGWSession) DeleteBearer(ebi uint8) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	delete(s.Bearers, ebi)
 	s.UpdatedAt = time.Now()
+	s.mu.Unlock()
+	s.checkpoint()
 }
 
 // RecordSecondaryRATUsageDataReports appends opaque NSA/DCNR usage reports to
@@ -351,7 +415,6 @@ func (s *SGWSession) RecordSecondaryRATUsageDataReports(reports []SecondaryRATUs
 		return
 	}
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	for _, report := range reports {
 		copied := report
 		copied.Payload = append([]byte(nil), report.Payload...)
@@ -361,6 +424,8 @@ func (s *SGWSession) RecordSecondaryRATUsageDataReports(reports []SecondaryRATUs
 		s.SecondaryRATUsageDataReports = append(s.SecondaryRATUsageDataReports, copied)
 	}
 	s.UpdatedAt = time.Now()
+	s.mu.Unlock()
+	s.checkpoint()
 }
 
 // SecondaryRATUsageReports returns a copy of stored NSA/DCNR usage reports.
@@ -392,7 +457,6 @@ func (s *SGWSession) MMERestorationSnapshot() MMERestorationStatus {
 // SetPGWPathState updates this session's PGW path state.
 func (s *SGWSession) SetPGWPathState(state PGWPathState, pgwAddr string, at time.Time) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if at.IsZero() {
 		at = time.Now()
 	}
@@ -407,12 +471,13 @@ func (s *SGWSession) SetPGWPathState(state PGWPathState, pgwAddr string, at time
 		s.PGWFailure.PathDownAt = time.Time{}
 	}
 	s.UpdatedAt = at
+	s.mu.Unlock()
+	s.checkpoint()
 }
 
 // MarkPGWRestart records that the owning PGW has advertised a changed Recovery IE.
 func (s *SGWSession) MarkPGWRestart(pgwAddr string, recovery uint8, at time.Time) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if at.IsZero() {
 		at = time.Now()
 	}
@@ -422,12 +487,13 @@ func (s *SGWSession) MarkPGWRestart(pgwAddr string, recovery uint8, at time.Time
 	s.PGWFailure.RecoverySeen = true
 	s.PGWFailure.RecoveryCounter = recovery
 	s.UpdatedAt = at
+	s.mu.Unlock()
+	s.checkpoint()
 }
 
 // SetMMEPathState updates this session's MME S11/S4 path state.
 func (s *SGWSession) SetMMEPathState(state MMERestorationState, mmeAddr string, at time.Time) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if at.IsZero() {
 		at = time.Now()
 	}
@@ -442,6 +508,8 @@ func (s *SGWSession) SetMMEPathState(state MMERestorationState, mmeAddr string, 
 		s.MMERestoration.PathDownAt = time.Time{}
 	}
 	s.UpdatedAt = at
+	s.mu.Unlock()
+	s.checkpoint()
 }
 
 // MarkMMERestart records that the owning MME advertised a changed Recovery IE.
@@ -449,7 +517,6 @@ func (s *SGWSession) SetMMEPathState(state MMERestorationState, mmeAddr string, 
 // Phase 2 only marks the contexts so later phases can apply policy.
 func (s *SGWSession) MarkMMERestart(mmeAddr string, recovery uint8, at time.Time) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if at.IsZero() {
 		at = time.Now()
 	}
@@ -460,25 +527,27 @@ func (s *SGWSession) MarkMMERestart(mmeAddr string, recovery uint8, at time.Time
 	s.MMERestoration.RecoveryCounter = recovery
 	s.MMERestoration.RestorationPending = true
 	s.UpdatedAt = at
+	s.mu.Unlock()
+	s.checkpoint()
 }
 
 // SetMMERestorationPolicy records the policy decision for a pending MME
 // restoration candidate without enforcing it.
 func (s *SGWSession) SetMMERestorationPolicy(action MMERestorationPolicyAction, reason string, at time.Time) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if at.IsZero() {
 		at = time.Now()
 	}
 	s.MMERestoration.PolicyAction = action
 	s.MMERestoration.PolicyReason = reason
 	s.UpdatedAt = at
+	s.mu.Unlock()
+	s.checkpoint()
 }
 
 // MarkMMERestorationDDNTriggered records that SGW-C sent a DDN for NTSR.
 func (s *SGWSession) MarkMMERestorationDDNTriggered(seq uint32, at time.Time) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if at.IsZero() {
 		at = time.Now()
 	}
@@ -487,25 +556,27 @@ func (s *SGWSession) MarkMMERestorationDDNTriggered(seq uint32, at time.Time) {
 	s.MMERestoration.DDNSequence = seq
 	s.MMERestoration.DDNFailureReason = ""
 	s.UpdatedAt = at
+	s.mu.Unlock()
+	s.checkpoint()
 }
 
 // MarkMMERestorationDDNFailed records that DDN trigger send failed before an
 // MME response could be expected.
 func (s *SGWSession) MarkMMERestorationDDNFailed(reason string, at time.Time) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if at.IsZero() {
 		at = time.Now()
 	}
 	s.MMERestoration.DDNFailureReason = reason
 	s.UpdatedAt = at
+	s.mu.Unlock()
+	s.checkpoint()
 }
 
 // MarkMMERestorationDDNControlDecision records the DDN throttling/priority
 // decision made before SGW-C attempts an S11 DDN send.
 func (s *SGWSession) MarkMMERestorationDDNControlDecision(action, priority, reason string, retryAfter time.Duration, at time.Time) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if at.IsZero() {
 		at = time.Now()
 	}
@@ -519,12 +590,13 @@ func (s *SGWSession) MarkMMERestorationDDNControlDecision(action, priority, reas
 		s.MMERestoration.DDNControlRetryAt = time.Time{}
 	}
 	s.UpdatedAt = at
+	s.mu.Unlock()
+	s.checkpoint()
 }
 
 // MarkMMERestorationDDNAck records an MME DDN Ack response.
 func (s *SGWSession) MarkMMERestorationDDNAck(cause uint8, at time.Time) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if at.IsZero() {
 		at = time.Now()
 	}
@@ -536,12 +608,13 @@ func (s *SGWSession) MarkMMERestorationDDNAck(cause uint8, at time.Time) {
 		s.State = StateRecovering
 	}
 	s.UpdatedAt = at
+	s.mu.Unlock()
+	s.checkpoint()
 }
 
 // MarkMMERestorationDDNFailureIndication records an MME DDN Failure Indication.
 func (s *SGWSession) MarkMMERestorationDDNFailureIndication(cause uint8, at time.Time) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if at.IsZero() {
 		at = time.Now()
 	}
@@ -549,12 +622,13 @@ func (s *SGWSession) MarkMMERestorationDDNFailureIndication(cause uint8, at time
 	s.MMERestoration.DDNFailureCause = cause
 	s.MMERestoration.DDNFailureReason = "ddn-failure-indication"
 	s.UpdatedAt = at
+	s.mu.Unlock()
+	s.checkpoint()
 }
 
 // MarkMMERestorationStopPagingSent records an SGW-C Stop Paging Indication.
 func (s *SGWSession) MarkMMERestorationStopPagingSent(seq uint32, at time.Time) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if at.IsZero() {
 		at = time.Now()
 	}
@@ -562,13 +636,14 @@ func (s *SGWSession) MarkMMERestorationStopPagingSent(seq uint32, at time.Time) 
 	s.MMERestoration.StopPagingSentAt = at
 	s.MMERestoration.StopPagingSequence = seq
 	s.UpdatedAt = at
+	s.mu.Unlock()
+	s.checkpoint()
 }
 
 // MarkMMERestorationUserPlaneRestored records that normal Modify Bearer resume
 // restored access-side forwarding for a preserved MME restoration session.
 func (s *SGWSession) MarkMMERestorationUserPlaneRestored(ebi uint8, at time.Time) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if at.IsZero() {
 		at = time.Now()
 	}
@@ -581,6 +656,8 @@ func (s *SGWSession) MarkMMERestorationUserPlaneRestored(ebi uint8, at time.Time
 		s.State = StateActive
 	}
 	s.UpdatedAt = at
+	s.mu.Unlock()
+	s.checkpoint()
 }
 
 func validTransition(from, to SessionState) bool {

@@ -57,6 +57,7 @@ type GTPCConfig struct {
 	PGWFailure             PGWFailureConfig             `yaml:"pgw_failure"`
 	MMERestoration         MMERestorationConfig         `yaml:"mme_restoration"`
 	DDNControl             DDNControlConfig             `yaml:"ddn_control"`
+	SessionRecovery        SessionRecoveryConfig        `yaml:"session_recovery"`
 }
 
 type GTPCLogical struct {
@@ -147,6 +148,15 @@ type DDNControlPriorityRuleConfig struct {
 	ARPPriorityMin uint8  `yaml:"arp_priority_min"`
 	ARPPriorityMax uint8  `yaml:"arp_priority_max"`
 	Reason         string `yaml:"reason"`
+}
+
+type SessionRecoveryConfig struct {
+	Enabled                   bool   `yaml:"enabled"`
+	Backend                   string `yaml:"backend"`
+	SQLitePath                string `yaml:"sqlite_path"`
+	RestoreOnStartup          bool   `yaml:"restore_on_startup"`
+	ReconcileOnStartup        bool   `yaml:"reconcile_on_startup"`
+	CheckpointIntervalSeconds int    `yaml:"checkpoint_interval_seconds"`
 }
 
 type S11Config struct {
@@ -278,6 +288,14 @@ func Default() *Config {
 				LowPriority: []DDNControlPriorityRuleConfig{
 					{APN: "internet", QCI: 9, Reason: "default-low-priority-internet-qci-9"},
 				},
+			},
+			SessionRecovery: SessionRecoveryConfig{
+				Enabled:                   false,
+				Backend:                   "sqlite",
+				SQLitePath:                "",
+				RestoreOnStartup:          true,
+				ReconcileOnStartup:        true,
+				CheckpointIntervalSeconds: 5,
 			},
 		},
 		QoS: QoSConfig{

@@ -27,14 +27,15 @@ type pdnKey struct {
 // Sessions are indexed by session ID, by SGW S11 control TEID, by SGW S5/S8-C control TEID,
 // by IMSI (most recent), and by PDN connection identity (IMSI+EBI) for re-attach collision detection.
 type Manager struct {
-	mu        sync.RWMutex
-	byID      map[string]*SGWSession
-	byS11     map[uint32][]*SGWSession // SGW S11 TEID → PDN sessions sharing the UE/MME S11 context
-	byS5C     map[uint32]*SGWSession   // SGW S5/S8-C TEID → session (for PGW-initiated procedures)
-	byPGW     map[string]map[string]*SGWSession
-	byIMSI    map[string]*SGWSession // IMSI → most recent session (any APN)
-	byPDN     map[pdnKey]*SGWSession // (IMSI+EBI) → active PDN connection
-	teidAlloc *teid.Allocator
+	mu             sync.RWMutex
+	byID           map[string]*SGWSession
+	byS11          map[uint32][]*SGWSession // SGW S11 TEID → PDN sessions sharing the UE/MME S11 context
+	byS5C          map[uint32]*SGWSession   // SGW S5/S8-C TEID → session (for PGW-initiated procedures)
+	byPGW          map[string]map[string]*SGWSession
+	byIMSI         map[string]*SGWSession // IMSI → most recent session (any APN)
+	byPDN          map[pdnKey]*SGWSession // (IMSI+EBI) → active PDN connection
+	teidAlloc      *teid.Allocator
+	checkpointSink CheckpointSink
 }
 
 // NewManager creates a ready-to-use session manager.
@@ -98,6 +99,9 @@ func (m *Manager) Create(p CreateParams) (sess *SGWSession, evicted *SGWSession,
 		State:       bearer.BearerStatePending,
 	}
 
+	m.mu.RLock()
+	checkpointSink := m.checkpointSink
+	m.mu.RUnlock()
 	sess = &SGWSession{
 		SessionID:       id,
 		IMSI:            p.IMSI,
@@ -112,8 +116,10 @@ func (m *Manager) Create(p CreateParams) (sess *SGWSession, evicted *SGWSession,
 		State:           StatePending,
 		CreatedAt:       time.Now(),
 		UpdatedAt:       time.Now(),
+		checkpointSink:  checkpointSink,
 	}
 
+	var evictedID string
 	m.mu.Lock()
 	// Per TS 29.274 Rel-15 §7.2.1: collision detection uses (IMSI, EBI).
 	// The evicted session is returned so the caller can trigger
@@ -121,6 +127,7 @@ func (m *Manager) Create(p CreateParams) (sess *SGWSession, evicted *SGWSession,
 	pdn := pdnKey{imsi: p.IMSI, ebi: p.DefaultEBI}
 	if old, exists := m.byPDN[pdn]; exists {
 		evicted = old
+		evictedID = old.SessionID
 		m.removeLocked(old)
 		if old.SGWS11FTEID.TEID != sgwFTEID.TEID && len(m.byS11[old.SGWS11FTEID.TEID]) == 0 {
 			m.teidAlloc.Free(old.SGWS11FTEID.TEID)
@@ -131,8 +138,23 @@ func (m *Manager) Create(p CreateParams) (sess *SGWSession, evicted *SGWSession,
 	m.byPDN[pdn] = sess
 	m.byIMSI[p.IMSI] = sess
 	m.mu.Unlock()
+	sess.checkpoint()
+	if evictedID != "" && checkpointSink != nil {
+		checkpointSink.DeleteSessionSnapshot(evictedID)
+	}
 
 	return sess, evicted, nil
+}
+
+// SetCheckpointSink enables durable checkpoint notifications for existing and
+// future sessions managed by this Manager.
+func (m *Manager) SetCheckpointSink(sink CheckpointSink) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.checkpointSink = sink
+	for _, sess := range m.byID {
+		sess.setCheckpointSink(sink)
+	}
 }
 
 // Find returns the session with the given ID, or nil.
@@ -209,9 +231,14 @@ func (m *Manager) FindByIMSI(imsi string) *SGWSession {
 // response or piggybacked request to that local TEID.
 func (m *Manager) RegisterS5CTEID(sessionID string, s5cTEID uint32) {
 	m.mu.Lock()
-	defer m.mu.Unlock()
-	if sess, ok := m.byID[sessionID]; ok {
+	var sess *SGWSession
+	if found, ok := m.byID[sessionID]; ok {
+		sess = found
 		m.byS5C[s5cTEID] = sess
+	}
+	m.mu.Unlock()
+	if sess != nil {
+		sess.checkpoint()
 	}
 }
 
@@ -222,9 +249,9 @@ func (m *Manager) RegisterPGW(sessionID, pgwAddr string) {
 		return
 	}
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	sess, ok := m.byID[sessionID]
 	if !ok {
+		m.mu.Unlock()
 		return
 	}
 	if sess.PGWFailure.PGWAddr != "" && sess.PGWFailure.PGWAddr != canonical {
@@ -235,6 +262,7 @@ func (m *Manager) RegisterPGW(sessionID, pgwAddr string) {
 	}
 	m.byPGW[canonical][sessionID] = sess
 	sess.SetPGWPathState(PGWPathStateUp, canonical, time.Now())
+	m.mu.Unlock()
 }
 
 // FindByPGW returns all sessions indexed under the canonical PGW endpoint.
@@ -371,15 +399,20 @@ func (m *Manager) FindByS5CTEID(t uint32) *SGWSession {
 // Delete removes a session and frees its allocated TEID.
 func (m *Manager) Delete(id string) {
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	sess, ok := m.byID[id]
 	if !ok {
+		m.mu.Unlock()
 		return
 	}
 	sgwS11TEID := sess.SGWS11FTEID.TEID
+	sink := m.checkpointSink
 	m.removeLocked(sess)
 	if len(m.byS11[sgwS11TEID]) == 0 {
 		m.teidAlloc.Free(sgwS11TEID)
+	}
+	m.mu.Unlock()
+	if sink != nil {
+		sink.DeleteSessionSnapshot(id)
 	}
 }
 

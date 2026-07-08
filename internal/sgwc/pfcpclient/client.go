@@ -27,6 +27,7 @@ import (
 	pfcpie "vectorcore-sgw/internal/pfcp/ie"
 	pfcpmsg "vectorcore-sgw/internal/pfcp/message"
 	pfcptransport "vectorcore-sgw/internal/pfcp/transport"
+	"vectorcore-sgw/internal/sgwc/sessioncheckpoint"
 )
 
 // ntpEpochOffset is the seconds between NTP epoch (1900-01-01) and Unix epoch (1970-01-01)
@@ -55,11 +56,12 @@ type peer struct {
 
 // PeerView is the API/observability representation of a PFCP peer association.
 type PeerView struct {
-	Name       string    `json:"name"`
-	Addr       string    `json:"addr"`
-	State      string    `json:"state"`
-	PeerNodeID string    `json:"peer_node_id,omitempty"`
-	LastSeen   time.Time `json:"last_seen,omitempty"`
+	Name                  string    `json:"name"`
+	Addr                  string    `json:"addr"`
+	State                 string    `json:"state"`
+	PeerNodeID            string    `json:"peer_node_id,omitempty"`
+	PeerRecoveryTimestamp uint32    `json:"peer_recovery_timestamp,omitempty"`
+	LastSeen              time.Time `json:"last_seen,omitempty"`
 }
 
 // SessionParams describes the PDRs and FARs to establish in a PFCP session.
@@ -123,7 +125,10 @@ type Client struct {
 	onPeerStateChange func(peerName, peerAddr string, state PeerState)
 	// onPeerRestart fires when a peer's Recovery Time Stamp changes.
 	// The SGW-C must treat PFCP sessions on that peer as stale.
-	onPeerRestart func(peerName, peerAddr string, oldTS, newTS uint32)
+	onPeerRestart  func(peerName, peerAddr string, oldTS, newTS uint32)
+	checkpointSink interface {
+		SavePeerSnapshot(sessioncheckpoint.PeerSnapshot)
+	}
 }
 
 // New creates a PFCP client ready for use. Call Serve(ctx) to begin association
@@ -195,16 +200,23 @@ func (c *Client) SetPeerRestartCallback(fn func(peerName, peerAddr string, oldTS
 	c.onPeerRestart = fn
 }
 
+func (c *Client) SetCheckpointSink(sink interface {
+	SavePeerSnapshot(sessioncheckpoint.PeerSnapshot)
+}) {
+	c.checkpointSink = sink
+}
+
 // Peers returns a snapshot of all PFCP peer states for API/observability.
 func (c *Client) Peers() []PeerView {
 	views := make([]PeerView, 0, len(c.peers))
 	for _, p := range c.peers {
 		p.mu.RLock()
 		v := PeerView{
-			Name:     p.cfg.Name,
-			Addr:     p.cfg.Addr,
-			State:    string(p.state),
-			LastSeen: p.lastSeen,
+			Name:                  p.cfg.Name,
+			Addr:                  p.cfg.Addr,
+			State:                 string(p.state),
+			LastSeen:              p.lastSeen,
+			PeerRecoveryTimestamp: p.peerRecoveryTS,
 		}
 		if p.peerNodeID != nil {
 			v.PeerNodeID = p.peerNodeID.String()
@@ -294,7 +306,9 @@ func (c *Client) associate(ctx context.Context, p *peer) error {
 	if err != nil {
 		p.mu.Lock()
 		p.state = PeerStateDown
+		checkpoint := c.peerCheckpointSnapshotLocked(p, time.Now())
 		p.mu.Unlock()
+		c.emitPeerCheckpoint(checkpoint)
 		return fmt.Errorf("AssociationSetupRequest to %s: %w", p.cfg.Addr, err)
 	}
 
@@ -312,17 +326,28 @@ func (c *Client) associate(ctx context.Context, p *peer) error {
 	peerTS, _ := resp.RecoveryTimeStamp.RecoveryTimeStampValue()
 	peerNodeID := resp.NodeID.NodeIDIPv4()
 
+	var oldTS, newTS uint32
 	p.mu.Lock()
-	// TS 29.244 Rel-15 Table 7.4.4.2-1 marks Recovery Time Stamp mandatory in
-	// Association Setup Response, but its note says the receiver ignores it for
-	// restart decisions. Association loss is handled by the Down transition and
-	// restart detection is handled on Heartbeat Response.
+	// TS 29.244 Rel-15 Table 7.4.2-1 marks Recovery Time Stamp mandatory in
+	// Association Setup Response, while PFCP restart detection normally comes
+	// from Heartbeat Response. If SGW-C restored a previously known timestamp
+	// from checkpoint, compare it before overwriting so a peer restart during
+	// SGW-C downtime is still classified.
+	if isRecoveryRestart(p.peerRecoveryTS, peerTS) {
+		oldTS = p.peerRecoveryTS
+		newTS = peerTS
+	}
 	p.state = PeerStateEstablished
 	p.peerNodeID = peerNodeID
 	p.peerRecoveryTS = peerTS
 	p.lastSeen = time.Now()
+	checkpoint := c.peerCheckpointSnapshotLocked(p, p.lastSeen)
 	p.mu.Unlock()
 
+	c.emitPeerCheckpoint(checkpoint)
+	if oldTS != 0 {
+		c.notifyPeerRestart(p, oldTS, newTS)
+	}
 	if c.onPeerStateChange != nil {
 		c.onPeerStateChange(p.cfg.Name, p.cfg.Addr, PeerStateEstablished)
 	}
@@ -349,7 +374,9 @@ func (c *Client) heartbeatLoop(ctx context.Context, p *peer) {
 					"peer", p.cfg.Name, "error", err)
 				p.mu.Lock()
 				p.state = PeerStateDown
+				checkpoint := c.peerCheckpointSnapshotLocked(p, time.Now())
 				p.mu.Unlock()
+				c.emitPeerCheckpoint(checkpoint)
 				if c.onPeerStateChange != nil {
 					c.onPeerStateChange(p.cfg.Name, p.cfg.Addr, PeerStateDown)
 				}
@@ -399,7 +426,9 @@ func (c *Client) heartbeat(ctx context.Context, p *peer) error {
 			newTS = peerTS
 			p.peerRecoveryTS = peerTS
 			p.lastSeen = time.Now()
+			checkpoint := c.peerCheckpointSnapshotLocked(p, p.lastSeen)
 			p.mu.Unlock()
+			c.emitPeerCheckpoint(checkpoint)
 			c.notifyPeerRestart(p, oldTS, newTS)
 			return fmt.Errorf("PFCP peer %s restarted: Recovery Time Stamp changed from %d to %d — triggering re-association",
 				p.cfg.Name, oldTS, peerTS)
@@ -407,7 +436,9 @@ func (c *Client) heartbeat(ctx context.Context, p *peer) error {
 		p.peerRecoveryTS = peerTS
 	}
 	p.lastSeen = time.Now()
+	checkpoint := c.peerCheckpointSnapshotLocked(p, p.lastSeen)
 	p.mu.Unlock()
+	c.emitPeerCheckpoint(checkpoint)
 
 	return nil
 }
@@ -420,6 +451,72 @@ func (c *Client) notifyPeerRestart(p *peer, oldTS, newTS uint32) {
 
 func isRecoveryRestart(oldTS, newTS uint32) bool {
 	return oldTS != 0 && newTS != oldTS
+}
+
+func (c *Client) CheckpointSnapshots() []sessioncheckpoint.PeerSnapshot {
+	if c == nil {
+		return nil
+	}
+	out := make([]sessioncheckpoint.PeerSnapshot, 0, len(c.peers))
+	now := time.Now()
+	for _, p := range c.peers {
+		p.mu.RLock()
+		out = append(out, c.peerCheckpointSnapshotLocked(p, now))
+		p.mu.RUnlock()
+	}
+	return out
+}
+
+func (c *Client) RestoreCheckpointSnapshots(snapshots []sessioncheckpoint.PeerSnapshot) int {
+	if c == nil {
+		return 0
+	}
+	restored := 0
+	for _, snapshot := range snapshots {
+		if snapshot.Role != "sgwu" || snapshot.Addr == "" {
+			continue
+		}
+		for _, p := range c.peers {
+			if p.cfg.Addr != snapshot.Addr && p.cfg.Name != snapshot.Name {
+				continue
+			}
+			p.mu.Lock()
+			p.peerRecoveryTS = snapshot.RecoveryTimestamp
+			if snapshot.State != "" {
+				p.state = PeerState(snapshot.State)
+			}
+			if !snapshot.UpdatedAt.IsZero() {
+				p.lastSeen = snapshot.UpdatedAt
+			}
+			p.mu.Unlock()
+			restored++
+			break
+		}
+	}
+	return restored
+}
+
+func (c *Client) peerCheckpointSnapshotLocked(p *peer, now time.Time) sessioncheckpoint.PeerSnapshot {
+	updatedAt := p.lastSeen
+	if updatedAt.IsZero() {
+		updatedAt = now
+	}
+	return sessioncheckpoint.PeerSnapshot{
+		Role:              "sgwu",
+		Addr:              p.cfg.Addr,
+		Name:              p.cfg.Name,
+		State:             string(p.state),
+		RecoverySeen:      p.peerRecoveryTS != 0,
+		RecoveryTimestamp: p.peerRecoveryTS,
+		UpdatedAt:         updatedAt,
+	}
+}
+
+func (c *Client) emitPeerCheckpoint(snapshot sessioncheckpoint.PeerSnapshot) {
+	if c == nil || c.checkpointSink == nil || snapshot.Role == "" || snapshot.Addr == "" {
+		return
+	}
+	c.checkpointSink.SavePeerSnapshot(snapshot)
 }
 
 // AllocCPSEID allocates a new monotonically increasing CP-SEID for a PFCP session.

@@ -12,6 +12,7 @@ import (
 	"vectorcore-sgw/internal/sgwc/peerhealth"
 	"vectorcore-sgw/internal/sgwc/pgwfailure"
 	"vectorcore-sgw/internal/sgwc/session"
+	"vectorcore-sgw/internal/sgwc/sessioncheckpoint"
 )
 
 func newTestSGWCAPI(sessions *session.Manager) *Server {
@@ -235,6 +236,49 @@ func TestSGWCRoutesExposeDefaultAndDedicatedBearerDetails(t *testing.T) {
 		dedicated.UplinkPDRID != 3 || dedicated.DownlinkPDRID != 4 ||
 		dedicated.UplinkFARID != 3 || dedicated.DownlinkFARID != 4 {
 		t.Fatalf("dedicated bearer view = %+v; want QoS and PDR/FAR details", dedicated)
+	}
+}
+
+func TestRecoveryRoutesExposeCheckpointAndSessionSummary(t *testing.T) {
+	m := session.NewManager()
+	sess, _, err := m.Create(defaultSGWCSessionParams())
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	sess.MarkPFCPReconciliation(session.PFCPReconciliationMissing, "sgwu-session-not-found", time.Unix(80, 0).UTC())
+	status := sessioncheckpoint.NewStatusTracker(sessioncheckpoint.RuntimeConfig{
+		Enabled:                   true,
+		Backend:                   sessioncheckpoint.BackendSQLite,
+		SQLitePath:                "/tmp/sgwc-state.db",
+		RestoreOnStartup:          true,
+		ReconcileOnStartup:        true,
+		CheckpointIntervalSeconds: 5,
+	})
+	status.RecordSessionRestore(2, 1, 0, 1, 1)
+	status.RecordPeerSnapshotsLoaded(3)
+	status.RecordGTPCPeersRestored(2)
+	status.RecordPFCPPeersRestored(1)
+
+	srv := NewServer("127.0.0.1:0", BuildInfo{Version: "test", BuildDate: "now"}, slog.New(slog.DiscardHandler))
+	RegisterRecoveryRoutes(srv.HumaAPI(), status, m)
+
+	var out RecoveryStatusOutput
+	getJSON(t, srv, "/recovery/status", &out.Body)
+
+	if !out.Body.Checkpoint.Enabled ||
+		out.Body.Checkpoint.Backend != sessioncheckpoint.BackendSQLite ||
+		out.Body.Checkpoint.SessionsLoaded != 2 ||
+		out.Body.Checkpoint.SessionsRestored != 1 ||
+		out.Body.Checkpoint.SessionsSkipped != 1 ||
+		out.Body.Checkpoint.GTPCPeersRestored != 2 ||
+		out.Body.Checkpoint.PFCPPeersRestored != 1 {
+		t.Fatalf("checkpoint status = %+v", out.Body.Checkpoint)
+	}
+	if out.Body.Summary.TotalSessions != 1 ||
+		out.Body.Summary.SessionsByState[string(session.StateRecovering)] != 1 ||
+		out.Body.Summary.PFCPReconciliation[string(session.PFCPReconciliationMissing)] != 1 ||
+		out.Body.Summary.PFCPRepairPlans[string(session.PFCPRepairReestablishSession)] != 1 {
+		t.Fatalf("recovery summary = %+v", out.Body.Summary)
 	}
 }
 

@@ -29,6 +29,7 @@ import (
 	"vectorcore-sgw/internal/sgwc/s11"
 	"vectorcore-sgw/internal/sgwc/s5c"
 	"vectorcore-sgw/internal/sgwc/session"
+	"vectorcore-sgw/internal/sgwc/sessioncheckpoint"
 )
 
 var (
@@ -134,7 +135,128 @@ func main() {
 	}
 
 	sessions := session.NewManager()
+	var checkpointStore *sessioncheckpoint.SQLiteStore
+	var checkpointWriter *sessioncheckpoint.Writer
+	var peerSnapshots []sessioncheckpoint.PeerSnapshot
+	checkpointStatus := sessioncheckpoint.NewStatusTracker(sessioncheckpoint.RuntimeConfig{
+		Enabled:                   cfg.GTPC.SessionRecovery.Enabled,
+		Backend:                   cfg.GTPC.SessionRecovery.Backend,
+		RestoreOnStartup:          cfg.GTPC.SessionRecovery.RestoreOnStartup,
+		ReconcileOnStartup:        cfg.GTPC.SessionRecovery.ReconcileOnStartup,
+		CheckpointIntervalSeconds: cfg.GTPC.SessionRecovery.CheckpointIntervalSeconds,
+	})
+	if cfg.GTPC.SessionRecovery.Enabled {
+		sqlitePath := cfg.GTPC.SessionRecovery.SQLitePath
+		if sqlitePath == "" {
+			sqlitePath = sessioncheckpoint.DefaultSQLitePath(stateDir)
+		}
+		checkpointStatus = sessioncheckpoint.NewStatusTracker(sessioncheckpoint.RuntimeConfig{
+			Enabled:                   true,
+			Backend:                   cfg.GTPC.SessionRecovery.Backend,
+			SQLitePath:                sqlitePath,
+			RestoreOnStartup:          cfg.GTPC.SessionRecovery.RestoreOnStartup,
+			ReconcileOnStartup:        cfg.GTPC.SessionRecovery.ReconcileOnStartup,
+			CheckpointIntervalSeconds: cfg.GTPC.SessionRecovery.CheckpointIntervalSeconds,
+		})
+		checkpointStore, err = sessioncheckpoint.OpenSQLite(ctx, sessioncheckpoint.SQLiteOptions{
+			Path: sqlitePath,
+		})
+		if err != nil {
+			logger.Error("SGW-C session checkpoint store failed to start", "error", err, "path", sqlitePath)
+			os.Exit(1)
+		}
+		if cfg.GTPC.SessionRecovery.RestoreOnStartup {
+			snapshots, loadErr := checkpointStore.LoadSessions(ctx)
+			if loadErr != nil {
+				logger.Warn("SGW-C session checkpoint restore skipped; checkpoint load failed",
+					"error", loadErr,
+					"path", sqlitePath,
+				)
+			} else {
+				restoreResult, restoreErr := sessions.RestoreSnapshots(snapshots)
+				if restoreErr != nil {
+					logger.Warn("SGW-C session checkpoint restore skipped; checkpoint data invalid",
+						"error", restoreErr,
+						"loaded", restoreResult.Loaded,
+						"restored", restoreResult.Restored,
+						"skipped_deleted", restoreResult.SkippedDeleted,
+						"skipped_invalid", restoreResult.SkippedInvalid,
+					)
+				} else {
+					checkpointStatus.RecordSessionRestore(
+						restoreResult.Loaded,
+						restoreResult.Restored,
+						restoreResult.SkippedDeleted,
+						restoreResult.SkippedInvalid,
+						restoreResult.ReservedS11TEID,
+					)
+					logger.Info("SGW-C session checkpoint restore complete",
+						"loaded", restoreResult.Loaded,
+						"restored", restoreResult.Restored,
+						"skipped_deleted", restoreResult.SkippedDeleted,
+						"skipped_invalid", restoreResult.SkippedInvalid,
+						"reserved_s11_teids", restoreResult.ReservedS11TEID,
+					)
+				}
+			}
+		}
+		if cfg.GTPC.SessionRecovery.RestoreOnStartup {
+			loadedPeers, loadErr := checkpointStore.LoadPeers(ctx)
+			if loadErr != nil {
+				logger.Warn("SGW-C peer checkpoint restore skipped; checkpoint load failed",
+					"error", loadErr,
+					"path", sqlitePath,
+				)
+			} else {
+				peerSnapshots = loadedPeers
+				checkpointStatus.RecordPeerSnapshotsLoaded(len(loadedPeers))
+			}
+		}
+		checkpointWriter = sessioncheckpoint.NewWriter(
+			checkpointStore,
+			time.Duration(cfg.GTPC.SessionRecovery.CheckpointIntervalSeconds)*time.Second,
+			logger.Logger,
+		)
+		checkpointWriter.SetStatusTracker(checkpointStatus)
+		checkpointWriter.Start(ctx)
+		sessions.SetCheckpointSink(checkpointWriter)
+		if cfg.GTPC.SessionRecovery.RestoreOnStartup && cfg.GTPC.SessionRecovery.ReconcileOnStartup {
+			reconcileResult := sessions.ReconcilePFCPBindings(nil, time.Now())
+			logger.Info("SGW-C session PFCP reconciliation complete",
+				"checked", reconcileResult.Checked,
+				"matched", reconcileResult.Matched,
+				"missing", reconcileResult.Missing,
+				"mismatched", reconcileResult.Mismatched,
+				"unverifiable", reconcileResult.Unverifiable,
+				"no_binding", reconcileResult.NoBinding,
+				"inventory", "unavailable",
+			)
+		}
+		defer func() {
+			shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), time.Duration(cfg.Shutdown.TimeoutSeconds)*time.Second)
+			defer shutdownCancel()
+			if err := checkpointWriter.Close(shutdownCtx); err != nil {
+				logger.Warn("SGW-C session checkpoint final flush failed", "error", err)
+			}
+			if err := checkpointStore.Close(); err != nil {
+				logger.Warn("SGW-C session checkpoint store close failed", "error", err)
+			}
+		}()
+		logger.Info("SGW-C session checkpointing enabled",
+			"backend", cfg.GTPC.SessionRecovery.Backend,
+			"sqlite_path", sqlitePath,
+			"checkpoint_interval_seconds", cfg.GTPC.SessionRecovery.CheckpointIntervalSeconds,
+		)
+	}
 	gtpcPeers := peerhealth.NewTable(logger.Logger)
+	if checkpointWriter != nil {
+		gtpcPeers.SetCheckpointSink(checkpointWriter)
+	}
+	if len(peerSnapshots) > 0 {
+		restored := gtpcPeers.RestoreCheckpointSnapshots(peerSnapshots)
+		checkpointStatus.RecordGTPCPeersRestored(restored)
+		logger.Info("SGW-C GTP-C peer checkpoint restore complete", "restored", restored)
+	}
 	pgwFailureHandler := pgwfailure.NewHandler(sessions, pgwfailure.Config{
 		Enabled:                cfg.GTPC.PGWFailure.Enabled,
 		MarkSessionsOnPathDown: cfg.GTPC.PGWFailure.MarkSessionsOnPathDown,
@@ -144,6 +266,14 @@ func main() {
 	if err != nil {
 		logger.Error("PFCP client failed to start", "error", err)
 		os.Exit(1)
+	}
+	if checkpointWriter != nil {
+		pfcpClient.SetCheckpointSink(checkpointWriter)
+	}
+	if len(peerSnapshots) > 0 {
+		restored := pfcpClient.RestoreCheckpointSnapshots(peerSnapshots)
+		checkpointStatus.RecordPFCPPeersRestored(restored)
+		logger.Info("SGW-C PFCP peer checkpoint restore complete", "restored", restored)
 	}
 	// C9: Serve loop must be running before any outbound Send() calls.
 	go func() {
@@ -218,6 +348,7 @@ func main() {
 	metrics.NewPGWFailureMetrics(metricsSrv.Registry(), pgwFailureHandler)
 	metrics.NewMMERestorationMetrics(metricsSrv.Registry(), mmeRestorationHandler)
 	metrics.NewDDNControlMetrics(metricsSrv.Registry(), ddnControlState)
+	metrics.NewSessionRecoveryMetrics(metricsSrv.Registry(), checkpointStatus, sessions)
 	pfcpClient.SetPeerStateCallback(func(peerName, peerAddr string, state pfcpclient.PeerState) {
 		pfcpMetrics.OnPeerStateChange(peerName, peerAddr, string(state))
 		if state == pfcpclient.PeerStateDown {
@@ -245,6 +376,7 @@ func main() {
 	api.RegisterPGWFailureRoutes(apiSrv.HumaAPI(), pgwFailureHandler)
 	api.RegisterMMERestorationRoutes(apiSrv.HumaAPI(), mmeRestorationHandler)
 	api.RegisterDDNControlRoutes(apiSrv.HumaAPI(), ddnControlState)
+	api.RegisterRecoveryRoutes(apiSrv.HumaAPI(), checkpointStatus, sessions)
 	if err := apiSrv.Start(ctx); err != nil {
 		logger.Error("API server failed to start", "error", err)
 		os.Exit(1)

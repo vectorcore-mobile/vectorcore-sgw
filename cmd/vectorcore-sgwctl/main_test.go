@@ -104,13 +104,38 @@ func TestFetchPGWFailuresPrettyPrintsJSON(t *testing.T) {
 	}
 }
 
+func TestFetchRecoveryPrettyPrintsJSON(t *testing.T) {
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/recovery/status" {
+			t.Fatalf("path = %s; want /recovery/status", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"checkpoint":{"enabled":true,"backend":"sqlite","sessions_restored":1},"summary":{"total_sessions":1}}`))
+	}))
+	defer api.Close()
+
+	var stdout, stderr bytes.Buffer
+	err := run([]string{"-sgwc-api", api.URL, "recovery"}, &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("run recovery: %v stderr=%s", err, stderr.String())
+	}
+	out := stdout.String()
+	if !strings.Contains(out, "SGW-C session recovery status") ||
+		!strings.Contains(out, `"backend": "sqlite"`) ||
+		!strings.Contains(out, `"total_sessions": 1`) {
+		t.Fatalf("recovery output = %q", out)
+	}
+}
+
 func TestUsageListsGTPCPeers(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	err := run(nil, &stdout, &stderr)
 	if err == nil {
 		t.Fatal("run without command succeeded")
 	}
-	if !strings.Contains(stderr.String(), "gtpc-peers") || !strings.Contains(stderr.String(), "pgw-failures") {
+	if !strings.Contains(stderr.String(), "gtpc-peers") ||
+		!strings.Contains(stderr.String(), "pgw-failures") ||
+		!strings.Contains(stderr.String(), "recovery") {
 		t.Fatalf("usage missing GTP-C commands: %q", stderr.String())
 	}
 }

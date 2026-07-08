@@ -3,8 +3,10 @@ package pfcpclient
 import (
 	"net"
 	"testing"
+	"time"
 
 	sgwcconfig "vectorcore-sgw/internal/config/sgwc"
+	"vectorcore-sgw/internal/sgwc/sessioncheckpoint"
 )
 
 func TestIsRecoveryRestart(t *testing.T) {
@@ -107,6 +109,48 @@ func TestSelectPeerByAddrRequiresConfiguredEstablishedPeer(t *testing.T) {
 	}
 	if _, err := c.selectPeerByAddr("192.0.2.12:8805"); err == nil {
 		t.Fatal("selectPeerByAddr succeeded for unconfigured peer")
+	}
+}
+
+func TestRestoreCheckpointSnapshotsSeedsPFCPPeerRecovery(t *testing.T) {
+	c := &Client{peers: []*peer{
+		testPeer("sgwu-a", "192.0.2.10:8805", PeerStatePending),
+		testPeer("sgwu-b", "192.0.2.11:8805", PeerStatePending),
+	}}
+	updatedAt := time.Unix(100, 0).UTC()
+
+	restored := c.RestoreCheckpointSnapshots([]sessioncheckpoint.PeerSnapshot{
+		{Role: "sgwu", Name: "sgwu-a", Addr: "192.0.2.10:8805", State: string(PeerStateEstablished), RecoveryTimestamp: 1234, UpdatedAt: updatedAt},
+		{Role: "mme", Addr: "10.0.0.1:2123", RecoveryCounter: 7},
+	})
+	if restored != 1 {
+		t.Fatalf("restored = %d; want 1", restored)
+	}
+
+	views := c.Peers()
+	if views[0].PeerRecoveryTimestamp != 1234 || views[0].State != string(PeerStateEstablished) || !views[0].LastSeen.Equal(updatedAt) {
+		t.Fatalf("restored peer view = %+v; want timestamp/state/last_seen from checkpoint", views[0])
+	}
+	if views[1].PeerRecoveryTimestamp != 0 {
+		t.Fatalf("unmatched peer timestamp = %d; want 0", views[1].PeerRecoveryTimestamp)
+	}
+}
+
+func TestCheckpointSnapshotsExportPFCPPeerRecovery(t *testing.T) {
+	c := &Client{peers: []*peer{
+		testPeer("sgwu-a", "192.0.2.10:8805", PeerStateEstablished),
+	}}
+	c.peers[0].peerRecoveryTS = 5678
+	c.peers[0].lastSeen = time.Unix(200, 0).UTC()
+
+	snapshots := c.CheckpointSnapshots()
+	if len(snapshots) != 1 {
+		t.Fatalf("snapshots = %d; want 1", len(snapshots))
+	}
+	got := snapshots[0]
+	if got.Role != "sgwu" || got.Name != "sgwu-a" || got.Addr != "192.0.2.10:8805" ||
+		!got.RecoverySeen || got.RecoveryTimestamp != 5678 {
+		t.Fatalf("checkpoint snapshot = %+v; want SGW-U recovery timestamp", got)
 	}
 }
 

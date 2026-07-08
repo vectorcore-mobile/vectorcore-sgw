@@ -8,6 +8,8 @@ import (
 	"strconv"
 	"sync"
 	"time"
+
+	"vectorcore-sgw/internal/sgwc/sessioncheckpoint"
 )
 
 const GTPControlPort = 2123
@@ -77,6 +79,10 @@ type RestartEvent struct {
 type EventHandler interface {
 	OnPeerStateChange(StateChangeEvent)
 	OnPeerRestart(RestartEvent)
+}
+
+type CheckpointSink interface {
+	SavePeerSnapshot(sessioncheckpoint.PeerSnapshot)
 }
 
 // MultiHandler fans peerhealth events out to multiple handlers.
@@ -172,7 +178,10 @@ func (t *Table) MarkEchoSent(role Role, addr string, seq uint32) {
 	p.lastEchoSentAt = now
 	p.lastSeq = seq
 	p.echoSent++
+	checkpoint := t.checkpointSnapshotLocked(p, now)
+	sink := t.checkpointSink
 	t.mu.Unlock()
+	emitPeerCheckpoint(sink, checkpoint)
 }
 
 func (t *Table) MarkEchoResponse(role Role, addr string, seq uint32, rtt time.Duration, recovery *uint8, cfg ProbeConfig) {
@@ -209,8 +218,11 @@ func (t *Table) MarkEchoResponse(role Role, addr string, seq uint32, rtt time.Du
 	restartLog := t.applyRecoveryLocked(p, recovery, now)
 	newState := p.state
 	handler := t.eventHandler
+	checkpoint := t.checkpointSnapshotLocked(p, now)
+	sink := t.checkpointSink
 	t.mu.Unlock()
 
+	emitPeerCheckpoint(sink, checkpoint)
 	t.logStateChange(role, addr, oldState, newState, "echo_response")
 	t.logRestart(role, addr, restartLog)
 	t.notifyStateChange(handler, StateChangeEvent{
@@ -250,8 +262,11 @@ func (t *Table) MarkEchoTimeout(role Role, addr string, seq uint32, cfg ProbeCon
 	newState := p.state
 	misses := p.consecutiveMisses
 	handler := t.eventHandler
+	checkpoint := t.checkpointSnapshotLocked(p, now)
+	sink := t.checkpointSink
 	t.mu.Unlock()
 
+	emitPeerCheckpoint(sink, checkpoint)
 	t.logStateChange(role, addr, oldState, newState, "echo_timeout", "missed_echo", misses)
 	t.notifyStateChange(handler, StateChangeEvent{
 		Role:     role,
@@ -264,11 +279,12 @@ func (t *Table) MarkEchoTimeout(role Role, addr string, seq uint32, cfg ProbeCon
 }
 
 type Table struct {
-	mu           sync.RWMutex
-	log          *slog.Logger
-	peers        map[Key]*peer
-	now          func() time.Time
-	eventHandler EventHandler
+	mu             sync.RWMutex
+	log            *slog.Logger
+	peers          map[Key]*peer
+	now            func() time.Time
+	eventHandler   EventHandler
+	checkpointSink CheckpointSink
 }
 
 func NewTable(log *slog.Logger) *Table {
@@ -289,6 +305,15 @@ func (t *Table) SetEventHandler(handler EventHandler) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	t.eventHandler = handler
+}
+
+func (t *Table) SetCheckpointSink(sink CheckpointSink) {
+	if t == nil {
+		return
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.checkpointSink = sink
 }
 
 func (t *Table) Observe(role Role, addr *net.UDPAddr, msgType uint8, seq uint32, recovery *uint8) {
@@ -352,8 +377,11 @@ func (t *Table) observe(role Role, addr string, msgType uint8, seq uint32, recov
 
 	restartLog := t.applyRecoveryLocked(p, recovery, now)
 	handler := t.eventHandler
+	checkpoint := t.checkpointSnapshotLocked(p, now)
+	sink := t.checkpointSink
 	t.mu.Unlock()
 
+	emitPeerCheckpoint(sink, checkpoint)
 	t.logStateChange(role, addr, oldState, StateUp, "valid_gtpc_message")
 	t.logRestart(role, addr, restartLog)
 	t.notifyStateChange(handler, StateChangeEvent{
@@ -493,4 +521,81 @@ func (t *Table) Snapshot() []Snapshot {
 		return out[i].Addr < out[j].Addr
 	})
 	return out
+}
+
+func (t *Table) CheckpointSnapshots() []sessioncheckpoint.PeerSnapshot {
+	if t == nil {
+		return nil
+	}
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+
+	now := t.now()
+	out := make([]sessioncheckpoint.PeerSnapshot, 0, len(t.peers))
+	for _, p := range t.peers {
+		out = append(out, t.checkpointSnapshotLocked(p, now))
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Role != out[j].Role {
+			return out[i].Role < out[j].Role
+		}
+		return out[i].Addr < out[j].Addr
+	})
+	return out
+}
+
+func (t *Table) RestoreCheckpointSnapshots(snapshots []sessioncheckpoint.PeerSnapshot) int {
+	if t == nil {
+		return 0
+	}
+	now := t.now()
+	restored := 0
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	for _, snapshot := range snapshots {
+		role := Role(snapshot.Role)
+		if (role != RoleMME && role != RolePGW) || snapshot.Addr == "" {
+			continue
+		}
+		key := Key{Role: role, Addr: NormalizeEndpoint(snapshot.Addr)}
+		p := t.getOrCreateLocked(key, now)
+		p.state = State(snapshot.State)
+		if p.state == "" {
+			p.state = StateUnknown
+		}
+		p.lastStateChange = snapshot.UpdatedAt
+		if p.lastStateChange.IsZero() {
+			p.lastStateChange = now
+		}
+		p.recoverySeen = snapshot.RecoverySeen
+		p.recoveryCounter = snapshot.RecoveryCounter
+		p.restartDetectedAt = snapshot.RestartDetectedAt
+		p.restarts = snapshot.Restarts
+		restored++
+	}
+	return restored
+}
+
+func (t *Table) checkpointSnapshotLocked(p *peer, now time.Time) sessioncheckpoint.PeerSnapshot {
+	updatedAt := p.lastSeenAt
+	if updatedAt.IsZero() {
+		updatedAt = now
+	}
+	return sessioncheckpoint.PeerSnapshot{
+		Role:              string(p.key.Role),
+		Addr:              p.key.Addr,
+		State:             string(p.state),
+		RecoverySeen:      p.recoverySeen,
+		RecoveryCounter:   p.recoveryCounter,
+		RestartDetectedAt: p.restartDetectedAt,
+		Restarts:          p.restarts,
+		UpdatedAt:         updatedAt,
+	}
+}
+
+func emitPeerCheckpoint(sink CheckpointSink, snapshot sessioncheckpoint.PeerSnapshot) {
+	if sink == nil || snapshot.Role == "" || snapshot.Addr == "" {
+		return
+	}
+	sink.SavePeerSnapshot(snapshot)
 }

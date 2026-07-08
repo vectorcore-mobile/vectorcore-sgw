@@ -69,6 +69,9 @@ func (c *Config) Validate() error {
 	if err := c.validateDDNControl(); err != nil {
 		return err
 	}
+	if err := c.validateSessionRecovery(); err != nil {
+		return err
+	}
 	if err := validateDSCP("qos.outer_marking.gtpc.dscp", c.QoS.OuterMarking.GTPC.DSCP); err != nil {
 		return err
 	}
@@ -156,6 +159,24 @@ func (c *Config) validateDDNControl() error {
 		if err := validateDDNControlPriorityRule(fmt.Sprintf("gtpc.ddn_control.low_priority[%d]", i), rule); err != nil {
 			return err
 		}
+	}
+	return nil
+}
+
+func (c *Config) validateSessionRecovery() error {
+	sr := c.GTPC.SessionRecovery
+	switch sr.Backend {
+	case "", "sqlite":
+	case "redis", "etcd":
+		return fmt.Errorf("gtpc.session_recovery.backend %q is reserved for future HA support; only sqlite is supported now", sr.Backend)
+	default:
+		return fmt.Errorf("gtpc.session_recovery.backend must be sqlite, got %q", sr.Backend)
+	}
+	if sr.CheckpointIntervalSeconds <= 0 {
+		return fmt.Errorf("gtpc.session_recovery.checkpoint_interval_seconds must be positive")
+	}
+	if sr.ReconcileOnStartup && !sr.RestoreOnStartup {
+		return fmt.Errorf("gtpc.session_recovery.reconcile_on_startup requires restore_on_startup")
 	}
 	return nil
 }

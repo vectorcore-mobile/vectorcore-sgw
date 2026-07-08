@@ -52,6 +52,21 @@ func (a *Allocator) Free(t uint32) {
 	delete(a.used, t)
 }
 
+// Reserve marks a known TEID as allocated. It is used when restoring durable
+// SGW-C session state after process restart.
+func (a *Allocator) Reserve(t uint32) bool {
+	if t == 0 {
+		return false
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if _, exists := a.used[t]; exists {
+		return false
+	}
+	a.used[t] = struct{}{}
+	return true
+}
+
 // Len returns the number of currently allocated TEIDs.
 func (a *Allocator) Len() int {
 	a.mu.Lock()
