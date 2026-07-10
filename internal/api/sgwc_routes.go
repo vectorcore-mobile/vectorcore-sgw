@@ -15,25 +15,30 @@ import (
 
 // BearerView is the API representation of one EPS bearer per TS 23.401 §4.7.
 type BearerView struct {
-	EBI                     uint8  `json:"ebi"`
-	QCI                     uint8  `json:"qci"`
-	ARPPriorityLevel        uint8  `json:"arp_priority_level"`
-	ARPPreemptionCapability bool   `json:"arp_preemption_capability"`
-	ARPPreemptionVulnerable bool   `json:"arp_preemption_vulnerable"`
-	State                   string `json:"state"`
-	Type                    string `json:"type"`
-	ENBS1UTEID              string `json:"enb_s1u_teid"`
-	SGWS1UTEID              string `json:"sgw_s1u_teid"`
-	PGWS5UTEID              string `json:"pgw_s5u_teid"`
-	SGWS5UTEID              string `json:"sgw_s5u_teid"`
-	UplinkPDRID             uint32 `json:"uplink_pdr_id"`
-	DownlinkPDRID           uint32 `json:"downlink_pdr_id"`
-	UplinkFARID             uint32 `json:"uplink_far_id"`
-	DownlinkFARID           uint32 `json:"downlink_far_id"`
-	MBRUplink               uint64 `json:"mbr_uplink_kbps"`
-	MBRDownlink             uint64 `json:"mbr_downlink_kbps"`
-	GBRUplink               uint64 `json:"gbr_uplink_kbps"`
-	GBRDownlink             uint64 `json:"gbr_downlink_kbps"`
+	EBI                     uint8     `json:"ebi"`
+	QCI                     uint8     `json:"qci"`
+	ARPPriorityLevel        uint8     `json:"arp_priority_level"`
+	ARPPreemptionCapability bool      `json:"arp_preemption_capability"`
+	ARPPreemptionVulnerable bool      `json:"arp_preemption_vulnerable"`
+	State                   string    `json:"state"`
+	Type                    string    `json:"type"`
+	ENBS1UTEID              string    `json:"enb_s1u_teid"`
+	SGWS1UTEID              string    `json:"sgw_s1u_teid"`
+	PGWS5UTEID              string    `json:"pgw_s5u_teid"`
+	SGWS5UTEID              string    `json:"sgw_s5u_teid"`
+	UplinkPDRID             uint32    `json:"uplink_pdr_id"`
+	DownlinkPDRID           uint32    `json:"downlink_pdr_id"`
+	UplinkFARID             uint32    `json:"uplink_far_id"`
+	DownlinkFARID           uint32    `json:"downlink_far_id"`
+	MBRUplink               uint64    `json:"mbr_uplink_kbps"`
+	MBRDownlink             uint64    `json:"mbr_downlink_kbps"`
+	GBRUplink               uint64    `json:"gbr_uplink_kbps"`
+	GBRDownlink             uint64    `json:"gbr_downlink_kbps"`
+	LastControlActivityAt   time.Time `json:"last_control_activity_at,omitempty"`
+	LastUserPlaneActivityAt time.Time `json:"last_user_plane_activity_at,omitempty"`
+	LastActivitySource      string    `json:"last_activity_source,omitempty"`
+	InactiveSince           time.Time `json:"inactive_since,omitempty"`
+	CleanupEligible         bool      `json:"cleanup_eligible"`
 }
 
 // SecondaryRATUsageReportView is a compact API view of an NSA/DCNR usage report
@@ -326,6 +331,11 @@ func bearerToView(b *bearer.Bearer, defaultBearerID uint8) BearerView {
 		MBRDownlink:             b.MBRDownlink,
 		GBRUplink:               b.GBRUplink,
 		GBRDownlink:             b.GBRDownlink,
+		LastControlActivityAt:   b.LastControlActivityAt,
+		LastUserPlaneActivityAt: b.LastUserPlaneActivityAt,
+		LastActivitySource:      b.LastActivitySource,
+		InactiveSince:           b.InactiveSince,
+		CleanupEligible:         b.CleanupEligible,
 	}
 	return view
 }

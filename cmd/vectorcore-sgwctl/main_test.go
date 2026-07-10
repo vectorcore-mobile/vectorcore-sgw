@@ -127,6 +127,29 @@ func TestFetchRecoveryPrettyPrintsJSON(t *testing.T) {
 	}
 }
 
+func TestFetchBearerInactivityPrettyPrintsJSON(t *testing.T) {
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/gtpc/bearer-inactivity" {
+			t.Fatalf("path = %s; want /gtpc/bearer-inactivity", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"actions":{"cleanup_dedicated_bearer":1},"candidates":1,"total":2}`))
+	}))
+	defer api.Close()
+
+	var stdout, stderr bytes.Buffer
+	err := run([]string{"-sgwc-api", api.URL, "bearer-inactivity"}, &stdout, &stderr)
+	if err != nil {
+		t.Fatalf("run bearer-inactivity: %v stderr=%s", err, stderr.String())
+	}
+	out := stdout.String()
+	if !strings.Contains(out, "SGW-C bearer inactivity status") ||
+		!strings.Contains(out, `"cleanup_dedicated_bearer": 1`) ||
+		!strings.Contains(out, `"candidates": 1`) {
+		t.Fatalf("bearer-inactivity output = %q", out)
+	}
+}
+
 func TestUsageListsGTPCPeers(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	err := run(nil, &stdout, &stderr)
@@ -135,7 +158,8 @@ func TestUsageListsGTPCPeers(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "gtpc-peers") ||
 		!strings.Contains(stderr.String(), "pgw-failures") ||
-		!strings.Contains(stderr.String(), "recovery") {
+		!strings.Contains(stderr.String(), "recovery") ||
+		!strings.Contains(stderr.String(), "bearer-inactivity") {
 		t.Fatalf("usage missing GTP-C commands: %q", stderr.String())
 	}
 }

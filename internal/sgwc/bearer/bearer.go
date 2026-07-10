@@ -1,7 +1,10 @@
 // Package bearer holds the SGW-C bearer state model per 3GPP TS 23.401.
 package bearer
 
-import "net/netip"
+import (
+	"net/netip"
+	"time"
+)
 
 // BearerState is the lifecycle state of a bearer.
 type BearerState string
@@ -27,9 +30,9 @@ type FTEID struct {
 // (scalar), the pre-emption capability (flag) and the pre-emption
 // vulnerability (flag)."
 type ARP struct {
-	PriorityLevel        uint8 // 1-15; 1 is highest
-	PreemptionCapability bool  // may this bearer preempt others?
-	PreemptionVulnerability bool // may this bearer be preempted?
+	PriorityLevel           uint8 // 1-15; 1 is highest
+	PreemptionCapability    bool  // may this bearer preempt others?
+	PreemptionVulnerability bool  // may this bearer be preempted?
 }
 
 // TFT is a Traffic Flow Template per TS 23.401 Section 5.3.2 (stub for Phase 9).
@@ -76,4 +79,13 @@ type Bearer struct {
 	// Index 0 = uplink (S1-U → S5/S8-U), Index 1 = downlink (S5/S8-U → S1-U).
 	PDRIDs [2]uint32
 	FARIDs [2]uint32
+
+	// Activity fields are used by SGW-C bearer inactivity policy. Control
+	// activity is learned from GTP-C procedures; user-plane activity is reserved
+	// for PFCP/eBPF counter integration in later phases.
+	LastControlActivityAt   time.Time
+	LastUserPlaneActivityAt time.Time
+	LastActivitySource      string
+	InactiveSince           time.Time
+	CleanupEligible         bool
 }

@@ -88,6 +88,10 @@ func run(args []string, stdout, stderr io.Writer) error {
 		return c.fetch("SGW-C PGW failure state", c.sgwcAPI, "/gtpc/pgw-failures")
 	case "recovery":
 		return c.fetch("SGW-C session recovery status", c.sgwcAPI, "/recovery/status")
+	case "bearer-inactivity":
+		return c.fetch("SGW-C bearer inactivity status", c.sgwcAPI, "/gtpc/bearer-inactivity")
+	case "idle-downlink":
+		return c.fetchIdleDownlink()
 	case "bpf":
 		return c.fetch("SGW-U BPF rules", c.sgwuAPI, "/bpf/rules")
 	default:
@@ -116,6 +120,8 @@ func usage(w io.Writer, fs *flag.FlagSet) {
 	fmt.Fprintf(w, "  gtpc-peers Show SGW-C GTP-C peer health\n")
 	fmt.Fprintf(w, "  pgw-failures Show SGW-C PGW path and restart state\n")
 	fmt.Fprintf(w, "  recovery   Show SGW-C checkpoint and recovery status\n")
+	fmt.Fprintf(w, "  bearer-inactivity Show SGW-C bearer inactivity cleanup status\n")
+	fmt.Fprintf(w, "  idle-downlink Show idle downlink notification status and GTP-U counters\n")
 	fmt.Fprintf(w, "  bpf        Show SGW-U BPF map state\n")
 	fmt.Fprintf(w, "\nValidate examples:\n")
 	fmt.Fprintf(w, "  vectorcore-sgwctl validate -sgwc configs/sgw-c.yaml -sgwu configs/sgw-u.yaml\n")
@@ -171,6 +177,14 @@ func (c *ctl) fetchBoth(path string) error {
 	}
 	fmt.Fprintln(c.stdout)
 	return c.fetch("SGW-U PFCP associations", c.sgwuAPI, path)
+}
+
+func (c *ctl) fetchIdleDownlink() error {
+	if err := c.fetch("SGW-C idle downlink notification", c.sgwcAPI, "/gtpc/idle-downlink"); err != nil {
+		return err
+	}
+	fmt.Fprintln(c.stdout)
+	return c.fetch("SGW-U GTP-U counters", c.sgwuAPI, "/gtpu/counters")
 }
 
 func (c *ctl) get(base, path string) ([]byte, error) {

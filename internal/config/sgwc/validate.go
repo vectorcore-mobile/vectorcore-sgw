@@ -69,7 +69,13 @@ func (c *Config) Validate() error {
 	if err := c.validateDDNControl(); err != nil {
 		return err
 	}
+	if err := c.validateIdleDownlink(); err != nil {
+		return err
+	}
 	if err := c.validateSessionRecovery(); err != nil {
+		return err
+	}
+	if err := c.validateBearerInactivity(); err != nil {
 		return err
 	}
 	if err := validateDSCP("qos.outer_marking.gtpc.dscp", c.QoS.OuterMarking.GTPC.DSCP); err != nil {
@@ -181,6 +187,63 @@ func (c *Config) validateSessionRecovery() error {
 	return nil
 }
 
+func (c *Config) validateBearerInactivity() error {
+	bi := c.GTPC.BearerInactivity
+	if bi.CheckIntervalSeconds <= 0 {
+		return fmt.Errorf("gtpc.bearer_inactivity.check_interval_seconds must be positive")
+	}
+	if bi.DedicatedBearerIdleSeconds <= 0 {
+		return fmt.Errorf("gtpc.bearer_inactivity.dedicated_bearer_idle_seconds must be positive")
+	}
+	if bi.PendingBearerTimeoutSeconds <= 0 {
+		return fmt.Errorf("gtpc.bearer_inactivity.pending_bearer_timeout_seconds must be positive")
+	}
+	if bi.DefaultBearerIdleSeconds < 0 {
+		return fmt.Errorf("gtpc.bearer_inactivity.default_bearer_idle_seconds must be non-negative")
+	}
+	if bi.DeleteDefaultBearers && bi.DefaultBearerIdleSeconds <= 0 {
+		return fmt.Errorf("gtpc.bearer_inactivity.delete_default_bearers requires default_bearer_idle_seconds > 0")
+	}
+	for i, rule := range bi.Preserve {
+		if err := validateBearerInactivityRule(fmt.Sprintf("gtpc.bearer_inactivity.preserve[%d]", i), rule, false); err != nil {
+			return err
+		}
+	}
+	for i, rule := range bi.Cleanup {
+		if err := validateBearerInactivityRule(fmt.Sprintf("gtpc.bearer_inactivity.cleanup[%d]", i), rule, true); err != nil {
+			return err
+		}
+		if rule.BearerType == "default" && !bi.DeleteDefaultBearers {
+			return fmt.Errorf("gtpc.bearer_inactivity.cleanup[%d] targets default bearers but delete_default_bearers is false", i)
+		}
+	}
+	return nil
+}
+
+func validateBearerInactivityRule(path string, rule BearerInactivityRuleConfig, cleanup bool) error {
+	switch rule.BearerType {
+	case "", "default", "dedicated":
+	default:
+		return fmt.Errorf("%s.bearer_type must be default or dedicated, got %q", path, rule.BearerType)
+	}
+	if cleanup && rule.IdleSeconds <= 0 {
+		return fmt.Errorf("%s.idle_seconds must be positive", path)
+	}
+	if !cleanup && rule.IdleSeconds < 0 {
+		return fmt.Errorf("%s.idle_seconds must be non-negative", path)
+	}
+	if rule.ARPPriorityMin > 15 {
+		return fmt.Errorf("%s.arp_priority_min must be in range 0-15, got %d", path, rule.ARPPriorityMin)
+	}
+	if rule.ARPPriorityMax > 15 {
+		return fmt.Errorf("%s.arp_priority_max must be in range 0-15, got %d", path, rule.ARPPriorityMax)
+	}
+	if rule.ARPPriorityMin != 0 && rule.ARPPriorityMax != 0 && rule.ARPPriorityMin > rule.ARPPriorityMax {
+		return fmt.Errorf("%s ARP priority min must be less than or equal to max", path)
+	}
+	return nil
+}
+
 func validateDDNControlPriorityRule(path string, rule DDNControlPriorityRuleConfig) error {
 	if rule.ARPPriorityMin > 15 {
 		return fmt.Errorf("%s.arp_priority_min must be in range 0-15, got %d", path, rule.ARPPriorityMin)
@@ -190,6 +253,27 @@ func validateDDNControlPriorityRule(path string, rule DDNControlPriorityRuleConf
 	}
 	if rule.ARPPriorityMin != 0 && rule.ARPPriorityMax != 0 && rule.ARPPriorityMin > rule.ARPPriorityMax {
 		return fmt.Errorf("%s ARP priority min must be less than or equal to max", path)
+	}
+	return nil
+}
+
+func (c *Config) validateIdleDownlink() error {
+	idle := c.GTPC.IdleDownlink
+	if idle.ReportThrottleSeconds <= 0 {
+		return fmt.Errorf("gtpc.idle_downlink_notification.report_throttle_seconds must be positive")
+	}
+	for i, rule := range idle.HighPriority {
+		if err := validateDDNControlPriorityRule(fmt.Sprintf("gtpc.idle_downlink_notification.high_priority[%d]", i), rule); err != nil {
+			return err
+		}
+	}
+	for i, rule := range idle.Suppress {
+		if err := validateDDNControlPriorityRule(fmt.Sprintf("gtpc.idle_downlink_notification.suppress[%d]", i), rule); err != nil {
+			return err
+		}
+	}
+	if idle.Enabled && idle.TriggerDDN && len(idle.HighPriority) == 0 {
+		return fmt.Errorf("gtpc.idle_downlink_notification.high_priority must not be empty when trigger_ddn is enabled")
 	}
 	return nil
 }

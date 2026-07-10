@@ -34,6 +34,36 @@ func TestCauseIEWire(t *testing.T) {
 	}
 }
 
+func TestVectorCoreIdleDownlinkReportRoundTrip(t *testing.T) {
+	report := ie.VectorCoreIdleDownlinkReport{
+		CPSEID:          0x0102030405060708,
+		UPSEID:          0x1112131415161718,
+		PDRID:           7,
+		FARID:           9,
+		LocalTEID:       0xAABBCCDD,
+		EBI:             6,
+		QCI:             5,
+		SourceInterface: 1,
+		QoSValid:        true,
+		DropReason:      ie.VectorCoreIdleDownlinkDropReleaseAccessBearers,
+	}
+	got, err := ie.NewVectorCoreIdleDownlinkReport(report).VectorCoreIdleDownlinkReportValue()
+	if err != nil {
+		t.Fatalf("VectorCoreIdleDownlinkReportValue: %v", err)
+	}
+	if got != report {
+		t.Fatalf("report = %+v; want %+v", got, report)
+	}
+}
+
+func TestVectorCoreIdleDownlinkReportRejectsWrongVersion(t *testing.T) {
+	reportIE := ie.NewVectorCoreIdleDownlinkReport(ie.VectorCoreIdleDownlinkReport{})
+	reportIE.Value[0] = 2
+	if _, err := reportIE.VectorCoreIdleDownlinkReportValue(); err == nil {
+		t.Fatal("VectorCoreIdleDownlinkReportValue accepted unsupported version")
+	}
+}
+
 // TestNodeIDIPv4Wire verifies Node ID IE encoding per TS 29.244 Rel-15 §8.2.8.
 // Type=60 (0x003C), Length=5 (0x0005), Value=[NodeIDType=0x00, IPv4[4]].
 func TestNodeIDIPv4Wire(t *testing.T) {

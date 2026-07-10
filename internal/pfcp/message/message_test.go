@@ -916,6 +916,69 @@ func TestNodeReportRequestWire(t *testing.T) {
 	}
 }
 
+func TestSessionReportRequestIdleDownlinkRoundTrip(t *testing.T) {
+	report := ie.VectorCoreIdleDownlinkReport{
+		CPSEID:          1001,
+		UPSEID:          2002,
+		PDRID:           3,
+		FARID:           4,
+		LocalTEID:       0x01020304,
+		EBI:             6,
+		QCI:             5,
+		SourceInterface: 1,
+		QoSValid:        true,
+		DropReason:      ie.VectorCoreIdleDownlinkDropReleaseAccessBearers,
+	}
+	raw, err := message.Marshal(message.Header{
+		Version:        1,
+		HasSEID:        true,
+		MessageType:    message.MsgTypeSessionReportRequest,
+		SEID:           report.CPSEID,
+		SequenceNumber: 0x112233,
+	}, []*ie.IE{ie.NewVectorCoreIdleDownlinkReport(report)})
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	req, err := message.ParseSessionReportRequest(raw)
+	if err != nil {
+		t.Fatalf("ParseSessionReportRequest: %v", err)
+	}
+	if req.SEID != report.CPSEID {
+		t.Fatalf("SEID = %d; want %d", req.SEID, report.CPSEID)
+	}
+	got, err := req.VectorCoreIdleDownlinkReport.VectorCoreIdleDownlinkReportValue()
+	if err != nil {
+		t.Fatalf("VectorCoreIdleDownlinkReportValue: %v", err)
+	}
+	if got != report {
+		t.Fatalf("report = %+v; want %+v", got, report)
+	}
+}
+
+func TestSessionReportResponseRoundTrip(t *testing.T) {
+	raw, err := message.Marshal(message.Header{
+		Version:        1,
+		HasSEID:        true,
+		MessageType:    message.MsgTypeSessionReportResponse,
+		SEID:           44,
+		SequenceNumber: 7,
+	}, []*ie.IE{ie.NewCause(ie.CauseRequestAccepted)})
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	resp, err := message.ParseSessionReportResponse(raw)
+	if err != nil {
+		t.Fatalf("ParseSessionReportResponse: %v", err)
+	}
+	cause, err := resp.Cause.CauseValue()
+	if err != nil {
+		t.Fatalf("CauseValue: %v", err)
+	}
+	if cause != ie.CauseRequestAccepted {
+		t.Fatalf("cause = %d; want %d", cause, ie.CauseRequestAccepted)
+	}
+}
+
 // ── Phase 11: fuzz tests per C20 ─────────────────────────────────────────────
 
 // FuzzParseAssociationReleaseRequest fuzzes the PFCP Association Release Request

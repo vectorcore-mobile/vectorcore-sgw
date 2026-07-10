@@ -70,7 +70,12 @@ const (
 // SGW-C and SGW-U peers to carry internal dataplane metadata that Rel-15 PFCP
 // does not encode directly, such as EPC bearer QCI for DSCP marking.
 const (
-	TypeVectorCoreQoSMarking uint16 = 32768
+	TypeVectorCoreQoSMarking         uint16 = 32768
+	TypeVectorCoreIdleDownlinkReport uint16 = 32769
+)
+
+const (
+	VectorCoreIdleDownlinkDropReleaseAccessBearers uint8 = 1
 )
 
 // Phase 11 — Node Report and Association Release IE type codes per TS 29.244 Rel-15 Table 8.1.2-1
@@ -552,6 +557,65 @@ func (ie *IE) VectorCoreQoSMarkingValue() (ebi, qci uint8, valid bool, err error
 		return 0, 0, false, fmt.Errorf("unsupported VectorCore QoS Marking version %d", ie.Value[0])
 	}
 	return ie.Value[2], ie.Value[3], ie.Value[1]&0x01 != 0, nil
+}
+
+type VectorCoreIdleDownlinkReport struct {
+	CPSEID          uint64
+	UPSEID          uint64
+	PDRID           uint16
+	FARID           uint32
+	LocalTEID       uint32
+	EBI             uint8
+	QCI             uint8
+	SourceInterface uint8
+	QoSValid        bool
+	DropReason      uint8
+}
+
+// NewVectorCoreIdleDownlinkReport carries VectorCore-private idle downlink metadata.
+// Value format v1: version(1), flags(1), drop_reason(1), source_interface(1),
+// pdr_id(2), far_id(4), local_teid(4), cp_seid(8), up_seid(8), ebi(1), qci(1).
+// flags bit 0 = QoS metadata valid.
+func NewVectorCoreIdleDownlinkReport(r VectorCoreIdleDownlinkReport) *IE {
+	value := make([]byte, 32)
+	value[0] = 1
+	if r.QoSValid {
+		value[1] = 0x01
+	}
+	value[2] = r.DropReason
+	value[3] = r.SourceInterface
+	binary.BigEndian.PutUint16(value[4:6], r.PDRID)
+	binary.BigEndian.PutUint32(value[6:10], r.FARID)
+	binary.BigEndian.PutUint32(value[10:14], r.LocalTEID)
+	binary.BigEndian.PutUint64(value[14:22], r.CPSEID)
+	binary.BigEndian.PutUint64(value[22:30], r.UPSEID)
+	value[30] = r.EBI
+	value[31] = r.QCI
+	return &IE{Type: TypeVectorCoreIdleDownlinkReport, Value: value}
+}
+
+func (ie *IE) VectorCoreIdleDownlinkReportValue() (VectorCoreIdleDownlinkReport, error) {
+	if ie.Type != TypeVectorCoreIdleDownlinkReport {
+		return VectorCoreIdleDownlinkReport{}, fmt.Errorf("IE type %d is not VectorCore Idle Downlink Report (%d)", ie.Type, TypeVectorCoreIdleDownlinkReport)
+	}
+	if len(ie.Value) < 32 {
+		return VectorCoreIdleDownlinkReport{}, fmt.Errorf("VectorCore Idle Downlink Report IE too short")
+	}
+	if ie.Value[0] != 1 {
+		return VectorCoreIdleDownlinkReport{}, fmt.Errorf("unsupported VectorCore Idle Downlink Report version %d", ie.Value[0])
+	}
+	return VectorCoreIdleDownlinkReport{
+		QoSValid:        ie.Value[1]&0x01 != 0,
+		DropReason:      ie.Value[2],
+		SourceInterface: ie.Value[3],
+		PDRID:           binary.BigEndian.Uint16(ie.Value[4:6]),
+		FARID:           binary.BigEndian.Uint32(ie.Value[6:10]),
+		LocalTEID:       binary.BigEndian.Uint32(ie.Value[10:14]),
+		CPSEID:          binary.BigEndian.Uint64(ie.Value[14:22]),
+		UPSEID:          binary.BigEndian.Uint64(ie.Value[22:30]),
+		EBI:             ie.Value[30],
+		QCI:             ie.Value[31],
+	}, nil
 }
 
 // NewPrecedence builds a Precedence IE per TS 29.244 Rel-15 §8.2.11, type=29 (Table 8.1.2-1), 4-byte unsigned.

@@ -57,7 +57,9 @@ type GTPCConfig struct {
 	PGWFailure             PGWFailureConfig             `yaml:"pgw_failure"`
 	MMERestoration         MMERestorationConfig         `yaml:"mme_restoration"`
 	DDNControl             DDNControlConfig             `yaml:"ddn_control"`
+	IdleDownlink           IdleDownlinkConfig           `yaml:"idle_downlink_notification"`
 	SessionRecovery        SessionRecoveryConfig        `yaml:"session_recovery"`
+	BearerInactivity       BearerInactivityConfig       `yaml:"bearer_inactivity"`
 }
 
 type GTPCLogical struct {
@@ -150,6 +152,15 @@ type DDNControlPriorityRuleConfig struct {
 	Reason         string `yaml:"reason"`
 }
 
+type IdleDownlinkConfig struct {
+	Enabled                  bool                           `yaml:"enabled"`
+	TriggerDDN               bool                           `yaml:"trigger_ddn"`
+	ReportThrottleSeconds    int                            `yaml:"report_throttle_seconds"`
+	RequireReleaseAccessDrop bool                           `yaml:"require_release_access_drop"`
+	HighPriority             []DDNControlPriorityRuleConfig `yaml:"high_priority"`
+	Suppress                 []DDNControlPriorityRuleConfig `yaml:"suppress"`
+}
+
 type SessionRecoveryConfig struct {
 	Enabled                   bool   `yaml:"enabled"`
 	Backend                   string `yaml:"backend"`
@@ -157,6 +168,28 @@ type SessionRecoveryConfig struct {
 	RestoreOnStartup          bool   `yaml:"restore_on_startup"`
 	ReconcileOnStartup        bool   `yaml:"reconcile_on_startup"`
 	CheckpointIntervalSeconds int    `yaml:"checkpoint_interval_seconds"`
+}
+
+type BearerInactivityConfig struct {
+	Enabled                        bool                         `yaml:"enabled"`
+	CheckIntervalSeconds           int                          `yaml:"check_interval_seconds"`
+	DedicatedBearerIdleSeconds     int                          `yaml:"dedicated_bearer_idle_seconds"`
+	PendingBearerTimeoutSeconds    int                          `yaml:"pending_bearer_timeout_seconds"`
+	DefaultBearerIdleSeconds       int                          `yaml:"default_bearer_idle_seconds"`
+	DeleteDefaultBearers           bool                         `yaml:"delete_default_bearers"`
+	RequireNoRecentControlActivity bool                         `yaml:"require_no_recent_control_activity"`
+	Preserve                       []BearerInactivityRuleConfig `yaml:"preserve"`
+	Cleanup                        []BearerInactivityRuleConfig `yaml:"cleanup"`
+}
+
+type BearerInactivityRuleConfig struct {
+	APN            string `yaml:"apn"`
+	QCI            uint8  `yaml:"qci"`
+	BearerType     string `yaml:"bearer_type"`
+	IdleSeconds    int    `yaml:"idle_seconds"`
+	ARPPriorityMin uint8  `yaml:"arp_priority_min"`
+	ARPPriorityMax uint8  `yaml:"arp_priority_max"`
+	Reason         string `yaml:"reason"`
 }
 
 type S11Config struct {
@@ -289,6 +322,20 @@ func Default() *Config {
 					{APN: "internet", QCI: 9, Reason: "default-low-priority-internet-qci-9"},
 				},
 			},
+			IdleDownlink: IdleDownlinkConfig{
+				Enabled:                  false,
+				TriggerDDN:               true,
+				ReportThrottleSeconds:    10,
+				RequireReleaseAccessDrop: true,
+				HighPriority: []DDNControlPriorityRuleConfig{
+					{APN: "ims", Reason: "default-idle-downlink-ims"},
+					{QCI: 1, Reason: "default-idle-downlink-qci-1"},
+					{ARPPriorityMin: 1, ARPPriorityMax: 3, Reason: "default-idle-downlink-high-arp"},
+				},
+				Suppress: []DDNControlPriorityRuleConfig{
+					{APN: "internet", QCI: 9, Reason: "default-idle-downlink-suppress-low-priority-internet"},
+				},
+			},
 			SessionRecovery: SessionRecoveryConfig{
 				Enabled:                   false,
 				Backend:                   "sqlite",
@@ -296,6 +343,22 @@ func Default() *Config {
 				RestoreOnStartup:          true,
 				ReconcileOnStartup:        true,
 				CheckpointIntervalSeconds: 5,
+			},
+			BearerInactivity: BearerInactivityConfig{
+				Enabled:                        false,
+				CheckIntervalSeconds:           30,
+				DedicatedBearerIdleSeconds:     300,
+				PendingBearerTimeoutSeconds:    60,
+				DefaultBearerIdleSeconds:       0,
+				DeleteDefaultBearers:           false,
+				RequireNoRecentControlActivity: true,
+				Preserve: []BearerInactivityRuleConfig{
+					{APN: "ims", QCI: 5, BearerType: "default", Reason: "default-preserve-ims-signaling"},
+					{QCI: 1, Reason: "default-preserve-conversational-bearer"},
+				},
+				Cleanup: []BearerInactivityRuleConfig{
+					{BearerType: "dedicated", IdleSeconds: 300, Reason: "default-cleanup-idle-dedicated-bearer"},
+				},
 			},
 		},
 		QoS: QoSConfig{

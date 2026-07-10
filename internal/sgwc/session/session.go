@@ -23,6 +23,13 @@ const (
 	StateDeleted    SessionState = "deleted"    // fully cleaned up
 )
 
+const (
+	BearerActivitySourceCreateSession = "create_session"
+	BearerActivitySourceSetBearer     = "set_bearer"
+	BearerActivitySourceDeleteBearer  = "delete_bearer"
+	BearerActivitySourceReleaseAccess = "release_access_bearers"
+)
+
 // FTEID is a decoded F-TEID used in session state.
 // Interface type and CHOOSE bit are consumed at decode time and not stored here.
 type FTEID struct {
@@ -330,10 +337,54 @@ func (s *SGWSession) BearerList() []*bearer.Bearer {
 // SetBearer stores a bearer under its EBI.
 func (s *SGWSession) SetBearer(b *bearer.Bearer) {
 	s.mu.Lock()
+	now := time.Now()
+	markBearerControlActivityLocked(b, BearerActivitySourceSetBearer, now)
 	s.Bearers[b.EBI] = b
-	s.UpdatedAt = time.Now()
+	s.UpdatedAt = now
 	s.mu.Unlock()
 	s.checkpoint()
+}
+
+// MarkBearerControlActivity records GTP-C/control-plane activity for one bearer.
+func (s *SGWSession) MarkBearerControlActivity(ebi uint8, source string, at time.Time) bool {
+	s.mu.Lock()
+	b := s.Bearers[ebi]
+	if b == nil {
+		s.mu.Unlock()
+		return false
+	}
+	if at.IsZero() {
+		at = time.Now()
+	}
+	markBearerControlActivityLocked(b, source, at)
+	s.UpdatedAt = at
+	s.mu.Unlock()
+	s.checkpoint()
+	return true
+}
+
+// MarkBearerUserPlaneActivity records user-plane activity for one bearer. Later
+// phases will feed this from PFCP usage reports or eBPF counters.
+func (s *SGWSession) MarkBearerUserPlaneActivity(ebi uint8, source string, at time.Time) bool {
+	s.mu.Lock()
+	b := s.Bearers[ebi]
+	if b == nil {
+		s.mu.Unlock()
+		return false
+	}
+	if at.IsZero() {
+		at = time.Now()
+	}
+	b.LastUserPlaneActivityAt = at
+	if source != "" {
+		b.LastActivitySource = source
+	}
+	b.InactiveSince = time.Time{}
+	b.CleanupEligible = false
+	s.UpdatedAt = at
+	s.mu.Unlock()
+	s.checkpoint()
+	return true
 }
 
 // BearerCount returns the number of bearers currently in this session.
@@ -348,10 +399,12 @@ func (s *SGWSession) BearerCount() int {
 // eNodeB-related state while retaining all other session and bearer information.
 func (s *SGWSession) ClearENBFTEIDs() {
 	s.mu.Lock()
+	now := time.Now()
 	for _, b := range s.Bearers {
 		b.ENBS1UFTEID = bearer.FTEID{}
+		markBearerControlActivityLocked(b, BearerActivitySourceReleaseAccess, now)
 	}
-	s.UpdatedAt = time.Now()
+	s.UpdatedAt = now
 	s.mu.Unlock()
 	s.checkpoint()
 }
@@ -402,10 +455,28 @@ func (s *SGWSession) InvalidatePFCPBindingForPeer(peerName, peerAddr string) boo
 // DeleteBearer removes the bearer with the given EBI.
 func (s *SGWSession) DeleteBearer(ebi uint8) {
 	s.mu.Lock()
+	if b := s.Bearers[ebi]; b != nil {
+		markBearerControlActivityLocked(b, BearerActivitySourceDeleteBearer, time.Now())
+	}
 	delete(s.Bearers, ebi)
 	s.UpdatedAt = time.Now()
 	s.mu.Unlock()
 	s.checkpoint()
+}
+
+func markBearerControlActivityLocked(b *bearer.Bearer, source string, at time.Time) {
+	if b == nil {
+		return
+	}
+	if at.IsZero() {
+		at = time.Now()
+	}
+	b.LastControlActivityAt = at
+	if source != "" {
+		b.LastActivitySource = source
+	}
+	b.InactiveSince = time.Time{}
+	b.CleanupEligible = false
 }
 
 // RecordSecondaryRATUsageDataReports appends opaque NSA/DCNR usage reports to

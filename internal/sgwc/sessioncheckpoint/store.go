@@ -134,21 +134,26 @@ type MMERestorationSnapshot struct {
 }
 
 type BearerSnapshot struct {
-	EBI         uint8              `json:"ebi"`
-	QCI         uint8              `json:"qci"`
-	ARP         bearer.ARP         `json:"arp"`
-	ENBS1UFTEID FTEIDSnapshot      `json:"enb_s1u_fteid"`
-	SGWS1UFTEID FTEIDSnapshot      `json:"sgw_s1u_fteid"`
-	PGWS5UFTEID FTEIDSnapshot      `json:"pgw_s5u_fteid"`
-	SGWS5UFTEID FTEIDSnapshot      `json:"sgw_s5u_fteid"`
-	MBRUplink   uint64             `json:"mbr_uplink"`
-	MBRDownlink uint64             `json:"mbr_downlink"`
-	GBRUplink   uint64             `json:"gbr_uplink"`
-	GBRDownlink uint64             `json:"gbr_downlink"`
-	TFTRaw      []byte             `json:"tft_raw,omitempty"`
-	State       bearer.BearerState `json:"state"`
-	PDRIDs      [2]uint32          `json:"pdr_ids"`
-	FARIDs      [2]uint32          `json:"far_ids"`
+	EBI                     uint8              `json:"ebi"`
+	QCI                     uint8              `json:"qci"`
+	ARP                     bearer.ARP         `json:"arp"`
+	ENBS1UFTEID             FTEIDSnapshot      `json:"enb_s1u_fteid"`
+	SGWS1UFTEID             FTEIDSnapshot      `json:"sgw_s1u_fteid"`
+	PGWS5UFTEID             FTEIDSnapshot      `json:"pgw_s5u_fteid"`
+	SGWS5UFTEID             FTEIDSnapshot      `json:"sgw_s5u_fteid"`
+	MBRUplink               uint64             `json:"mbr_uplink"`
+	MBRDownlink             uint64             `json:"mbr_downlink"`
+	GBRUplink               uint64             `json:"gbr_uplink"`
+	GBRDownlink             uint64             `json:"gbr_downlink"`
+	TFTRaw                  []byte             `json:"tft_raw,omitempty"`
+	State                   bearer.BearerState `json:"state"`
+	PDRIDs                  [2]uint32          `json:"pdr_ids"`
+	FARIDs                  [2]uint32          `json:"far_ids"`
+	LastControlActivityAt   time.Time          `json:"last_control_activity_at,omitempty"`
+	LastUserPlaneActivityAt time.Time          `json:"last_user_plane_activity_at,omitempty"`
+	LastActivitySource      string             `json:"last_activity_source,omitempty"`
+	InactiveSince           time.Time          `json:"inactive_since,omitempty"`
+	CleanupEligible         bool               `json:"cleanup_eligible"`
 }
 
 // PeerSnapshot persists peer Recovery IE state needed to distinguish local

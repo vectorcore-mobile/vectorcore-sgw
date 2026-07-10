@@ -286,6 +286,14 @@ func (c *Compiler) buildValue(pdr *session.PDR, far *session.FAR) (XdpSgwGtpuSgw
 	case far.ApplyAction&pfcpie.ApplyActionDROP != 0:
 		// DROP per TS 29.244 Figure 8.2.26-1: "Bit 1 DROP=0x01"
 		val.Action = actionDrop
+		if pdr.SourceInterface == pfcpie.SourceInterfaceCore &&
+			far.DropReason == session.DropReasonReleaseAccessBearers {
+			// Release Access Bearers idle downlink packets must reach userspace
+			// so SGW-U can count/report them to SGW-C in later phases. Userspace
+			// still drops the packet until MME paging/Modify Bearer restores the
+			// access-side FAR.
+			val.Action = actionPunt
+		}
 
 	default:
 		// BUFF or other — punt to userspace for handling.

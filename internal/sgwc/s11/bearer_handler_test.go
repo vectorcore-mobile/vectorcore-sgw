@@ -562,6 +562,93 @@ func TestModifyBearerCompletesMMERestorationAfterPFCPForwardingRestored(t *testi
 	}
 }
 
+func TestModifyBearerDefaultResumeRestoresActiveSiblingBearer(t *testing.T) {
+	mgr := session.NewManager()
+	sess, _, err := mgr.Create(session.CreateParams{
+		IMSI:           "311435300070599",
+		APN:            "ims",
+		RATType:        ie.RATTypeEUTRAN,
+		ServingNetwork: "311-435",
+		MMEControlFTEID: session.FTEID{
+			TEID: 0x11223344,
+			IPv4: netip.MustParseAddr("10.90.250.77"),
+		},
+		DefaultEBI: 6,
+		QCI:        5,
+		ARP:        bearer.ARP{PriorityLevel: 1},
+	})
+	if err != nil {
+		t.Fatalf("Create session: %v", err)
+	}
+	sess.SetPFCPBinding(session.PFCPSessionBinding{
+		LocalFSEID:  session.FSEID{SEID: 101, IPv4: netip.MustParseAddr("10.90.250.10")},
+		SGWUFSEID:   session.FSEID{SEID: 202, IPv4: netip.MustParseAddr("10.90.250.11")},
+		SGWUAddr:    "10.90.250.11:8805",
+		Established: true,
+	})
+	defaultBearer := sess.GetBearer(6)
+	defaultBearer.SGWS1UFTEID = bearer.FTEID{TEID: 0x90000002, IPv4: netip.MustParseAddr("10.90.250.11")}
+	sess.SetBearer(defaultBearer)
+	sess.SetBearer(&bearer.Bearer{
+		EBI:         7,
+		QCI:         1,
+		ARP:         bearer.ARP{PriorityLevel: 1},
+		State:       bearer.BearerStateActive,
+		SGWS1UFTEID: bearer.FTEID{TEID: 0x90000012, IPv4: netip.MustParseAddr("10.90.250.11")},
+		PDRIDs:      [2]uint32{11, 12},
+		FARIDs:      [2]uint32{21, 22},
+	})
+
+	conn, err := transport.Listen("127.0.0.1:0", 1, 1, slog.Default())
+	if err != nil {
+		t.Fatalf("Listen: %v", err)
+	}
+	defer conn.Close() //nolint:errcheck
+	pfcp := &fakePFCPClient{}
+	h := &Handler{
+		log:      slog.Default(),
+		sessions: mgr,
+		pfcp:     pfcp,
+		recovery: recovery.New(0),
+	}
+	addr := &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 2123}
+	hdr := message.Header{
+		Version:        2,
+		HasTEID:        true,
+		MessageType:    message.MsgTypeModifyBearerRequest,
+		TEID:           sess.SGWS11FTEID.TEID,
+		SequenceNumber: 0x20203,
+	}
+	bc := ie.NewBearerContext(0,
+		ie.NewEBI(6),
+		ie.NewFTEID(0, ie.IFTypeS1UENB, 0xA0B0C0D0, netip.MustParseAddr("10.90.250.88")),
+	)
+	raw, err := message.Marshal(hdr, []*ie.IE{bc})
+	if err != nil {
+		t.Fatalf("Marshal MBReq: %v", err)
+	}
+	parsedHdr, ies, err := message.Parse(raw)
+	if err != nil {
+		t.Fatalf("Parse MBReq: %v", err)
+	}
+
+	h.handleModifyBearerRequest(conn, addr, parsedHdr, ies)
+
+	if pfcp.modifies != 2 {
+		t.Fatalf("PFCP modifies = %d; want default plus sibling restore", pfcp.modifies)
+	}
+	if len(pfcp.lastUpdates) != 1 ||
+		pfcp.lastUpdates[0].FARID != 22 ||
+		pfcp.lastUpdates[0].ApplyAction != pfcpie.ApplyActionFORW ||
+		pfcp.lastUpdates[0].OuterTEID != 0xA0B0C0D0 {
+		t.Fatalf("last PFCP update = %+v; want sibling FAR 22 FORW to eNB", pfcp.lastUpdates)
+	}
+	dedicated := sess.GetBearer(7)
+	if dedicated.ENBS1UFTEID.TEID != 0xA0B0C0D0 || dedicated.ENBS1UFTEID.IPv4.String() != "10.90.250.88" {
+		t.Fatalf("dedicated ENB FTEID = %+v; want restored to Modify Bearer eNB", dedicated.ENBS1UFTEID)
+	}
+}
+
 type fakeS5CClient struct {
 	replies                   [][]byte
 	deleteSessionFromS11Calls int

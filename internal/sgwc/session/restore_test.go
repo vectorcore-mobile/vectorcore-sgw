@@ -53,6 +53,8 @@ func TestRestoreSnapshotsRebuildsIndexesAsRecovering(t *testing.T) {
 		})
 	}
 	at := time.Unix(100, 0).UTC()
+	ims.MarkBearerControlActivity(7, "update_bearer_response", at.Add(time.Second))
+	ims.MarkBearerUserPlaneActivity(7, "pfcp_usage_report", at.Add(2*time.Second))
 	ims.MarkMMERestart("10.90.250.77:2123", 9, at)
 	ims.MarkMMERestorationDDNTriggered(0x1234, at)
 
@@ -99,6 +101,11 @@ func TestRestoreSnapshotsRebuildsIndexesAsRecovering(t *testing.T) {
 	}
 	if imsSnap.Bearers[1].TFTRaw[0] != 7 {
 		t.Fatalf("dedicated bearer TFT not restored: %+v", imsSnap.Bearers[1])
+	}
+	if !imsSnap.Bearers[1].LastControlActivityAt.Equal(at.Add(time.Second)) ||
+		!imsSnap.Bearers[1].LastUserPlaneActivityAt.Equal(at.Add(2*time.Second)) ||
+		imsSnap.Bearers[1].LastActivitySource != "pfcp_usage_report" {
+		t.Fatalf("dedicated bearer activity not restored: %+v", imsSnap.Bearers[1])
 	}
 }
 

@@ -10,6 +10,7 @@ import (
 	"github.com/danielgtaylor/huma/v2"
 
 	"vectorcore-sgw/internal/dataplane/bpf"
+	"vectorcore-sgw/internal/sgwu/gtpu"
 	"vectorcore-sgw/internal/sgwu/pfcpserver"
 	sgwusession "vectorcore-sgw/internal/sgwu/session"
 )
@@ -20,6 +21,10 @@ type sgwuPFCPAssociationReader interface {
 
 type bpfRuleReader interface {
 	Rules() ([]bpf.RuleEntry, error)
+}
+
+type gtpuCounterReader interface {
+	Counters() gtpu.Counters
 }
 
 // PDRView is the API representation of a PFCP Packet Detection Rule
@@ -105,6 +110,18 @@ type BPFRuleListOutput struct {
 	}
 }
 
+type GTPUCountersOutput struct {
+	Body struct {
+		RxPackets    uint64 `json:"rx_packets"`
+		TxPackets    uint64 `json:"tx_packets"`
+		RxBytes      uint64 `json:"rx_bytes"`
+		TxBytes      uint64 `json:"tx_bytes"`
+		UnknownTEID  uint64 `json:"unknown_teid"`
+		Dropped      uint64 `json:"dropped"`
+		IdleDownlink uint64 `json:"idle_downlink"`
+	}
+}
+
 // RegisterSGWURoutes adds SGW-U PFCP session and BPF rule-state debug routes
 // to the Huma API. dp is nil when eBPF is not attached yet; the BPF rules
 // endpoint then returns an empty list with attached=false.
@@ -113,7 +130,7 @@ type BPFRuleListOutput struct {
 // showing PDRs/FARs/QERs" (QERs are not yet modeled in internal/sgwu/session
 // — Phase 5/9 deliverable scope; nothing to show there yet) and Phase 8's
 // "SGW-U API shows PFCP/BPF rule state".
-func RegisterSGWURoutes(api huma.API, store *sgwusession.Store, assoc sgwuPFCPAssociationReader, dp bpfRuleReader) {
+func RegisterSGWURoutes(api huma.API, store *sgwusession.Store, assoc sgwuPFCPAssociationReader, dp bpfRuleReader, gtpu gtpuCounterReader) {
 	huma.Register(api, huma.Operation{
 		OperationID: "list-sgwu-pfcp-associations",
 		Method:      http.MethodGet,
@@ -169,6 +186,27 @@ func RegisterSGWURoutes(api huma.API, store *sgwusession.Store, assoc sgwuPFCPAs
 		for _, r := range rules {
 			out.Body.Rules = append(out.Body.Rules, bpfRuleToView(r))
 		}
+		return out, nil
+	})
+
+	huma.Register(api, huma.Operation{
+		OperationID: "get-gtpu-counters",
+		Method:      http.MethodGet,
+		Path:        "/gtpu/counters",
+		Summary:     "Get SGW-U GTP-U userspace counters",
+	}, func(ctx context.Context, _ *struct{}) (*GTPUCountersOutput, error) {
+		out := &GTPUCountersOutput{}
+		if gtpu == nil {
+			return out, nil
+		}
+		counters := gtpu.Counters()
+		out.Body.RxPackets = counters.RxPackets
+		out.Body.TxPackets = counters.TxPackets
+		out.Body.RxBytes = counters.RxBytes
+		out.Body.TxBytes = counters.TxBytes
+		out.Body.UnknownTEID = counters.UnknownTEID
+		out.Body.Dropped = counters.Dropped
+		out.Body.IdleDownlink = counters.IdleDownlink
 		return out, nil
 	})
 }

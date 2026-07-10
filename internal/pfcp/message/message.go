@@ -42,6 +42,8 @@ const (
 //	"53 | PFCP Session Modification Response | X"
 //	"54 | PFCP Session Deletion Request | X"
 //	"55 | PFCP Session Deletion Response | X"
+//	"56 | PFCP Session Report Request | X"
+//	"57 | PFCP Session Report Response | X"
 const (
 	MsgTypeSessionEstablishmentRequest  uint8 = 50 // Table 7.3-1 row: "50 | PFCP Session Establishment Request"
 	MsgTypeSessionEstablishmentResponse uint8 = 51 // Table 7.3-1 row: "51 | PFCP Session Establishment Response"
@@ -49,6 +51,8 @@ const (
 	MsgTypeSessionModificationResponse  uint8 = 53 // Table 7.3-1 row: "53 | PFCP Session Modification Response"
 	MsgTypeSessionDeletionRequest       uint8 = 54 // Table 7.3-1 row: "54 | PFCP Session Deletion Request"
 	MsgTypeSessionDeletionResponse      uint8 = 55 // Table 7.3-1 row: "55 | PFCP Session Deletion Response"
+	MsgTypeSessionReportRequest         uint8 = 56 // Table 7.3-1 row: "56 | PFCP Session Report Request"
+	MsgTypeSessionReportResponse        uint8 = 57 // Table 7.3-1 row: "57 | PFCP Session Report Response"
 )
 
 const (
@@ -845,6 +849,67 @@ func ParseNodeReportResponse(b []byte) (*NodeReportResponse, error) {
 	// "Cause" — M — "This IE shall indicate the acceptance or the rejection of the corresponding request message."
 	if resp.Cause == nil {
 		return nil, fmt.Errorf("NodeReportResponse: missing mandatory Cause IE (Table 7.4.5.2.1-1)")
+	}
+	return resp, nil
+}
+
+// SessionReportRequest is a parsed PFCP Session Report Request per TS 29.244
+// Rel-15 Table 7.5.8.1-1. VectorCore uses a private IE in this message to
+// report idle downlink packets that hit Release Access Bearers DROP state.
+type SessionReportRequest struct {
+	Header
+	VectorCoreIdleDownlinkReport *ie.IE
+}
+
+func ParseSessionReportRequest(b []byte) (*SessionReportRequest, error) {
+	h, ies, err := Parse(b)
+	if err != nil {
+		return nil, err
+	}
+	if !h.HasSEID {
+		return nil, fmt.Errorf("SessionReportRequest: S flag must be 1 for session-level messages (§7.2.2)")
+	}
+	if h.MessageType != MsgTypeSessionReportRequest {
+		return nil, fmt.Errorf("SessionReportRequest: wrong message type %d (want %d)", h.MessageType, MsgTypeSessionReportRequest)
+	}
+	req := &SessionReportRequest{Header: h}
+	for _, i := range ies {
+		if i.Type == ie.TypeVectorCoreIdleDownlinkReport {
+			req.VectorCoreIdleDownlinkReport = i
+		}
+	}
+	if req.VectorCoreIdleDownlinkReport == nil {
+		return nil, fmt.Errorf("SessionReportRequest: missing VectorCore Idle Downlink Report IE")
+	}
+	return req, nil
+}
+
+// SessionReportResponse is a parsed PFCP Session Report Response per TS 29.244
+// Rel-15 Table 7.5.8.2-1. Cause is mandatory.
+type SessionReportResponse struct {
+	Header
+	Cause *ie.IE
+}
+
+func ParseSessionReportResponse(b []byte) (*SessionReportResponse, error) {
+	h, ies, err := Parse(b)
+	if err != nil {
+		return nil, err
+	}
+	if !h.HasSEID {
+		return nil, fmt.Errorf("SessionReportResponse: S flag must be 1 for session-level messages (§7.2.2)")
+	}
+	if h.MessageType != MsgTypeSessionReportResponse {
+		return nil, fmt.Errorf("SessionReportResponse: wrong message type %d (want %d)", h.MessageType, MsgTypeSessionReportResponse)
+	}
+	resp := &SessionReportResponse{Header: h}
+	for _, i := range ies {
+		if i.Type == ie.TypeCause {
+			resp.Cause = i
+		}
+	}
+	if resp.Cause == nil {
+		return nil, fmt.Errorf("SessionReportResponse: missing mandatory Cause IE (Table 7.5.8.2-1)")
 	}
 	return resp, nil
 }

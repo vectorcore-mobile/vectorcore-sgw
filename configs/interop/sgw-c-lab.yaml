@@ -80,6 +80,42 @@ gtpc:
       - apn: "internet"
         qci: 9
         reason: "throttle low-priority internet DDN first"
+  idle_downlink_notification:
+    enabled: false
+    trigger_ddn: true
+    report_throttle_seconds: 10
+    require_release_access_drop: true
+    high_priority:
+      - apn: "ims"
+        reason: "idle downlink IMS should trigger service restoration"
+      - qci: 1
+        reason: "idle downlink conversational bearer should trigger service restoration"
+      - arp_priority_min: 1
+        arp_priority_max: 3
+        reason: "idle downlink high ARP should trigger service restoration"
+    suppress:
+      - apn: "internet"
+        qci: 9
+        reason: "do not page low-priority internet traffic by default"
+  bearer_inactivity:
+    enabled: false
+    check_interval_seconds: 30
+    dedicated_bearer_idle_seconds: 300
+    pending_bearer_timeout_seconds: 60
+    default_bearer_idle_seconds: 0
+    delete_default_bearers: false
+    require_no_recent_control_activity: true
+    preserve:
+      - apn: "ims"
+        qci: 5
+        bearer_type: "default"
+        reason: "preserve IMS signaling default bearer"
+      - qci: 1
+        reason: "preserve conversational bearer until dataplane confirms idle"
+    cleanup:
+      - bearer_type: "dedicated"
+        idle_seconds: 300
+        reason: "dedicated bearer inactive"
 
 s11:
   t3_response_seconds: 3

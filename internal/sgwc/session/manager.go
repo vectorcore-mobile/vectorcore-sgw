@@ -90,13 +90,16 @@ func (m *Manager) Create(p CreateParams) (sess *SGWSession, evicted *SGWSession,
 		return nil, nil, fmt.Errorf("session create: %w", err)
 	}
 
+	now := time.Now()
 	defaultBearer := &bearer.Bearer{
-		EBI:         p.DefaultEBI,
-		QCI:         p.QCI,
-		ARP:         p.ARP,
-		MBRUplink:   p.MBRUplink,
-		MBRDownlink: p.MBRDownlink,
-		State:       bearer.BearerStatePending,
+		EBI:                   p.DefaultEBI,
+		QCI:                   p.QCI,
+		ARP:                   p.ARP,
+		MBRUplink:             p.MBRUplink,
+		MBRDownlink:           p.MBRDownlink,
+		State:                 bearer.BearerStatePending,
+		LastControlActivityAt: now,
+		LastActivitySource:    BearerActivitySourceCreateSession,
 	}
 
 	m.mu.RLock()
@@ -114,8 +117,8 @@ func (m *Manager) Create(p CreateParams) (sess *SGWSession, evicted *SGWSession,
 		Bearers:         map[uint8]*bearer.Bearer{p.DefaultEBI: defaultBearer},
 		Procedures:      collision.NewTracker(),
 		State:           StatePending,
-		CreatedAt:       time.Now(),
-		UpdatedAt:       time.Now(),
+		CreatedAt:       now,
+		UpdatedAt:       now,
 		checkpointSink:  checkpointSink,
 	}
 
@@ -222,6 +225,27 @@ func (m *Manager) FindByIMSI(imsi string) *SGWSession {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return m.byIMSI[imsi]
+}
+
+// FindByPFCPSEID returns the session whose PFCP binding matches cpSEID and/or
+// upSEID. Zero SEID arguments are ignored.
+func (m *Manager) FindByPFCPSEID(cpSEID, upSEID uint64) *SGWSession {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	for _, sess := range m.byID {
+		binding := sess.PFCPBinding()
+		if !binding.Established {
+			continue
+		}
+		if cpSEID != 0 && binding.LocalFSEID.SEID != cpSEID {
+			continue
+		}
+		if upSEID != 0 && binding.SGWUFSEID.SEID != upSEID {
+			continue
+		}
+		return sess
+	}
+	return nil
 }
 
 // RegisterS5CTEID registers the SGW's local S5/S8-C control TEID for a session,

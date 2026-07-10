@@ -33,7 +33,7 @@ func (f fakeBPFReader) Rules() ([]bpf.RuleEntry, error) {
 
 func newTestSGWUAPI(store *sgwusession.Store, assoc sgwuPFCPAssociationReader, dp bpfRuleReader) *Server {
 	srv := NewServer("127.0.0.1:0", BuildInfo{Version: "test", BuildDate: "now"}, slog.New(slog.DiscardHandler))
-	RegisterSGWURoutes(srv.HumaAPI(), store, assoc, dp)
+	RegisterSGWURoutes(srv.HumaAPI(), store, assoc, dp, nil)
 	return srv
 }
 

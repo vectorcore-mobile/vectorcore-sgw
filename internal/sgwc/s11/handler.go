@@ -1108,6 +1108,10 @@ func (h *Handler) handleModifyBearerRequest(conn *transport.Conn, addr *net.UDPA
 	var results []mbResult
 
 	reportForwardTargets := h.secondaryRATReportTargetSessions(hdr.TEID, mbEBIs, defaultSess, h.nsaDCNRForwardSecondaryRATUsageReports(req))
+	requestedEBIs := make(map[uint8]bool, len(mbEBIs))
+	for _, ebi := range mbEBIs {
+		requestedEBIs[ebi] = true
+	}
 
 	for _, bcIE := range req.BearerContexts {
 		children, err := bcIE.ChildIEs()
@@ -1239,6 +1243,9 @@ func (h *Handler) handleModifyBearerRequest(conn *transport.Conn, addr *net.UDPA
 				"enb_teid", fmt.Sprintf("0x%08X", fteid.TEID),
 				"enb_ip", fteid.IPv4)
 		}
+		if ebi == sess.DefaultBearerID {
+			h.restoreSiblingBearersAfterModifyBearer(opCtx, sess, requestedEBIs, bearer.FTEID{TEID: fteid.TEID, IPv4: fteid.IPv4})
+		}
 		results = append(results, mbResult{ebi: ebi, cause: ie.CauseRequestAccepted, sgwS1UFTEID: sgwS1U})
 	}
 
@@ -1345,6 +1352,77 @@ func (h *Handler) handleModifyBearerRequest(conn *transport.Conn, addr *net.UDPA
 	}
 	if err := conn.Reply(addr, resp); err != nil {
 		h.log.Warn("S11: Modify Bearer Response send failed", "to", addr, "error", err)
+	}
+}
+
+func (h *Handler) restoreSiblingBearersAfterModifyBearer(ctx context.Context, sess *session.SGWSession, requestedEBIs map[uint8]bool, enbFTEID bearer.FTEID) {
+	if h == nil || h.pfcp == nil || sess == nil || !enbFTEID.IPv4.IsValid() || enbFTEID.TEID == 0 {
+		return
+	}
+	for _, b := range sess.BearerList() {
+		if b == nil || b.EBI == sess.DefaultBearerID || requestedEBIs[b.EBI] {
+			continue
+		}
+		if b.State == bearer.BearerStateDeleting || b.State == bearer.BearerStateDeleted {
+			continue
+		}
+		pdrID, farID, ok := downlinkPFCPRuleIDs(sess, b)
+		if !ok {
+			h.log.Warn("S11: Modify Bearer resume audit — active sibling bearer missing downlink PFCP rule IDs",
+				"session_id", sess.SessionID,
+				"imsi", sess.IMSI,
+				"apn", sess.APN,
+				"default_ebi", sess.DefaultBearerID,
+				"ebi", b.EBI,
+				"qci", b.QCI,
+				"pdr_ids", b.PDRIDs,
+				"far_ids", b.FARIDs)
+			continue
+		}
+		oldENB := b.ENBS1UFTEID
+		b.ENBS1UFTEID = enbFTEID
+		sess.SetBearer(b)
+		err := h.pfcp.ModifySessionOnPeer(ctx,
+			sess.PFCP.SGWUAddr,
+			sess.PFCP.LocalFSEID.SEID,
+			sess.PFCP.SGWUFSEID.SEID,
+			[]pfcpclient.FARUpdate{{
+				FARID:              farID,
+				PDRID:              pdrID,
+				ApplyAction:        pfcpie.ApplyActionFORW,
+				DestInterface:      pfcpie.DestInterfaceAccess,
+				OuterTEID:          enbFTEID.TEID,
+				OuterIP:            enbFTEID.IPv4,
+				OuterHeaderRemoval: true,
+			}},
+		)
+		if err != nil {
+			b.ENBS1UFTEID = oldENB
+			sess.SetBearer(b)
+			h.log.Warn("S11: Modify Bearer resume audit — sibling bearer restore failed",
+				"session_id", sess.SessionID,
+				"imsi", sess.IMSI,
+				"apn", sess.APN,
+				"default_ebi", sess.DefaultBearerID,
+				"ebi", b.EBI,
+				"qci", b.QCI,
+				"far_id", farID,
+				"enb_teid", fmt.Sprintf("0x%08X", enbFTEID.TEID),
+				"enb_ip", enbFTEID.IPv4,
+				"error", err)
+			continue
+		}
+		h.log.Info("S11: Modify Bearer resume audit — sibling bearer restored to FORWARD",
+			"session_id", sess.SessionID,
+			"imsi", sess.IMSI,
+			"apn", sess.APN,
+			"default_ebi", sess.DefaultBearerID,
+			"ebi", b.EBI,
+			"qci", b.QCI,
+			"pdr_id", pdrID,
+			"far_id", farID,
+			"enb_teid", fmt.Sprintf("0x%08X", enbFTEID.TEID),
+			"enb_ip", enbFTEID.IPv4)
 	}
 }
 

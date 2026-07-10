@@ -20,7 +20,9 @@ import (
 	"vectorcore-sgw/internal/gtpv2/transport"
 	"vectorcore-sgw/internal/log"
 	"vectorcore-sgw/internal/metrics"
+	"vectorcore-sgw/internal/sgwc/bearerinactivity"
 	"vectorcore-sgw/internal/sgwc/ddncontrol"
+	"vectorcore-sgw/internal/sgwc/idledownlink"
 	"vectorcore-sgw/internal/sgwc/mmerestoration"
 	"vectorcore-sgw/internal/sgwc/peerhealth"
 	"vectorcore-sgw/internal/sgwc/pfcpclient"
@@ -267,6 +269,12 @@ func main() {
 		logger.Error("PFCP client failed to start", "error", err)
 		os.Exit(1)
 	}
+	bearerInactivityStatus := bearerinactivity.NewStatus()
+	bearerInactivityReporter := bearerinactivity.Reporter{
+		Sessions:  sessions,
+		Evaluator: bearerinactivity.NewEvaluator(cfg.GTPC.BearerInactivity),
+		Status:    bearerInactivityStatus,
+	}
 	if checkpointWriter != nil {
 		pfcpClient.SetCheckpointSink(checkpointWriter)
 	}
@@ -281,6 +289,26 @@ func main() {
 			logger.Error("PFCP client serve error", "error", err)
 		}
 	}()
+	if cfg.GTPC.BearerInactivity.Enabled {
+		runner := bearerinactivity.Runner{
+			Executor: bearerinactivity.Executor{
+				Sessions:  sessions,
+				PFCP:      pfcpClient,
+				Evaluator: bearerInactivityReporter.Evaluator,
+				Status:    bearerInactivityStatus,
+				Log:       logger.Logger,
+			},
+			Interval: time.Duration(cfg.GTPC.BearerInactivity.CheckIntervalSeconds) * time.Second,
+		}
+		go runner.Run(ctx)
+		logger.Info("SGW-C bearer inactivity cleanup enabled",
+			"check_interval_seconds", cfg.GTPC.BearerInactivity.CheckIntervalSeconds,
+			"dedicated_bearer_idle_seconds", cfg.GTPC.BearerInactivity.DedicatedBearerIdleSeconds,
+			"pending_bearer_timeout_seconds", cfg.GTPC.BearerInactivity.PendingBearerTimeoutSeconds,
+			"default_bearer_idle_seconds", cfg.GTPC.BearerInactivity.DefaultBearerIdleSeconds,
+			"delete_default_bearers", cfg.GTPC.BearerInactivity.DeleteDefaultBearers,
+			"require_no_recent_control_activity", cfg.GTPC.BearerInactivity.RequireNoRecentControlActivity)
+	}
 
 	sharedControl := cfg.GTPC.S11.Bind == cfg.GTPC.S5C.Bind
 	var sharedGTPC *transport.Conn
@@ -332,6 +360,8 @@ func main() {
 		Delete:                 mmeRestorationPolicyRules(cfg.GTPC.MMERestoration.Delete),
 	}, s5cClient, pfcpClient, logger.Logger)
 	mmeRestorationHandler.SetDDNControl(ddnControlState)
+	idleDownlinkHandler := idledownlink.New(sessions, idledownlink.ConfigFromSGWC(cfg.GTPC.IdleDownlink), logger.Logger)
+	idleDownlinkHandler.SetDDNControl(ddnControlState)
 	gtpcPeers.SetEventHandler(peerhealth.MultiHandler{pgwFailureHandler, mmeRestorationHandler})
 
 	metricsSrv := metrics.NewServer(cfg.Metrics.Listen, logger.Logger)
@@ -349,6 +379,7 @@ func main() {
 	metrics.NewMMERestorationMetrics(metricsSrv.Registry(), mmeRestorationHandler)
 	metrics.NewDDNControlMetrics(metricsSrv.Registry(), ddnControlState)
 	metrics.NewSessionRecoveryMetrics(metricsSrv.Registry(), checkpointStatus, sessions)
+	metrics.NewBearerInactivityMetrics(metricsSrv.Registry(), bearerInactivityReporter)
 	pfcpClient.SetPeerStateCallback(func(peerName, peerAddr string, state pfcpclient.PeerState) {
 		pfcpMetrics.OnPeerStateChange(peerName, peerAddr, string(state))
 		if state == pfcpclient.PeerStateDown {
@@ -377,6 +408,8 @@ func main() {
 	api.RegisterMMERestorationRoutes(apiSrv.HumaAPI(), mmeRestorationHandler)
 	api.RegisterDDNControlRoutes(apiSrv.HumaAPI(), ddnControlState)
 	api.RegisterRecoveryRoutes(apiSrv.HumaAPI(), checkpointStatus, sessions)
+	api.RegisterBearerInactivityRoutes(apiSrv.HumaAPI(), bearerInactivityReporter)
+	api.RegisterIdleDownlinkRoutes(apiSrv.HumaAPI(), idleDownlinkHandler)
 	if err := apiSrv.Start(ctx); err != nil {
 		logger.Error("API server failed to start", "error", err)
 		os.Exit(1)
@@ -394,6 +427,13 @@ func main() {
 	}
 	mmeRestorationHandler.SetDDNSender(s11Handler)
 	s11Handler.SetDDNControl(ddnControlState)
+	idleDownlinkHandler.SetDDNSender(s11Handler)
+	pfcpClient.SetIdleDownlinkReportHandler(idleDownlinkHandler.HandleReport)
+	logger.Info("SGW-C idle downlink notification configured",
+		"enabled", cfg.GTPC.IdleDownlink.Enabled,
+		"trigger_ddn", cfg.GTPC.IdleDownlink.TriggerDDN,
+		"report_throttle_seconds", cfg.GTPC.IdleDownlink.ReportThrottleSeconds,
+		"require_release_access_drop", cfg.GTPC.IdleDownlink.RequireReleaseAccessDrop)
 	s11Handler.SetBaseContext(ctx)
 	s11Handler.SetPeerHealth(gtpcPeers)
 	s11Handler.SetCollisionMetrics(collisionMetrics)

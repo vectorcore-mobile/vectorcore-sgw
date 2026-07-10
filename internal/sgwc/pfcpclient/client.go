@@ -125,8 +125,9 @@ type Client struct {
 	onPeerStateChange func(peerName, peerAddr string, state PeerState)
 	// onPeerRestart fires when a peer's Recovery Time Stamp changes.
 	// The SGW-C must treat PFCP sessions on that peer as stale.
-	onPeerRestart  func(peerName, peerAddr string, oldTS, newTS uint32)
-	checkpointSink interface {
+	onPeerRestart        func(peerName, peerAddr string, oldTS, newTS uint32)
+	onIdleDownlinkReport func(peerAddr string, report pfcpie.VectorCoreIdleDownlinkReport)
+	checkpointSink       interface {
 		SavePeerSnapshot(sessioncheckpoint.PeerSnapshot)
 	}
 }
@@ -204,6 +205,10 @@ func (c *Client) SetCheckpointSink(sink interface {
 	SavePeerSnapshot(sessioncheckpoint.PeerSnapshot)
 }) {
 	c.checkpointSink = sink
+}
+
+func (c *Client) SetIdleDownlinkReportHandler(fn func(peerAddr string, report pfcpie.VectorCoreIdleDownlinkReport)) {
+	c.onIdleDownlinkReport = fn
 }
 
 // Peers returns a snapshot of all PFCP peer states for API/observability.
@@ -878,6 +883,8 @@ func (c *Client) handle(conn *pfcptransport.Conn, addr *net.UDPAddr, hdr pfcpmsg
 	switch hdr.MessageType {
 	case pfcpmsg.MsgTypeNodeReportRequest:
 		c.handleNodeReportRequest(conn, addr, hdr, raw)
+	case pfcpmsg.MsgTypeSessionReportRequest:
+		c.handleSessionReportRequest(conn, addr, hdr, raw)
 	default:
 		c.log.Warn("PFCP unhandled inbound message type from SGW-U",
 			"from", addr, "type", hdr.MessageType)
@@ -923,6 +930,53 @@ func (c *Client) handleNodeReportRequest(conn *pfcptransport.Conn, addr *net.UDP
 	}
 	if err := conn.Reply(addr, respRaw); err != nil {
 		c.log.Warn("PFCP send NodeReportResponse failed", "to", addr, "error", err)
+	}
+}
+
+func (c *Client) handleSessionReportRequest(conn *pfcptransport.Conn, addr *net.UDPAddr, hdr pfcpmsg.Header, raw []byte) {
+	req, err := pfcpmsg.ParseSessionReportRequest(raw)
+	if err != nil {
+		c.log.Warn("PFCP SessionReportRequest parse error", "from", addr, "error", err)
+		return
+	}
+	report, err := req.VectorCoreIdleDownlinkReport.VectorCoreIdleDownlinkReportValue()
+	if err != nil {
+		c.log.Warn("PFCP SessionReportRequest idle downlink report invalid", "from", addr, "error", err)
+		return
+	}
+
+	c.log.Info("PFCP Session Report: idle downlink packet detected",
+		"sgwu", addr,
+		"cp_seid", report.CPSEID,
+		"up_seid", report.UPSEID,
+		"pdr_id", report.PDRID,
+		"far_id", report.FARID,
+		"local_teid", fmt.Sprintf("0x%08X", report.LocalTEID),
+		"ebi", report.EBI,
+		"qci", report.QCI,
+		"qos_valid", report.QoSValid,
+		"source_interface", report.SourceInterface,
+		"drop_reason", report.DropReason)
+	if c.onIdleDownlinkReport != nil {
+		c.onIdleDownlinkReport(addr.String(), report)
+	}
+
+	respHdr := pfcpmsg.Header{
+		Version:        1,
+		HasSEID:        true,
+		MessageType:    pfcpmsg.MsgTypeSessionReportResponse,
+		SEID:           hdr.SEID,
+		SequenceNumber: req.SequenceNumber,
+	}
+	respRaw, marshalErr := pfcpmsg.Marshal(respHdr, []*pfcpie.IE{
+		pfcpie.NewCause(pfcpie.CauseRequestAccepted),
+	})
+	if marshalErr != nil {
+		c.log.Error("PFCP marshal SessionReportResponse failed", "error", marshalErr)
+		return
+	}
+	if err := conn.Reply(addr, respRaw); err != nil {
+		c.log.Warn("PFCP send SessionReportResponse failed", "to", addr, "error", err)
 	}
 }
 

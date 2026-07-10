@@ -254,6 +254,65 @@ func TestApplyFARUpdatesCommitsAfterBPFSuccessAndReturnsEndMarker(t *testing.T) 
 	}
 }
 
+func TestApplyFARUpdatesMarksReleaseAccessDropReason(t *testing.T) {
+	s := &Server{}
+	sess := &sgwusession.Session{
+		CPSEID: 1,
+		UPSEID: 2,
+		FARs: []sgwusession.FAR{{
+			ID:            7,
+			ApplyAction:   pfcpie.ApplyActionFORW,
+			DestInterface: pfcpie.DestInterfaceAccess,
+			OuterTEID:     0x11111111,
+			OuterIP:       netip.MustParseAddr("10.0.0.1"),
+		}},
+	}
+	update := parsedFARUpdate{
+		farID:       7,
+		applyAction: pfcpie.NewApplyAction(pfcpie.ApplyActionDROP),
+	}
+
+	if _, err := s.applyFARUpdates(sess, []parsedFARUpdate{update}); err != nil {
+		t.Fatalf("applyFARUpdates: %v", err)
+	}
+	got := sess.FARs[0]
+	if got.ApplyAction != pfcpie.ApplyActionDROP ||
+		got.DropReason != sgwusession.DropReasonReleaseAccessBearers {
+		t.Fatalf("FAR after Release Access Bearers-style DROP = %+v", got)
+	}
+}
+
+func TestApplyFARUpdatesClearsDropReasonOnForward(t *testing.T) {
+	s := &Server{}
+	sess := &sgwusession.Session{
+		CPSEID: 1,
+		UPSEID: 2,
+		FARs: []sgwusession.FAR{{
+			ID:            7,
+			ApplyAction:   pfcpie.ApplyActionDROP,
+			DestInterface: pfcpie.DestInterfaceAccess,
+			DropReason:    sgwusession.DropReasonReleaseAccessBearers,
+		}},
+	}
+	update := parsedFARUpdate{
+		farID:       7,
+		applyAction: pfcpie.NewApplyAction(pfcpie.ApplyActionFORW),
+		ufpIE: pfcpie.NewUpdateForwardingParameters(
+			pfcpie.NewDestinationInterface(pfcpie.DestInterfaceAccess),
+			pfcpie.NewOuterHeaderCreation(pfcpie.OHCDescGTPUUDPIPv4, 0x22222222, netip.MustParseAddr("10.0.0.2")),
+		),
+	}
+
+	if _, err := s.applyFARUpdates(sess, []parsedFARUpdate{update}); err != nil {
+		t.Fatalf("applyFARUpdates: %v", err)
+	}
+	got := sess.FARs[0]
+	if got.ApplyAction != pfcpie.ApplyActionFORW ||
+		got.DropReason != sgwusession.DropReasonNone {
+		t.Fatalf("FAR after FORW restore = %+v", got)
+	}
+}
+
 func TestTrackSessionPathPeersAddsUniqueOuterIPs(t *testing.T) {
 	tracker := &fakePathPeerTracker{}
 	s := &Server{pathPeers: tracker}

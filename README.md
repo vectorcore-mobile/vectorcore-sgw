@@ -159,6 +159,8 @@ pfcp           show SGW-C and SGW-U PFCP association status
 gtpc-peers     show SGW-C GTP-C peer health
 pgw-failures   show SGW-C PGW path and restart state
 recovery       show SGW-C checkpoint and recovery status
+bearer-inactivity show SGW-C bearer inactivity cleanup status
+idle-downlink show SGW-C idle downlink status and SGW-U GTP-U counters
 bpf            show SGW-U BPF map state
 ```
 
@@ -269,6 +271,25 @@ gtpc:
     restore_on_startup: true
     reconcile_on_startup: true
     checkpoint_interval_seconds: 5
+  bearer_inactivity:
+    enabled: false
+    check_interval_seconds: 30
+    dedicated_bearer_idle_seconds: 300
+    pending_bearer_timeout_seconds: 60
+    default_bearer_idle_seconds: 0
+    delete_default_bearers: false
+    require_no_recent_control_activity: true
+    preserve:
+      - apn: "ims"
+        qci: 5
+        bearer_type: "default"
+        reason: "preserve IMS signaling default bearer"
+      - qci: 1
+        reason: "preserve conversational bearer until dataplane confirms idle"
+    cleanup:
+      - bearer_type: "dedicated"
+        idle_seconds: 300
+        reason: "dedicated bearer inactive"
 
 s11:
   t3_response_seconds: 3
@@ -361,12 +382,27 @@ SGW-C options:
 | `gtpc.ddn_control.stop_paging_on_ddn_ack` | If true, sends Stop Paging after accepted DDN Ack when restoration state proves it is eligible. Requires `stop_paging_enabled`. |
 | `gtpc.ddn_control.high_priority[]` | High-priority DDN rules matched by APN, QCI, and/or ARP priority range. |
 | `gtpc.ddn_control.low_priority[]` | Low-priority DDN rules matched by APN, QCI, and/or ARP priority range. |
+| `gtpc.idle_downlink_notification.enabled` | Enables idle downlink packet reporting/DDN trigger flow. Default false until live lab validation is complete. |
+| `gtpc.idle_downlink_notification.trigger_ddn` | Allows SGW-C to send S11 DDN for accepted idle downlink reports. |
+| `gtpc.idle_downlink_notification.report_throttle_seconds` | Per bearer/session idle downlink report throttle. Default 10. |
+| `gtpc.idle_downlink_notification.require_release_access_drop` | Limits idle downlink reports to DROP state caused by Release Access Bearers. Default true. |
+| `gtpc.idle_downlink_notification.high_priority[]` | Idle downlink report rules eligible for DDN, matched by APN, QCI, and/or ARP priority range. Defaults include IMS, QCI 1, and high ARP. |
+| `gtpc.idle_downlink_notification.suppress[]` | Idle downlink report rules suppressed by policy. Defaults suppress low-priority internet QCI 9. |
 | `gtpc.session_recovery.enabled` | Enables SGW-C session checkpoint/recovery. Default false until restore/reconcile phases are complete. |
 | `gtpc.session_recovery.backend` | Checkpoint backend. `sqlite` is the supported local restart-recovery backend; Redis/etcd are reserved for future HA. |
 | `gtpc.session_recovery.sqlite_path` | SQLite checkpoint DB path. Empty means derive from `sgwc.state_dir` in the SQLite backend phase. |
 | `gtpc.session_recovery.restore_on_startup` | Reload checkpointed SGW-C session state at startup. Restored sessions must reconcile before becoming active. |
 | `gtpc.session_recovery.reconcile_on_startup` | Reconcile restored sessions against SGW-U PFCP/eBPF state at startup. Requires `restore_on_startup`. |
 | `gtpc.session_recovery.checkpoint_interval_seconds` | Minimum periodic checkpoint cadence for dirty sessions. Default 5. |
+| `gtpc.bearer_inactivity.enabled` | Enables bearer inactivity tracking/cleanup. Default false while activity detection and cleanup execution are phased in. |
+| `gtpc.bearer_inactivity.check_interval_seconds` | Periodic inactivity scan interval. Default 30. |
+| `gtpc.bearer_inactivity.dedicated_bearer_idle_seconds` | Default idle threshold for dedicated bearers. Default 300. |
+| `gtpc.bearer_inactivity.pending_bearer_timeout_seconds` | Timeout for pending bearer procedures before they can be considered stale. Default 60. |
+| `gtpc.bearer_inactivity.default_bearer_idle_seconds` | Default-bearer idle threshold. `0` disables default-bearer inactivity cleanup. |
+| `gtpc.bearer_inactivity.delete_default_bearers` | Allows default-bearer inactivity cleanup when explicitly paired with a positive default-bearer idle timeout. Default false. |
+| `gtpc.bearer_inactivity.require_no_recent_control_activity` | Requires no recent bearer/session control activity before cleanup eligibility. Default true. |
+| `gtpc.bearer_inactivity.preserve[]` | Preserve rules matched by APN, QCI, bearer type, and/or ARP priority range. Preserve rules are intended to protect IMS signaling, QCI 1, and high-priority sessions. |
+| `gtpc.bearer_inactivity.cleanup[]` | Cleanup rules matched by bearer type/APN/QCI/ARP. Phase 1 only validates policy; later phases execute cleanup. |
 | `s11.t3_response_seconds` | GTPv2-C retransmission timeout. |
 | `s11.n3_requests` | GTPv2-C retransmission count. |
 | `pfcp.local_addr` | SGW-C PFCP local address. |
@@ -401,8 +437,18 @@ SGW-C exposes runtime state through its HTTP API listener:
 | `/gtpc/pgw-failures` | PGW path/restart state and affected session counts. |
 | `/gtpc/mme-restorations` | MME restoration/path/restart state and affected session counts. |
 | `/gtpc/ddn-control` | DDN throttling, priority paging, token, throttle, delay, suppress, and per-UE state. |
+| `/gtpc/idle-downlink` | Idle downlink report/DDN status counters. |
 | `/pfcp/associations` | SGW-C PFCP association state. |
 | `/recovery/status` | SGW-C checkpoint backend, restore counts, peer Recovery IE restore counts, and current recovery summary. |
+
+SGW-U API endpoints include:
+
+| Endpoint | Purpose |
+| --- | --- |
+| `/sessions` | SGW-U PFCP sessions with PDR/FAR state. |
+| `/pfcp/associations` | SGW-U PFCP association state with SGW-C peers. |
+| `/bpf/rules` | SGW-U eBPF forwarding rules and per-rule counters. |
+| `/gtpu/counters` | SGW-U userspace GTP-U counters, including idle downlink hits. |
 
 SGW-C exports the following control-plane metrics on its Prometheus listener:
 
@@ -464,6 +510,9 @@ MME restoration/NTSR behavior and live validation notes are in
 
 DDN throttling and priority paging validation notes are in
 `docs/ddn-control-phase8-validation.md`.
+
+Bearer inactivity cleanup behavior and live validation notes are in
+`docs/bearer-inactivity-lab-validation.md`.
 
 NSA/DCNR Secondary RAT report behavior and validation notes are in
 `docs/5g-nsa-dcnr-awareness.md`.

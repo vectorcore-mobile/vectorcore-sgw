@@ -35,6 +35,31 @@ type FAR struct {
 	DestInterface uint8      // destination interface (0=Access, 1=Core)
 	OuterTEID     uint32     // outer header creation TEID (for GTP-U encapsulation)
 	OuterIP       netip.Addr // outer header creation peer IP
+	DropReason    DropReason // local observability/reporting reason for DROP state
+}
+
+type DropReason string
+
+const (
+	DropReasonNone                 DropReason = ""
+	DropReasonReleaseAccessBearers DropReason = "release_access_bearers"
+	DropReasonBearerDeleted        DropReason = "bearer_deleted"
+	DropReasonSessionDeleted       DropReason = "session_deleted"
+	DropReasonPolicy               DropReason = "policy"
+	DropReasonInactivity           DropReason = "inactivity"
+)
+
+type IdleDownlinkEvent struct {
+	CPSEID          uint64
+	UPSEID          uint64
+	PDRID           uint16
+	FARID           uint32
+	LocalTEID       uint32
+	EBI             uint8
+	QCI             uint8
+	SourceInterface uint8
+	QoSValid        bool
+	DropReason      DropReason
 }
 
 // Session is a PFCP session binding on the SGW-U per TS 29.244 Rel-15 §5.3.

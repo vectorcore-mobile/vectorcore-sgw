@@ -50,6 +50,10 @@ func TestSessionSnapshotExportsDurableState(t *testing.T) {
 	sess.SetMMERestorationPolicy(session.MMERestorationPolicyPreserve, "preserve IMS", at)
 	sess.MarkMMERestorationDDNControlDecision("send_now", "high", "qci-1", 0, at)
 	sess.MarkMMERestorationDDNTriggered(1234, at)
+	activityAt := time.Unix(210, 0).UTC()
+	sess.MarkBearerControlActivity(7, "create_bearer_response", activityAt)
+	userActivityAt := time.Unix(220, 0).UTC()
+	sess.MarkBearerUserPlaneActivity(7, "pfcp_usage_report", userActivityAt)
 
 	snap := sess.Snapshot()
 	if snap.SchemaVersion != sessioncheckpoint.CurrentSchemaVersion {
@@ -88,6 +92,11 @@ func TestSessionSnapshotExportsDurableState(t *testing.T) {
 	dedicated := snap.Bearers[1]
 	if dedicated.QCI != 1 || dedicated.ENBS1UFTEID.TEID != 0x1111 || dedicated.PDRIDs != [2]uint32{3, 4} {
 		t.Fatalf("unexpected dedicated bearer snapshot: %+v", dedicated)
+	}
+	if !dedicated.LastControlActivityAt.Equal(activityAt) ||
+		!dedicated.LastUserPlaneActivityAt.Equal(userActivityAt) ||
+		dedicated.LastActivitySource != "pfcp_usage_report" {
+		t.Fatalf("unexpected dedicated bearer activity snapshot: %+v", dedicated)
 	}
 	if len(dedicated.TFTRaw) != 3 || dedicated.TFTRaw[0] != 0x01 {
 		t.Fatalf("TFT raw = %x", dedicated.TFTRaw)

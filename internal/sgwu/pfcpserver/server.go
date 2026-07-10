@@ -1209,7 +1209,19 @@ func applyFARUpdatesToCandidate(fars []sgwusession.FAR, updates []parsedFARUpdat
 				if err != nil {
 					return nil, fmt.Errorf("apply action for FAR %d: %w", u.farID, err)
 				}
+				oldAction := fars[i].ApplyAction
+				oldDestInterface := fars[i].DestInterface
 				fars[i].ApplyAction = applyAction
+				switch {
+				case applyAction&pfcpie.ApplyActionFORW != 0:
+					fars[i].DropReason = sgwusession.DropReasonNone
+				case applyAction&pfcpie.ApplyActionDROP != 0 &&
+					oldAction&pfcpie.ApplyActionFORW != 0 &&
+					oldDestInterface == pfcpie.DestInterfaceAccess:
+					fars[i].DropReason = sgwusession.DropReasonReleaseAccessBearers
+				case applyAction&pfcpie.ApplyActionDROP != 0 && fars[i].DropReason == "":
+					fars[i].DropReason = sgwusession.DropReasonPolicy
+				}
 			}
 			if u.ufpIE != nil {
 				fpChildren, err := u.ufpIE.Children()
@@ -1427,6 +1439,93 @@ func (s *Server) HandlePathFailure(ctx context.Context, failedPeer netip.Addr) {
 			"peer", peerAddr, "failed_peer", failedPeerIP, "cause", cause)
 		return true
 	})
+}
+
+func (s *Server) ReportIdleDownlink(event sgwusession.IdleDownlinkEvent) {
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		s.reportIdleDownlink(ctx, event)
+	}()
+}
+
+func (s *Server) reportIdleDownlink(ctx context.Context, event sgwusession.IdleDownlinkEvent) {
+	report := pfcpie.VectorCoreIdleDownlinkReport{
+		CPSEID:          event.CPSEID,
+		UPSEID:          event.UPSEID,
+		PDRID:           event.PDRID,
+		FARID:           event.FARID,
+		LocalTEID:       event.LocalTEID,
+		EBI:             event.EBI,
+		QCI:             event.QCI,
+		SourceInterface: event.SourceInterface,
+		QoSValid:        event.QoSValid,
+		DropReason:      idleDownlinkDropReasonCode(event.DropReason),
+	}
+	s.peers.Range(func(key, val any) bool {
+		pr := val.(*PeerRecord)
+		pr.mu.RLock()
+		peerAddr := pr.lastAddr
+		pr.mu.RUnlock()
+		if peerAddr == nil {
+			return true
+		}
+
+		seq := s.conn.AllocSeq()
+		hdr := pfcpmsg.Header{
+			Version:        1,
+			HasSEID:        true,
+			MessageType:    pfcpmsg.MsgTypeSessionReportRequest,
+			SEID:           event.CPSEID,
+			SequenceNumber: seq,
+		}
+		raw, marshalErr := pfcpmsg.Marshal(hdr, []*pfcpie.IE{
+			pfcpie.NewVectorCoreIdleDownlinkReport(report),
+		})
+		if marshalErr != nil {
+			s.log.Error("PFCP marshal SessionReportRequest idle downlink failed", "error", marshalErr)
+			return true
+		}
+		respRaw, sendErr := s.conn.Send(ctx, peerAddr, raw)
+		if sendErr != nil {
+			s.log.Warn("PFCP SessionReportRequest idle downlink send failed",
+				"to", peerAddr,
+				"cp_seid", event.CPSEID,
+				"up_seid", event.UPSEID,
+				"pdr_id", event.PDRID,
+				"far_id", event.FARID,
+				"local_teid", fmt.Sprintf("0x%08X", event.LocalTEID),
+				"error", sendErr)
+			return true
+		}
+		resp, parseErr := pfcpmsg.ParseSessionReportResponse(respRaw)
+		if parseErr != nil {
+			s.log.Warn("PFCP SessionReportResponse idle downlink parse failed",
+				"from", peerAddr, "error", parseErr)
+			return true
+		}
+		cause, _ := resp.Cause.CauseValue()
+		s.log.Info("PFCP Session Report idle downlink acknowledged",
+			"peer", peerAddr,
+			"cp_seid", event.CPSEID,
+			"up_seid", event.UPSEID,
+			"pdr_id", event.PDRID,
+			"far_id", event.FARID,
+			"local_teid", fmt.Sprintf("0x%08X", event.LocalTEID),
+			"ebi", event.EBI,
+			"qci", event.QCI,
+			"cause", cause)
+		return true
+	})
+}
+
+func idleDownlinkDropReasonCode(reason sgwusession.DropReason) uint8 {
+	switch reason {
+	case sgwusession.DropReasonReleaseAccessBearers:
+		return pfcpie.VectorCoreIdleDownlinkDropReleaseAccessBearers
+	default:
+		return 0
+	}
 }
 
 func (s *Server) isAllowed(ip net.IP) bool {

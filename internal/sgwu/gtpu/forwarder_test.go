@@ -344,6 +344,113 @@ func TestForwarderDropAction(t *testing.T) {
 	}
 }
 
+func TestForwarderCountsIdleDownlinkReleaseAccessDrop(t *testing.T) {
+	store := sgwusession.NewStore()
+	sess := &sgwusession.Session{
+		CPSEID: 2,
+		UPSEID: 2,
+		PDRs: []sgwusession.PDR{{
+			ID:              1,
+			LocalTEID:       50,
+			FARID:           2,
+			SourceInterface: 1,
+			EBI:             6,
+			QCI:             5,
+			QoSValid:        true,
+		}},
+		FARs: []sgwusession.FAR{{
+			ID:          2,
+			ApplyAction: 0x01,
+			DropReason:  sgwusession.DropReasonReleaseAccessBearers,
+		}},
+	}
+	_ = store.Create(sess)
+
+	localIP := netip.MustParseAddr("127.0.0.1")
+	fwd, err := New("127.0.0.1:0", localIP, store, discardSlog())
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer fwd.conn.Close()
+
+	clientAddr := &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 12346}
+	pkt := Marshal(Header{Version: 1, PT: true, MsgType: MsgTypeGPDU, TEID: 50}, 0)
+	fwd.handle(pkt, clientAddr)
+
+	if fwd.idleDownlink.Load() != 1 {
+		t.Fatalf("idleDownlink = %d; want 1", fwd.idleDownlink.Load())
+	}
+	if fwd.dropped.Load() != 1 {
+		t.Fatalf("dropped = %d; want 1", fwd.dropped.Load())
+	}
+	if fwd.txPackets.Load() != 0 {
+		t.Fatalf("txPackets = %d; want 0", fwd.txPackets.Load())
+	}
+}
+
+type idleDownlinkRecorder struct {
+	events []sgwusession.IdleDownlinkEvent
+}
+
+func (r *idleDownlinkRecorder) ReportIdleDownlink(event sgwusession.IdleDownlinkEvent) {
+	r.events = append(r.events, event)
+}
+
+func TestForwarderReportsIdleDownlinkReleaseAccessDrop(t *testing.T) {
+	store := sgwusession.NewStore()
+	sess := &sgwusession.Session{
+		CPSEID: 20,
+		UPSEID: 30,
+		PDRs: []sgwusession.PDR{{
+			ID:              11,
+			LocalTEID:       50,
+			FARID:           22,
+			SourceInterface: 1,
+			EBI:             6,
+			QCI:             5,
+			QoSValid:        true,
+		}},
+		FARs: []sgwusession.FAR{{
+			ID:          22,
+			ApplyAction: 0x01,
+			DropReason:  sgwusession.DropReasonReleaseAccessBearers,
+		}},
+	}
+	_ = store.Create(sess)
+
+	localIP := netip.MustParseAddr("127.0.0.1")
+	fwd, err := New("127.0.0.1:0", localIP, store, discardSlog())
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer fwd.conn.Close()
+	rec := &idleDownlinkRecorder{}
+	fwd.SetIdleDownlinkReporter(rec)
+
+	clientAddr := &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 12346}
+	pkt := Marshal(Header{Version: 1, PT: true, MsgType: MsgTypeGPDU, TEID: 50}, 0)
+	fwd.handle(pkt, clientAddr)
+
+	if len(rec.events) != 1 {
+		t.Fatalf("events = %d; want 1", len(rec.events))
+	}
+	want := sgwusession.IdleDownlinkEvent{
+		CPSEID:          20,
+		UPSEID:          30,
+		PDRID:           11,
+		FARID:           22,
+		LocalTEID:       50,
+		EBI:             6,
+		QCI:             5,
+		SourceInterface: 1,
+		QoSValid:        true,
+		DropReason:      sgwusession.DropReasonReleaseAccessBearers,
+	}
+	if rec.events[0] != want {
+		t.Fatalf("event = %+v; want %+v", rec.events[0], want)
+	}
+}
+
 func TestForwarderGroupCreatesUniqueListeners(t *testing.T) {
 	store := sgwusession.NewStore()
 	group, err := NewGroup([]Endpoint{

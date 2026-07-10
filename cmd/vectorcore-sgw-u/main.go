@@ -186,6 +186,7 @@ func main() {
 		os.Exit(1)
 	}
 	pfcpSrv.SetEndMarkerSender(gtpuFwd)
+	gtpuFwd.SetIdleDownlinkReporter(pfcpSrv)
 	go func() {
 		if err := gtpuFwd.Serve(ctx); err != nil {
 			logger.Error("GTP-U signalling listener serve error", "error", err)
@@ -226,7 +227,7 @@ func main() {
 	}
 
 	apiSrv := api.NewServer(cfg.API.Listen, api.BuildInfo{Component: "SGW-U", Version: version, BuildDate: buildDate}, logger.Logger)
-	api.RegisterSGWURoutes(apiSrv.HumaAPI(), pfcpSrv.SessionStore(), pfcpSrv, xdpDp)
+	api.RegisterSGWURoutes(apiSrv.HumaAPI(), pfcpSrv.SessionStore(), pfcpSrv, xdpDp, gtpuFwd)
 	if err := apiSrv.Start(ctx); err != nil {
 		logger.Error("API server failed to start", "error", err)
 		os.Exit(1)

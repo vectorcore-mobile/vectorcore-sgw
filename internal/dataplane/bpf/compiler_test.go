@@ -301,6 +301,24 @@ func TestBuildValueDROP(t *testing.T) {
 	}
 }
 
+func TestBuildValueReleaseAccessDownlinkDropPuntsForUserspaceDetection(t *testing.T) {
+	c := &Compiler{}
+	pdr := &session.PDR{ID: 1, LocalTEID: 1, SourceInterface: pfcpie.SourceInterfaceCore}
+	far := &session.FAR{
+		ID:          2,
+		ApplyAction: pfcpie.ApplyActionDROP,
+		DropReason:  session.DropReasonReleaseAccessBearers,
+	}
+
+	val, err := c.buildValue(pdr, far)
+	if err != nil {
+		t.Fatalf("buildValue: %v", err)
+	}
+	if val.Action != actionPunt {
+		t.Fatalf("Action = %d; want ACTION_PUNT for Release Access Bearers downlink DROP", val.Action)
+	}
+}
+
 // TestBuildValueFORWNoIP verifies that a FORW FAR without an outer IP
 // (initial state before eNB TEID arrives) produces ACTION_PUNT.
 // This prevents the BPF program from forwarding to the zero address.

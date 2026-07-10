@@ -441,6 +441,28 @@ func TestFindByIMSI(t *testing.T) {
 	}
 }
 
+func TestFindByPFCPSEID(t *testing.T) {
+	m := session.NewManager()
+	sess, _, err := m.Create(defaultParams())
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	sess.SetPFCPBinding(session.PFCPSessionBinding{
+		LocalFSEID:  session.FSEID{SEID: 101},
+		SGWUFSEID:   session.FSEID{SEID: 202},
+		Established: true,
+	})
+	if got := m.FindByPFCPSEID(101, 202); got != sess {
+		t.Fatalf("FindByPFCPSEID = %v; want session", got)
+	}
+	if got := m.FindByPFCPSEID(101, 0); got != sess {
+		t.Fatalf("FindByPFCPSEID by CP = %v; want session", got)
+	}
+	if got := m.FindByPFCPSEID(101, 999); got != nil {
+		t.Fatalf("FindByPFCPSEID mismatched UP = %v; want nil", got)
+	}
+}
+
 func TestDelete(t *testing.T) {
 	m := session.NewManager()
 	sess, _, _ := m.Create(defaultParams())
@@ -514,6 +536,55 @@ func TestBearerSetAndGet(t *testing.T) {
 	updated := sess.GetBearer(5)
 	if updated.ENBS1UFTEID.TEID != 0x12345678 {
 		t.Errorf("eNodeB TEID not updated: got 0x%08X", updated.ENBS1UFTEID.TEID)
+	}
+	if updated.LastControlActivityAt.IsZero() || updated.LastActivitySource != session.BearerActivitySourceSetBearer {
+		t.Fatalf("SetBearer activity = %s/%q; want control activity source set_bearer",
+			updated.LastControlActivityAt, updated.LastActivitySource)
+	}
+}
+
+func TestBearerActivityTracking(t *testing.T) {
+	m := session.NewManager()
+	sess, _, err := m.Create(defaultParams())
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	defaultBearer := sess.GetBearer(5)
+	if defaultBearer == nil {
+		t.Fatal("default bearer missing")
+	}
+	if defaultBearer.LastControlActivityAt.IsZero() {
+		t.Fatal("default bearer LastControlActivityAt is zero after create")
+	}
+	if defaultBearer.LastActivitySource != session.BearerActivitySourceCreateSession {
+		t.Fatalf("default bearer activity source = %q; want create_session", defaultBearer.LastActivitySource)
+	}
+
+	controlAt := time.Unix(100, 0).UTC()
+	if !sess.MarkBearerControlActivity(5, "modify_bearer", controlAt) {
+		t.Fatal("MarkBearerControlActivity returned false")
+	}
+	defaultBearer = sess.GetBearer(5)
+	if !defaultBearer.LastControlActivityAt.Equal(controlAt) || defaultBearer.LastActivitySource != "modify_bearer" {
+		t.Fatalf("control activity = %s/%q; want %s/modify_bearer",
+			defaultBearer.LastControlActivityAt, defaultBearer.LastActivitySource, controlAt)
+	}
+
+	userAt := time.Unix(110, 0).UTC()
+	if !sess.MarkBearerUserPlaneActivity(5, "pfcp_usage_report", userAt) {
+		t.Fatal("MarkBearerUserPlaneActivity returned false")
+	}
+	defaultBearer = sess.GetBearer(5)
+	if !defaultBearer.LastUserPlaneActivityAt.Equal(userAt) || defaultBearer.LastActivitySource != "pfcp_usage_report" {
+		t.Fatalf("user-plane activity = %s/%q; want %s/pfcp_usage_report",
+			defaultBearer.LastUserPlaneActivityAt, defaultBearer.LastActivitySource, userAt)
+	}
+
+	if sess.MarkBearerControlActivity(9, "missing", time.Now()) {
+		t.Fatal("MarkBearerControlActivity succeeded for missing bearer")
+	}
+	if sess.MarkBearerUserPlaneActivity(9, "missing", time.Now()) {
+		t.Fatal("MarkBearerUserPlaneActivity succeeded for missing bearer")
 	}
 }
 

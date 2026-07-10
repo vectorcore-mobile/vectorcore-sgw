@@ -50,6 +50,27 @@ func (g *ForwarderGroup) Forwarders() []*Forwarder {
 	return append([]*Forwarder(nil), g.forwarders...)
 }
 
+func (g *ForwarderGroup) SetIdleDownlinkReporter(r IdleDownlinkReporter) {
+	for _, fwd := range g.forwarders {
+		fwd.SetIdleDownlinkReporter(r)
+	}
+}
+
+func (g *ForwarderGroup) Counters() Counters {
+	var out Counters
+	for _, fwd := range g.forwarders {
+		c := fwd.Counters()
+		out.RxPackets += c.RxPackets
+		out.TxPackets += c.TxPackets
+		out.RxBytes += c.RxBytes
+		out.TxBytes += c.TxBytes
+		out.UnknownTEID += c.UnknownTEID
+		out.Dropped += c.Dropped
+		out.IdleDownlink += c.IdleDownlink
+	}
+	return out
+}
+
 // Serve runs every forwarder until ctx is cancelled or a socket returns an error.
 func (g *ForwarderGroup) Serve(ctx context.Context) error {
 	errCh := make(chan error, len(g.forwarders))

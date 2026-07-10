@@ -269,6 +269,61 @@ func TestDefaultSessionRecoveryConfig(t *testing.T) {
 	}
 }
 
+func TestDefaultBearerInactivityConfig(t *testing.T) {
+	cfg := Default()
+	if cfg.GTPC.BearerInactivity.Enabled {
+		t.Fatal("default bearer inactivity cleanup enabled; want disabled for visibility-first rollout")
+	}
+	if cfg.GTPC.BearerInactivity.CheckIntervalSeconds != 30 {
+		t.Fatalf("default bearer inactivity check interval = %d; want 30", cfg.GTPC.BearerInactivity.CheckIntervalSeconds)
+	}
+	if cfg.GTPC.BearerInactivity.DedicatedBearerIdleSeconds != 300 {
+		t.Fatalf("default dedicated bearer idle seconds = %d; want 300", cfg.GTPC.BearerInactivity.DedicatedBearerIdleSeconds)
+	}
+	if cfg.GTPC.BearerInactivity.PendingBearerTimeoutSeconds != 60 {
+		t.Fatalf("default pending bearer timeout seconds = %d; want 60", cfg.GTPC.BearerInactivity.PendingBearerTimeoutSeconds)
+	}
+	if cfg.GTPC.BearerInactivity.DefaultBearerIdleSeconds != 0 {
+		t.Fatalf("default bearer idle seconds = %d; want 0 disabled", cfg.GTPC.BearerInactivity.DefaultBearerIdleSeconds)
+	}
+	if cfg.GTPC.BearerInactivity.DeleteDefaultBearers {
+		t.Fatal("default delete_default_bearers enabled; want false")
+	}
+	if !cfg.GTPC.BearerInactivity.RequireNoRecentControlActivity {
+		t.Fatal("default require_no_recent_control_activity disabled; want enabled")
+	}
+	if len(cfg.GTPC.BearerInactivity.Preserve) == 0 {
+		t.Fatal("default bearer inactivity preserve policy is empty")
+	}
+	if len(cfg.GTPC.BearerInactivity.Cleanup) != 1 ||
+		cfg.GTPC.BearerInactivity.Cleanup[0].BearerType != "dedicated" ||
+		cfg.GTPC.BearerInactivity.Cleanup[0].IdleSeconds != 300 {
+		t.Fatalf("default bearer inactivity cleanup policy = %+v; want dedicated idle 300", cfg.GTPC.BearerInactivity.Cleanup)
+	}
+}
+
+func TestDefaultIdleDownlinkConfig(t *testing.T) {
+	cfg := Default()
+	if cfg.GTPC.IdleDownlink.Enabled {
+		t.Fatal("default idle downlink notification enabled; want disabled for phased rollout")
+	}
+	if !cfg.GTPC.IdleDownlink.TriggerDDN {
+		t.Fatal("default idle downlink trigger_ddn disabled; want enabled when feature gate is turned on")
+	}
+	if cfg.GTPC.IdleDownlink.ReportThrottleSeconds != 10 {
+		t.Fatalf("default idle downlink report throttle = %d; want 10", cfg.GTPC.IdleDownlink.ReportThrottleSeconds)
+	}
+	if !cfg.GTPC.IdleDownlink.RequireReleaseAccessDrop {
+		t.Fatal("default idle downlink require_release_access_drop disabled; want true")
+	}
+	if len(cfg.GTPC.IdleDownlink.HighPriority) == 0 {
+		t.Fatal("default idle downlink high priority policy is empty")
+	}
+	if len(cfg.GTPC.IdleDownlink.Suppress) == 0 {
+		t.Fatal("default idle downlink suppress policy is empty")
+	}
+}
+
 func TestValidateRejectsInvalidPeerHealthConfig(t *testing.T) {
 	cfg := validTestConfig()
 	cfg.GTPC.PeerHealth.EchoTimeoutSeconds = cfg.GTPC.PeerHealth.EchoIntervalSeconds
@@ -287,6 +342,28 @@ func TestValidateRejectsInvalidPeerHealthConfig(t *testing.T) {
 	cfg.GTPC.PeerHealth.DegradedRTTMS = 0
 	if err := cfg.Validate(); err == nil {
 		t.Fatal("Validate succeeded with peer_health degraded_rtt_ms=0")
+	}
+}
+
+func TestValidateRejectsInvalidIdleDownlinkConfig(t *testing.T) {
+	cfg := validTestConfig()
+	cfg.GTPC.IdleDownlink.ReportThrottleSeconds = 0
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("Validate succeeded with idle_downlink_notification report_throttle_seconds=0")
+	}
+
+	cfg = validTestConfig()
+	cfg.GTPC.IdleDownlink.HighPriority = []DDNControlPriorityRuleConfig{{ARPPriorityMin: 5, ARPPriorityMax: 3}}
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("Validate succeeded with idle_downlink_notification invalid ARP range")
+	}
+
+	cfg = validTestConfig()
+	cfg.GTPC.IdleDownlink.Enabled = true
+	cfg.GTPC.IdleDownlink.TriggerDDN = true
+	cfg.GTPC.IdleDownlink.HighPriority = nil
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("Validate succeeded with idle_downlink_notification trigger_ddn and empty high_priority policy")
 	}
 }
 
@@ -399,6 +476,63 @@ func TestValidateRejectsInvalidSessionRecoveryConfig(t *testing.T) {
 	cfg.GTPC.SessionRecovery.ReconcileOnStartup = true
 	if err := cfg.Validate(); err == nil {
 		t.Fatal("Validate succeeded with reconcile_on_startup enabled without restore_on_startup")
+	}
+}
+
+func TestValidateRejectsInvalidBearerInactivityConfig(t *testing.T) {
+	cfg := validTestConfig()
+	cfg.GTPC.BearerInactivity.CheckIntervalSeconds = 0
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("Validate succeeded with invalid bearer inactivity check interval")
+	}
+
+	cfg = validTestConfig()
+	cfg.GTPC.BearerInactivity.DedicatedBearerIdleSeconds = 0
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("Validate succeeded with invalid dedicated bearer idle seconds")
+	}
+
+	cfg = validTestConfig()
+	cfg.GTPC.BearerInactivity.PendingBearerTimeoutSeconds = 0
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("Validate succeeded with invalid pending bearer timeout")
+	}
+
+	cfg = validTestConfig()
+	cfg.GTPC.BearerInactivity.DefaultBearerIdleSeconds = -1
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("Validate succeeded with negative default bearer idle seconds")
+	}
+
+	cfg = validTestConfig()
+	cfg.GTPC.BearerInactivity.DeleteDefaultBearers = true
+	cfg.GTPC.BearerInactivity.DefaultBearerIdleSeconds = 0
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("Validate succeeded with default bearer deletion but no default idle timeout")
+	}
+
+	cfg = validTestConfig()
+	cfg.GTPC.BearerInactivity.Cleanup = []BearerInactivityRuleConfig{{BearerType: "default", IdleSeconds: 300}}
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("Validate succeeded with default bearer cleanup while delete_default_bearers=false")
+	}
+
+	cfg = validTestConfig()
+	cfg.GTPC.BearerInactivity.Cleanup = []BearerInactivityRuleConfig{{BearerType: "dedicated", IdleSeconds: 0}}
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("Validate succeeded with cleanup rule idle_seconds=0")
+	}
+
+	cfg = validTestConfig()
+	cfg.GTPC.BearerInactivity.Preserve = []BearerInactivityRuleConfig{{BearerType: "invalid"}}
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("Validate succeeded with invalid bearer_type")
+	}
+
+	cfg = validTestConfig()
+	cfg.GTPC.BearerInactivity.Preserve = []BearerInactivityRuleConfig{{ARPPriorityMin: 4, ARPPriorityMax: 3}}
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("Validate succeeded with inverted bearer inactivity ARP priority range")
 	}
 }
 

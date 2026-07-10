@@ -107,7 +107,7 @@ func TestDefaultBearerAttachProgramsControlPlaneAndUserspaceGTPU(t *testing.T) {
 	}()
 
 	sgwuAPI := api.NewServer(sgwuAPIAddr, api.BuildInfo{Version: "test", BuildDate: "phase10"}, log)
-	api.RegisterSGWURoutes(sgwuAPI.HumaAPI(), sgwuPFCP.SessionStore(), sgwuPFCP, nil)
+	api.RegisterSGWURoutes(sgwuAPI.HumaAPI(), sgwuPFCP.SessionStore(), sgwuPFCP, nil, nil)
 	if err := sgwuAPI.Start(ctx); err != nil {
 		t.Fatalf("SGW-U API Start: %v", err)
 	}
@@ -288,7 +288,7 @@ func TestDedicatedBearerCreateUpdateDeleteProgramsPFCPAndAPI(t *testing.T) {
 		}
 	}()
 	sgwuAPI := api.NewServer(sgwuAPIAddr, api.BuildInfo{Version: "test", BuildDate: "phase12"}, log)
-	api.RegisterSGWURoutes(sgwuAPI.HumaAPI(), sgwuPFCP.SessionStore(), sgwuPFCP, nil)
+	api.RegisterSGWURoutes(sgwuAPI.HumaAPI(), sgwuPFCP.SessionStore(), sgwuPFCP, nil, nil)
 	if err := sgwuAPI.Start(ctx); err != nil {
 		t.Fatalf("SGW-U API Start: %v", err)
 	}

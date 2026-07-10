@@ -18,22 +18,28 @@ import (
 // "Bit 2 – FORW (Forward): the UP function shall forward the packets."
 const applyActionFORW uint8 = 0x02
 
+type IdleDownlinkReporter interface {
+	ReportIdleDownlink(event sgwusession.IdleDownlinkEvent)
+}
+
 // Forwarder is the userspace GTP-U reference forwarder per TS 29.281 Rel-15 Phase 6.
 // It listens on UDP/2152, parses GTP-U headers, looks up local TEIDs in the PDR/FAR
 // store, and forwards or drops G-PDUs per the applicable FAR Apply Action.
 type Forwarder struct {
-	conn    *net.UDPConn
-	store   *sgwusession.Store
-	localIP netip.Addr // SGW-U GTP-U IP, used as source in Error Indication Peer Address IE
-	log     *slog.Logger
-	prober  *PathProber // optional; set via SetPathProber
+	conn     *net.UDPConn
+	store    *sgwusession.Store
+	localIP  netip.Addr // SGW-U GTP-U IP, used as source in Error Indication Peer Address IE
+	log      *slog.Logger
+	prober   *PathProber // optional; set via SetPathProber
+	reporter IdleDownlinkReporter
 
-	rxPackets   atomic.Uint64
-	txPackets   atomic.Uint64
-	rxBytes     atomic.Uint64
-	txBytes     atomic.Uint64
-	unknownTEID atomic.Uint64
-	dropped     atomic.Uint64
+	rxPackets    atomic.Uint64
+	txPackets    atomic.Uint64
+	rxBytes      atomic.Uint64
+	txBytes      atomic.Uint64
+	unknownTEID  atomic.Uint64
+	dropped      atomic.Uint64
+	idleDownlink atomic.Uint64
 }
 
 // New creates a GTP-U Forwarder that listens on listenAddr (e.g., "0.0.0.0:2152").
@@ -105,25 +111,33 @@ func (f *Forwarder) SetPathProber(p *PathProber) {
 	f.prober = p
 }
 
+// SetIdleDownlinkReporter registers the SGW-U control-plane reporter used when
+// an idle downlink packet hits a Release Access Bearers DROP state.
+func (f *Forwarder) SetIdleDownlinkReporter(r IdleDownlinkReporter) {
+	f.reporter = r
+}
+
 // Counters holds packet and byte counters for observability.
 type Counters struct {
-	RxPackets   uint64
-	TxPackets   uint64
-	RxBytes     uint64
-	TxBytes     uint64
-	UnknownTEID uint64
-	Dropped     uint64
+	RxPackets    uint64
+	TxPackets    uint64
+	RxBytes      uint64
+	TxBytes      uint64
+	UnknownTEID  uint64
+	Dropped      uint64
+	IdleDownlink uint64
 }
 
 // Counters returns a snapshot of current packet/byte counts.
 func (f *Forwarder) Counters() Counters {
 	return Counters{
-		RxPackets:   f.rxPackets.Load(),
-		TxPackets:   f.txPackets.Load(),
-		RxBytes:     f.rxBytes.Load(),
-		TxBytes:     f.txBytes.Load(),
-		UnknownTEID: f.unknownTEID.Load(),
-		Dropped:     f.dropped.Load(),
+		RxPackets:    f.rxPackets.Load(),
+		TxPackets:    f.txPackets.Load(),
+		RxBytes:      f.rxBytes.Load(),
+		TxBytes:      f.txBytes.Load(),
+		UnknownTEID:  f.unknownTEID.Load(),
+		Dropped:      f.dropped.Load(),
+		IdleDownlink: f.idleDownlink.Load(),
 	}
 }
 
@@ -211,6 +225,31 @@ func (f *Forwarder) handleGPDU(hdr Header, tpdu []byte, src *net.UDPAddr, localI
 		f.forwardGPDU(hdr, &farCopy, tpdu)
 	} else {
 		// DROP or BUFF: discard. BUFF (DDN) is Phase 7+.
+		if pdr.SourceInterface == 1 && farCopy.DropReason == sgwusession.DropReasonReleaseAccessBearers {
+			f.idleDownlink.Add(1)
+			event := sgwusession.IdleDownlinkEvent{
+				CPSEID:          sess.CPSEID,
+				UPSEID:          sess.UPSEID,
+				PDRID:           pdr.ID,
+				FARID:           pdr.FARID,
+				LocalTEID:       hdr.TEID,
+				EBI:             pdr.EBI,
+				QCI:             pdr.QCI,
+				SourceInterface: pdr.SourceInterface,
+				QoSValid:        pdr.QoSValid,
+				DropReason:      farCopy.DropReason,
+			}
+			f.log.Info("GTP-U: idle downlink packet hit Release Access Bearers DROP",
+				"teid", fmt.Sprintf("0x%08X", hdr.TEID),
+				"pdr_id", pdr.ID,
+				"far_id", pdr.FARID,
+				"ebi", pdr.EBI,
+				"qci", pdr.QCI,
+				"qos_valid", pdr.QoSValid)
+			if f.reporter != nil {
+				f.reporter.ReportIdleDownlink(event)
+			}
+		}
 		f.dropped.Add(1)
 	}
 }
