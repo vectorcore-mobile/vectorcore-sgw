@@ -13,17 +13,17 @@ interfaces:
 gtpc:
   s11:
     bind: "my_control_plane"
+    timers:
+      t3_response_seconds: 3
+      n3_requests: 5
   s5c:
     bind: "my_control_plane"
 
-s11:
-  t3_response_seconds: 3
-  n3_requests: 5
-
 pfcp:
   local_addr: "127.0.0.1:8805"
-  heartbeat_interval_seconds: 10
-  heartbeat_timeout_seconds: 30
+  heartbeat:
+    interval_seconds: 10
+    timeout_seconds: 30
   sgwu:
     - name: "sgw-u-east"
       node_id: "sgw-u-east"

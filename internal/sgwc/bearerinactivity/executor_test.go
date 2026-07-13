@@ -291,7 +291,7 @@ func addCleanupBearerWithQCI(t *testing.T, sess *session.SGWSession, ebi, qci ui
 }
 
 func cleanupDefaultRule() sgwcconfig.BearerInactivityRuleConfig {
-	return sgwcconfig.BearerInactivityRuleConfig{BearerType: "default", IdleSeconds: 300, Reason: "default-idle"}
+	return sgwcconfig.BearerInactivityRuleConfig{BearerType: "default", IdleSeconds: 300}
 }
 
 func equalUint32s(a, b []uint32) bool {

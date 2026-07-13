@@ -75,7 +75,7 @@ func TestValidateAcceptsArbitrarySharedControlBindLabel(t *testing.T) {
 	cfg.Interfaces.Control = map[string]ControlInterfaceConfig{
 		"zulu": {Listen: "10.90.250.59:2123"},
 	}
-	cfg.GTPC.S11 = GTPCLogical{Bind: "zulu"}
+	cfg.GTPC.S11 = S11Logical{Bind: "zulu", Timers: cfg.S11}
 	cfg.GTPC.S5C = GTPCLogical{Bind: "zulu"}
 	cfg.PFCP.LocalAddr = "127.0.0.1:8805"
 	cfg.PFCP.SGWU = []SGWUPeer{{Name: "sgw-u-1", Addr: "127.0.0.2:8805"}}
@@ -550,13 +550,14 @@ interfaces:
 gtpc:
   s11:
     bind: "control"
+    timers:
+      t3_response_seconds: 3
+      n3_requests: 5
   s5c:
     bind: "control"
+features:
   nsa_dcnr:
     enabled: false
-s11:
-  t3_response_seconds: 3
-  n3_requests: 5
 pfcp:
   local_addr: "127.0.0.1:8805"
   sgwu:
@@ -639,6 +640,43 @@ func TestLoadPrimaryConfigHasNoCreateBearerInteropLimit(t *testing.T) {
 	_ = cfg
 }
 
+func TestLoadPrimaryConfigParsesNestedARPAndS11Timers(t *testing.T) {
+	cfg, err := Load(filepath.Join("..", "..", "..", "configs", "sgw-c.yaml"))
+	if err != nil {
+		t.Fatalf("Load primary SGW-C config: %v", err)
+	}
+	if cfg.S11.T3ResponseSeconds != 3 || cfg.S11.N3Requests != 5 {
+		t.Fatalf("S11 timers = %+v", cfg.S11)
+	}
+	rule := cfg.GTPC.MMERestoration.Preserve[2]
+	if rule.ARPPriorityMin != 1 || rule.ARPPriorityMax != 3 {
+		t.Fatalf("nested ARP rule = %+v", rule)
+	}
+}
+
+func TestLoadRejectsConfiguredPolicyReason(t *testing.T) {
+	path := writeTempConfig(t, `
+sgwc: {node_id: sgw-c-1, plmn: {mcc: "311", mnc: "435"}}
+interfaces: {control: {control: {listen: "127.0.0.1:2123"}}}
+gtpc:
+  s11: {bind: control, timers: {t3_response_seconds: 3, n3_requests: 5}}
+  s5c: {bind: control}
+pfcp:
+  local_addr: "127.0.0.1:8805"
+  sgwu: [{name: sgw-u-1, addr: "127.0.0.2:8805"}]
+features:
+  mme_restoration:
+    policy:
+      preserve:
+        - apn: ims
+          reason: operator-controlled
+`)
+	_, err := Load(path)
+	if err == nil || !strings.Contains(err.Error(), "field reason not found") {
+		t.Fatalf("Load error = %v, want reason migration error", err)
+	}
+}
+
 func TestLoadRejectsOldControlConfigFields(t *testing.T) {
 	path := writeTempConfig(t, `
 sgwc:
@@ -661,7 +699,7 @@ pfcp:
 	if err == nil {
 		t.Fatal("Load succeeded with old s11.listen and s5c.local_addr fields")
 	}
-	if !strings.Contains(err.Error(), "field listen not found") {
+	if !strings.Contains(err.Error(), "field s11 not found") {
 		t.Fatalf("Load error = %v, want unknown-field error for old control config", err)
 	}
 }
@@ -721,7 +759,7 @@ func validTestConfig() *Config {
 	cfg.Interfaces.Control = map[string]ControlInterfaceConfig{
 		"control": {Listen: "127.0.0.1:2123"},
 	}
-	cfg.GTPC.S11 = GTPCLogical{Bind: "control"}
+	cfg.GTPC.S11 = S11Logical{Bind: "control", Timers: cfg.S11}
 	cfg.GTPC.S5C = GTPCLogical{Bind: "control"}
 	cfg.PFCP.LocalAddr = "127.0.0.1:8805"
 	cfg.PFCP.SGWU = []SGWUPeer{{Name: "sgw-u-1", Addr: "127.0.0.2:8805"}}

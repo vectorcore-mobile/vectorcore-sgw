@@ -15,17 +15,17 @@ interfaces:
 gtpc:
   s11:
     bind: "my_mme_side"
+    timers:
+      t3_response_seconds: 3
+      n3_requests: 5
   s5c:
     bind: "my_pgw_control_side"
 
-s11:
-  t3_response_seconds: 3
-  n3_requests: 5
-
 pfcp:
   local_addr: "127.0.0.1:8805"
-  heartbeat_interval_seconds: 10
-  heartbeat_timeout_seconds: 30
+  heartbeat:
+    interval_seconds: 10
+    timeout_seconds: 30
   sgwu:
     - name: "sgw-u-1"
       node_id: "sgw-u-1"

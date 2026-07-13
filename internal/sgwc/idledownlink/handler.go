@@ -12,6 +12,7 @@ import (
 	sgwcconfig "vectorcore-sgw/internal/config/sgwc"
 	pfcpie "vectorcore-sgw/internal/pfcp/ie"
 	"vectorcore-sgw/internal/sgwc/ddncontrol"
+	"vectorcore-sgw/internal/sgwc/policyreason"
 	"vectorcore-sgw/internal/sgwc/session"
 )
 
@@ -69,12 +70,12 @@ func ConfigFromSGWC(cfg sgwcconfig.IdleDownlinkConfig) Config {
 		TriggerDDN:               cfg.TriggerDDN,
 		ReportThrottle:           time.Duration(cfg.ReportThrottleSeconds) * time.Second,
 		RequireReleaseAccessDrop: cfg.RequireReleaseAccessDrop,
-		HighPriority:             priorityRules(cfg.HighPriority),
-		Suppress:                 priorityRules(cfg.Suppress),
+		HighPriority:             priorityRules(cfg.HighPriority, "high-priority"),
+		Suppress:                 priorityRules(cfg.Suppress, "suppress"),
 	}
 }
 
-func priorityRules(rules []sgwcconfig.DDNControlPriorityRuleConfig) []ddncontrol.PriorityRule {
+func priorityRules(rules []sgwcconfig.DDNControlPriorityRuleConfig, action string) []ddncontrol.PriorityRule {
 	out := make([]ddncontrol.PriorityRule, 0, len(rules))
 	for _, rule := range rules {
 		out = append(out, ddncontrol.PriorityRule{
@@ -82,7 +83,7 @@ func priorityRules(rules []sgwcconfig.DDNControlPriorityRuleConfig) []ddncontrol
 			QCI:            rule.QCI,
 			ARPPriorityMin: rule.ARPPriorityMin,
 			ARPPriorityMax: rule.ARPPriorityMax,
-			Reason:         rule.Reason,
+			Reason:         policyreason.Build("idle-downlink", action, policyreason.Rule{APN: rule.APN, QCI: rule.QCI, ARPPriorityMin: rule.ARPPriorityMin, ARPPriorityMax: rule.ARPPriorityMax}),
 		})
 	}
 	return out

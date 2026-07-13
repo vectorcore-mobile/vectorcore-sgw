@@ -1,154 +1,39 @@
 sgwc:
   node_id: "sgw-c-lab"
-  plmn:
-    mcc: "001"
-    mnc: "01"
+  plmn: {mcc: "001", mnc: "01"}
   control_plane_ip: "10.90.250.10"
-
 interfaces:
   control:
-    # Logical names are operator-chosen labels. gtpc.*.bind references them.
     lab_control:
       listen: "10.90.250.10:2123"
-
 gtpc:
   s11:
     bind: "lab_control"
+    timers: {t3_response_seconds: 3, n3_requests: 5}
   s5c:
     bind: "lab_control"
-  nsa_dcnr:
-    enabled: true
-    forward_secondary_rat_usage_reports: true
+  transactions:
+    create_bearer_retry_guard: {enabled: true}
+    collision_handling: {mode: "strict", active_procedure_timeout_seconds: 120}
   peer_health:
     enabled: true
-    echo_interval_seconds: 30
-    echo_timeout_seconds: 3
-    suspect_after_missed: 2
-    down_after_missed: 3
-    degraded_rtt_ms: 500
-    probe_mme_peers: true
-    probe_pgw_peers: true
+    timers: {echo_interval_seconds: 30, echo_timeout_seconds: 3}
+    thresholds: {suspect_after_missed: 2, down_after_missed: 3, degraded_rtt_ms: 500}
+    probe: {mme: true, pgw: true}
     warn_on_down_peer_procedure: true
-  pgw_failure:
-    enabled: true
-    mark_sessions_on_path_down: true
-    mark_sessions_on_restart: true
-    block_new_procedures_to_down_pgw: false
-    notify_mme_on_pgw_restart: false
-  mme_restoration:
-    enabled: true
-    mark_sessions_on_path_down: true
-    mark_sessions_on_restart: true
-    enforce_delete_policy: true
-    trigger_ddn: true
-    cleanup_timeout_seconds: 30
-    default_action: preserve
-    preserve:
-      - apn: "ims"
-        reason: "preserve IMS PDN for network triggered service restoration"
-      - qci: 1
-        reason: "preserve conversational bearer"
-      - arp_priority_min: 1
-        arp_priority_max: 3
-        reason: "preserve high-priority ARP sessions"
-    delete:
-      - apn: "internet"
-        qci: 9
-        reason: "low-priority internet PDN can be released after MME restart"
-  ddn_control:
-    enabled: true
-    per_mme_rate_limit_per_second: 50
-    per_mme_burst: 100
-    per_ue_suppression_seconds: 10
-    honor_mme_low_priority_throttling: true
-    low_priority_throttle_seconds: 30
-    high_priority_bypass: true
-    delayed_queue_max: 1000
-    delayed_queue_per_mme: 200
-    delayed_max_age_seconds: 30
-    stop_paging_enabled: false
-    stop_paging_on_ddn_ack: false
-    high_priority:
-      - apn: "ims"
-        reason: "prioritize IMS paging"
-      - qci: 1
-        reason: "prioritize conversational bearer paging"
-      - arp_priority_min: 1
-        arp_priority_max: 3
-        reason: "prioritize high ARP paging"
-    low_priority:
-      - apn: "internet"
-        qci: 9
-        reason: "throttle low-priority internet DDN first"
-  idle_downlink_notification:
-    enabled: false
-    trigger_ddn: true
-    report_throttle_seconds: 10
-    require_release_access_drop: true
-    high_priority:
-      - apn: "ims"
-        reason: "idle downlink IMS should trigger service restoration"
-      - qci: 1
-        reason: "idle downlink conversational bearer should trigger service restoration"
-      - arp_priority_min: 1
-        arp_priority_max: 3
-        reason: "idle downlink high ARP should trigger service restoration"
-    suppress:
-      - apn: "internet"
-        qci: 9
-        reason: "do not page low-priority internet traffic by default"
-  bearer_inactivity:
-    enabled: false
-    check_interval_seconds: 30
-    dedicated_bearer_idle_seconds: 300
-    pending_bearer_timeout_seconds: 60
-    default_bearer_idle_seconds: 0
-    delete_default_bearers: false
-    require_no_recent_control_activity: true
-    preserve:
-      - apn: "ims"
-        qci: 5
-        bearer_type: "default"
-        reason: "preserve IMS signaling default bearer"
-      - qci: 1
-        reason: "preserve conversational bearer until dataplane confirms idle"
-    cleanup:
-      - bearer_type: "dedicated"
-        idle_seconds: 300
-        reason: "dedicated bearer inactive"
-
-s11:
-  t3_response_seconds: 3
-  n3_requests: 5
-
 pfcp:
   local_addr: "10.90.250.10:8805"
-  heartbeat_interval_seconds: 10
-  heartbeat_timeout_seconds: 30
+  heartbeat: {interval_seconds: 10, timeout_seconds: 30}
   sgwu:
-    - name: "sgw-u-lab"
-      node_id: "sgw-u-lab"
-      addr: "10.90.250.11:8805"
-
+    - {name: "sgw-u-lab", node_id: "sgw-u-lab", addr: "10.90.250.11:8805"}
+features:
+  nsa_dcnr: {enabled: true, forward_secondary_rat_usage_reports: true}
 qos:
   outer_marking:
     enabled: true
-    gtpc:
-      enabled: true
-      dscp: 40
-    pfcp:
-      enabled: true
-      dscp: 40
-
-logging:
-  level: info
-  file: /var/log/vectorcore/sgw/sgw-c-lab.log
-
-api:
-  listen: "0.0.0.0:8080"
-
-metrics:
-  listen: "0.0.0.0:9090"
-
-shutdown:
-  timeout_seconds: 5
+    gtpc: {enabled: true, dscp: 40}
+    pfcp: {enabled: true, dscp: 40}
+logging: {level: info, file: /var/log/vectorcore/sgw/sgw-c-lab.log}
+api: {listen: "0.0.0.0:8080"}
+metrics: {listen: "0.0.0.0:9090"}
+shutdown: {timeout_seconds: 5}

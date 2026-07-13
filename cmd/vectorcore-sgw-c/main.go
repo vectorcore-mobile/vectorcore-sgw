@@ -27,6 +27,7 @@ import (
 	"vectorcore-sgw/internal/sgwc/peerhealth"
 	"vectorcore-sgw/internal/sgwc/pfcpclient"
 	"vectorcore-sgw/internal/sgwc/pgwfailure"
+	"vectorcore-sgw/internal/sgwc/policyreason"
 	"vectorcore-sgw/internal/sgwc/recovery"
 	"vectorcore-sgw/internal/sgwc/s11"
 	"vectorcore-sgw/internal/sgwc/s5c"
@@ -356,8 +357,8 @@ func main() {
 		DelayedQueuePerMME:     cfg.GTPC.DDNControl.DelayedQueuePerMME,
 		DelayedMaxAge:          time.Duration(cfg.GTPC.DDNControl.DelayedMaxAgeSeconds) * time.Second,
 		DefaultAction:          mmeRestorationPolicyAction(cfg.GTPC.MMERestoration.DefaultAction),
-		Preserve:               mmeRestorationPolicyRules(cfg.GTPC.MMERestoration.Preserve),
-		Delete:                 mmeRestorationPolicyRules(cfg.GTPC.MMERestoration.Delete),
+		Preserve:               mmeRestorationPolicyRules(cfg.GTPC.MMERestoration.Preserve, "preserve"),
+		Delete:                 mmeRestorationPolicyRules(cfg.GTPC.MMERestoration.Delete, "delete"),
 	}, s5cClient, pfcpClient, logger.Logger)
 	mmeRestorationHandler.SetDDNControl(ddnControlState)
 	idleDownlinkHandler := idledownlink.New(sessions, idledownlink.ConfigFromSGWC(cfg.GTPC.IdleDownlink), logger.Logger)
@@ -541,7 +542,7 @@ func mmeRestorationPolicyAction(action string) session.MMERestorationPolicyActio
 	}
 }
 
-func mmeRestorationPolicyRules(rules []sgwcconfig.MMERestorationPolicyRuleConfig) []mmerestoration.PolicyRule {
+func mmeRestorationPolicyRules(rules []sgwcconfig.MMERestorationPolicyRuleConfig, action string) []mmerestoration.PolicyRule {
 	out := make([]mmerestoration.PolicyRule, 0, len(rules))
 	for _, rule := range rules {
 		out = append(out, mmerestoration.PolicyRule{
@@ -549,7 +550,7 @@ func mmeRestorationPolicyRules(rules []sgwcconfig.MMERestorationPolicyRuleConfig
 			QCI:            rule.QCI,
 			ARPPriorityMin: rule.ARPPriorityMin,
 			ARPPriorityMax: rule.ARPPriorityMax,
-			Reason:         rule.Reason,
+			Reason:         policyreason.Build("mme-restoration", action, policyreason.Rule{APN: rule.APN, QCI: rule.QCI, ARPPriorityMin: rule.ARPPriorityMin, ARPPriorityMax: rule.ARPPriorityMax}),
 		})
 	}
 	return out
@@ -564,12 +565,12 @@ func ddnControlConfig(cfg sgwcconfig.DDNControlConfig) ddncontrol.Config {
 		HonorMMELowPriorityThrottling: cfg.HonorMMELowPriorityThrottling,
 		LowPriorityThrottle:           time.Duration(cfg.LowPriorityThrottleSeconds) * time.Second,
 		HighPriorityBypass:            cfg.HighPriorityBypass,
-		HighPriority:                  ddnControlPriorityRules(cfg.HighPriority),
-		LowPriority:                   ddnControlPriorityRules(cfg.LowPriority),
+		HighPriority:                  ddnControlPriorityRules(cfg.HighPriority, "high-priority"),
+		LowPriority:                   ddnControlPriorityRules(cfg.LowPriority, "low-priority"),
 	}
 }
 
-func ddnControlPriorityRules(rules []sgwcconfig.DDNControlPriorityRuleConfig) []ddncontrol.PriorityRule {
+func ddnControlPriorityRules(rules []sgwcconfig.DDNControlPriorityRuleConfig, action string) []ddncontrol.PriorityRule {
 	out := make([]ddncontrol.PriorityRule, 0, len(rules))
 	for _, rule := range rules {
 		out = append(out, ddncontrol.PriorityRule{
@@ -577,7 +578,7 @@ func ddnControlPriorityRules(rules []sgwcconfig.DDNControlPriorityRuleConfig) []
 			QCI:            rule.QCI,
 			ARPPriorityMin: rule.ARPPriorityMin,
 			ARPPriorityMax: rule.ARPPriorityMax,
-			Reason:         rule.Reason,
+			Reason:         policyreason.Build("ddn", action, policyreason.Rule{APN: rule.APN, QCI: rule.QCI, ARPPriorityMin: rule.ARPPriorityMin, ARPPriorityMax: rule.ARPPriorityMax}),
 		})
 	}
 	return out

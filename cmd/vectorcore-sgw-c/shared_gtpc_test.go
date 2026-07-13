@@ -47,7 +47,7 @@ func TestSharedGTPCConstructorsUseOneTransport(t *testing.T) {
 	cfg.Interfaces.Control = map[string]sgwcconfig.ControlInterfaceConfig{
 		"shared": {Listen: "127.0.0.1:0"},
 	}
-	cfg.GTPC.S11 = sgwcconfig.GTPCLogical{Bind: "shared"}
+	cfg.GTPC.S11 = sgwcconfig.S11Logical{Bind: "shared", Timers: cfg.S11}
 	cfg.GTPC.S5C = sgwcconfig.GTPCLogical{Bind: "shared"}
 	cfg.PFCP.LocalAddr = "127.0.0.1:0"
 	cfg.PFCP.SGWU = []sgwcconfig.SGWUPeer{{Name: "sgw-u-1", Addr: "127.0.0.2:8805"}}

@@ -8,6 +8,7 @@ import (
 
 	sgwcconfig "vectorcore-sgw/internal/config/sgwc"
 	"vectorcore-sgw/internal/sgwc/bearer"
+	"vectorcore-sgw/internal/sgwc/policyreason"
 	"vectorcore-sgw/internal/sgwc/session"
 )
 
@@ -243,10 +244,8 @@ func bearerRuleMatches(rule sgwcconfig.BearerInactivityRuleConfig, apn, bearerTy
 }
 
 func policyReason(rule sgwcconfig.BearerInactivityRuleConfig, fallback string) string {
-	if rule.Reason != "" {
-		return rule.Reason
-	}
-	return fallback
+	action := strings.TrimSuffix(fallback, "-rule")
+	return policyreason.Build("bearer-inactivity", action, policyreason.Rule{APN: rule.APN, QCI: rule.QCI, ARPPriorityMin: rule.ARPPriorityMin, ARPPriorityMax: rule.ARPPriorityMax, BearerType: rule.BearerType, IdleSeconds: rule.IdleSeconds})
 }
 
 func latestTime(a, b time.Time) time.Time {

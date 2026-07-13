@@ -11,7 +11,7 @@ GOCACHE    ?= /tmp/vectorcore-sgw-gocache
 GOMODCACHE ?= /tmp/vectorcore-sgw-gomodcache
 GOENV       = GOCACHE=$(GOCACHE) GOMODCACHE=$(GOMODCACHE)
 
-VERSION    ?= 0.2.8
+VERSION    ?= 1.0.0
 BUILD_DATE ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
 LDFLAGS     = -X main.version=$(VERSION) -X main.buildDate=$(BUILD_DATE)
 

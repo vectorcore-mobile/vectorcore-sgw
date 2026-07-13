@@ -32,7 +32,7 @@ func TestEvaluatorPreserveRuleWinsBeforeCleanup(t *testing.T) {
 	sess.MarkBearerControlActivity(7, "test", now.Add(-30*time.Minute))
 
 	decision := NewEvaluator(testConfig(true)).EvaluateBearer(sess, sess.GetBearer(7), now)
-	if decision.Action != DecisionPreserve || decision.Reason != "preserve-qci-1" {
+	if decision.Action != DecisionPreserve || decision.Reason != "bearer-inactivity-preserve-qci-1" {
 		t.Fatalf("decision = %+v; want preserve qci 1", decision)
 	}
 }
@@ -45,7 +45,6 @@ func TestEvaluatorDeniesDefaultBearerCleanupUnlessExplicitlyEnabled(t *testing.T
 	cfg.Cleanup = append(cfg.Cleanup, sgwcconfig.BearerInactivityRuleConfig{
 		BearerType:  "default",
 		IdleSeconds: 300,
-		Reason:      "default-idle",
 	})
 
 	decision := NewEvaluator(cfg).EvaluateBearer(sess, sess.GetBearer(5), now)
@@ -173,10 +172,10 @@ func testConfig(enabled bool) sgwcconfig.BearerInactivityConfig {
 		DeleteDefaultBearers:           false,
 		RequireNoRecentControlActivity: true,
 		Preserve: []sgwcconfig.BearerInactivityRuleConfig{
-			{QCI: 1, Reason: "preserve-qci-1"},
+			{QCI: 1},
 		},
 		Cleanup: []sgwcconfig.BearerInactivityRuleConfig{
-			{BearerType: "dedicated", IdleSeconds: 300, Reason: "dedicated-idle"},
+			{BearerType: "dedicated", IdleSeconds: 300},
 		},
 	}
 }

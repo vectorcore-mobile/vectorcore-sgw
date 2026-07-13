@@ -154,11 +154,11 @@ func New(cfg *sgwcconfig.Config, startTime time.Time, log *slog.Logger) (*Client
 		return nil, fmt.Errorf("PFCP client: derive local Node ID from %q: %w", cfg.PFCP.LocalAddr, err)
 	}
 
-	hbInterval := time.Duration(cfg.PFCP.HeartbeatIntervalSeconds) * time.Second
+	hbInterval := time.Duration(cfg.PFCP.Heartbeat.HeartbeatIntervalSeconds) * time.Second
 	if hbInterval == 0 {
 		hbInterval = 10 * time.Second
 	}
-	hbTimeout := time.Duration(cfg.PFCP.HeartbeatTimeoutSeconds) * time.Second
+	hbTimeout := time.Duration(cfg.PFCP.Heartbeat.HeartbeatTimeoutSeconds) * time.Second
 	if hbTimeout == 0 {
 		hbTimeout = 30 * time.Second
 	}

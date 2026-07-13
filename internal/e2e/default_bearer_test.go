@@ -118,7 +118,7 @@ func TestDefaultBearerAttachProgramsControlPlaneAndUserspaceGTPU(t *testing.T) {
 		"mme_path": {Listen: fmt.Sprintf("%s:%d", ctrlIP, sgwcS11Port)},
 		"pgw_path": {Listen: fmt.Sprintf("%s:%d", ctrlIP, sgwcS5CPort)},
 	}
-	sgwcCfg.GTPC.S11 = sgwcconfig.GTPCLogical{Bind: "mme_path"}
+	sgwcCfg.GTPC.S11 = sgwcconfig.S11Logical{Bind: "mme_path", Timers: sgwcCfg.S11}
 	sgwcCfg.GTPC.S5C = sgwcconfig.GTPCLogical{Bind: "pgw_path"}
 	sgwcCfg.S11.T3ResponseSeconds = 1
 	sgwcCfg.S11.N3Requests = 2
@@ -126,8 +126,8 @@ func TestDefaultBearerAttachProgramsControlPlaneAndUserspaceGTPU(t *testing.T) {
 	sgwcCfg.S11.N3Requests = 2
 	sgwcCfg.PFCP.LocalAddr = fmt.Sprintf("%s:%d", ctrlIP, sgwcPFCPPort)
 	sgwcCfg.PFCP.SGWU = []sgwcconfig.SGWUPeer{{Name: "sgwu-e2e", Addr: sgwuCfg.PFCP.Listen}}
-	sgwcCfg.PFCP.HeartbeatIntervalSeconds = 60
-	sgwcCfg.PFCP.HeartbeatTimeoutSeconds = 3
+	sgwcCfg.PFCP.Heartbeat.HeartbeatIntervalSeconds = 60
+	sgwcCfg.PFCP.Heartbeat.HeartbeatTimeoutSeconds = 3
 	sgwcCfg.SGWC.ControlPlaneIP = ctrlIP
 
 	sessions := sgwcsession.NewManager()
@@ -299,7 +299,7 @@ func TestDedicatedBearerCreateUpdateDeleteProgramsPFCPAndAPI(t *testing.T) {
 		"mme_path": {Listen: fmt.Sprintf("%s:%d", ctrlIP, sgwcS11Port)},
 		"pgw_path": {Listen: fmt.Sprintf("%s:%d", ctrlIP, sgwcS5CPort)},
 	}
-	sgwcCfg.GTPC.S11 = sgwcconfig.GTPCLogical{Bind: "mme_path"}
+	sgwcCfg.GTPC.S11 = sgwcconfig.S11Logical{Bind: "mme_path", Timers: sgwcCfg.S11}
 	sgwcCfg.GTPC.S5C = sgwcconfig.GTPCLogical{Bind: "pgw_path"}
 	sgwcCfg.S11.T3ResponseSeconds = 1
 	sgwcCfg.S11.N3Requests = 2
@@ -307,8 +307,8 @@ func TestDedicatedBearerCreateUpdateDeleteProgramsPFCPAndAPI(t *testing.T) {
 	sgwcCfg.S11.N3Requests = 2
 	sgwcCfg.PFCP.LocalAddr = fmt.Sprintf("%s:%d", ctrlIP, sgwcPFCPPort)
 	sgwcCfg.PFCP.SGWU = []sgwcconfig.SGWUPeer{{Name: "sgwu-e2e", Addr: sgwuCfg.PFCP.Listen}}
-	sgwcCfg.PFCP.HeartbeatIntervalSeconds = 60
-	sgwcCfg.PFCP.HeartbeatTimeoutSeconds = 3
+	sgwcCfg.PFCP.Heartbeat.HeartbeatIntervalSeconds = 60
+	sgwcCfg.PFCP.Heartbeat.HeartbeatTimeoutSeconds = 3
 	sgwcCfg.SGWC.ControlPlaneIP = ctrlIP
 
 	sessions := sgwcsession.NewManager()

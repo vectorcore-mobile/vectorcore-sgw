@@ -1,169 +1,226 @@
+# Stable identity advertised by this SGW-C instance.
 sgwc:
   node_id: "sgw-c-1"
   plmn:
+    # Keep MCC/MNC quoted so leading zeroes are preserved.
     mcc: "311"
     mnc: "435"
 
 interfaces:
   control:
-    # "sgwinterface" is an operator-chosen logical name. It can be any
-    # YAML key; gtpc.s11.bind and gtpc.s5c.bind below reference this name.
+    # Logical control-plane interface referenced by the S11 and S5-C bindings below.
     sgwinterface:
       listen: "10.90.250.59:2123"
 
+# GTP-C transport, transaction, and peer-liveness behavior.
 gtpc:
   s11:
-    # Bind S11 to interfaces.control.sgwinterface.
     bind: "sgwinterface"
+    timers:
+      # Retransmission interval for an unanswered S11 request, in seconds.
+      t3_response_seconds: 3
+      # Maximum S11 retransmission count before the transaction fails.
+      n3_requests: 5
   s5c:
-    # Bind S5/S8-C to interfaces.control.sgwinterface. 
     bind: "sgwinterface"
-  create_bearer_retry_guard:
-    enabled: true
-  transaction_collision:
-    # strict: reject unsafe overlaps; permissive: allow bearer-scoped unknown-EBI overlaps.
-    mode: "strict"
-    active_procedure_timeout_seconds: 120
-  nsa_dcnr:
-    enabled: true
-    forward_secondary_rat_usage_reports: true
+  transactions:
+    create_bearer_retry_guard:
+      # Reuse cached responses when a PGW retries Create Bearer Request.
+      enabled: true
+    collision_handling:
+      # strict rejects unsafe overlaps; permissive allows limited bearer-scoped unknown-EBI overlaps.
+      mode: "strict"
+      # Discard stale in-flight procedure state after this many seconds.
+      active_procedure_timeout_seconds: 120
   peer_health:
+    # Send GTP Echo probes and track peer path/restart state.
     enabled: true
-    echo_interval_seconds: 30
-    echo_timeout_seconds: 3
-    suspect_after_missed: 2
-    down_after_missed: 3
-    degraded_rtt_ms: 500
-    probe_mme_peers: true
-    probe_pgw_peers: true
+    timers:
+      # Time between probes of a known peer, in seconds.
+      echo_interval_seconds: 30
+      # Maximum wait for an Echo Response before the probe is counted as missed.
+      echo_timeout_seconds: 3
+    thresholds:
+      # Consecutive misses that move a peer into suspect state.
+      suspect_after_missed: 2
+      # Consecutive misses that mark a peer down; must not be below suspect_after_missed.
+      down_after_missed: 3
+      # Round-trip time in milliseconds at or above which a responsive peer is degraded.
+      degraded_rtt_ms: 500
+    probe:
+      mme: true
+      pgw: true
+    # Log a warning when a procedure targets a peer already known to be down.
     warn_on_down_peer_procedure: true
-  pgw_failure:
-    enabled: true
-    mark_sessions_on_path_down: true
-    mark_sessions_on_restart: true
-    block_new_procedures_to_down_pgw: false
-    notify_mme_on_pgw_restart: false
-  mme_restoration:
-    enabled: true
-    mark_sessions_on_path_down: true
-    mark_sessions_on_restart: true
-    enforce_delete_policy: true
-    trigger_ddn: true
-    cleanup_timeout_seconds: 30
-    default_action: preserve
-    preserve:
-      - apn: "ims"
-        reason: "preserve IMS PDN for network triggered service restoration"
-      - qci: 1
-        reason: "preserve conversational bearer"
-      - arp_priority_min: 1
-        arp_priority_max: 3
-        reason: "preserve high-priority ARP sessions"
-    delete:
-      - apn: "internet"
-        qci: 9
-        reason: "low-priority internet PDN can be released after MME restart"
-  ddn_control:
-    enabled: true
-    per_mme_rate_limit_per_second: 50
-    per_mme_burst: 100
-    per_ue_suppression_seconds: 10
-    honor_mme_low_priority_throttling: true
-    low_priority_throttle_seconds: 30
-    high_priority_bypass: true
-    delayed_queue_max: 1000
-    delayed_queue_per_mme: 200
-    delayed_max_age_seconds: 30
-    stop_paging_enabled: false
-    stop_paging_on_ddn_ack: false
-    high_priority:
-      - apn: "ims"
-        reason: "prioritize IMS paging"
-      - qci: 1
-        reason: "prioritize conversational bearer paging"
-      - arp_priority_min: 1
-        arp_priority_max: 3
-        reason: "prioritize high ARP paging"
-    low_priority:
-      - apn: "internet"
-        qci: 9
-        reason: "throttle low-priority internet DDN first"
-  idle_downlink_notification:
-    enabled: false
-    trigger_ddn: true
-    report_throttle_seconds: 10
-    require_release_access_drop: true
-    high_priority:
-      - apn: "ims"
-        reason: "idle downlink IMS should trigger service restoration"
-      - qci: 1
-        reason: "idle downlink conversational bearer should trigger service restoration"
-      - arp_priority_min: 1
-        arp_priority_max: 3
-        reason: "idle downlink high ARP should trigger service restoration"
-    suppress:
-      - apn: "internet"
-        qci: 9
-        reason: "do not page low-priority internet traffic by default"
-  session_recovery:
-    enabled: false
-    backend: "sqlite"
-    sqlite_path: "/opt/vectorcore/data/sgwc-db"
-    restore_on_startup: true
-    reconcile_on_startup: true
-    checkpoint_interval_seconds: 5
-  bearer_inactivity:
-    enabled: false
-    check_interval_seconds: 30
-    dedicated_bearer_idle_seconds: 300
-    pending_bearer_timeout_seconds: 60
-    default_bearer_idle_seconds: 0
-    delete_default_bearers: false
-    require_no_recent_control_activity: true
-    preserve:
-      - apn: "ims"
-        qci: 5
-        bearer_type: "default"
-        reason: "preserve IMS signaling default bearer"
-      - qci: 1
-        reason: "preserve conversational bearer until dataplane confirms idle"
-    cleanup:
-      - bearer_type: "dedicated"
-        idle_seconds: 300
-        reason: "dedicated bearer inactive"
-
-s11:
-  t3_response_seconds: 3
-  n3_requests: 5
 
 pfcp:
   local_addr: "127.0.0.1:8805"
-  heartbeat_interval_seconds: 10
-  heartbeat_timeout_seconds: 30
+  heartbeat:
+    # PFCP heartbeat cadence and failure timeout, in seconds.
+    interval_seconds: 10
+    timeout_seconds: 30
   sgwu:
     - name: "sgw-u-1"
       node_id: "sgw-u-1"
       addr: "127.0.0.2:8805"
 
+# Optional SGW-C behaviors. Master switches preserve their documented defaults.
+features:
+  nsa_dcnr:
+    enabled: true
+    # Forward S11 Secondary RAT Usage Data Reports to the owning PGW over S5/S8-C.
+    forward_secondary_rat_usage_reports: true
+  pgw_failure_handling:
+    enabled: true
+    detection:
+      mark_sessions_on_path_down: true
+      mark_sessions_on_restart: true
+    actions:
+      # When false, existing behavior permits attempts and relies on normal transaction failure.
+      block_new_procedures_to_down_pgw: false
+      # Reserved until PGW-restart notification has protocol and lab support; true is rejected.
+      notify_mme_on_pgw_restart: false
+  mme_restoration:
+    enabled: true
+    detection:
+      mark_sessions_on_path_down: true
+      mark_sessions_on_restart: true
+    actions:
+      enforce_delete_policy: true
+      trigger_ddn: true
+      # Time allowed for policy-driven cleanup, in seconds.
+      cleanup_timeout_seconds: 30
+      # Decision when no rule matches: preserve or delete.
+      default_action: "preserve"
+    policy:
+      preserve:
+        # Preserve IMS PDNs for network-triggered service restoration.
+        # Generated reason: mme-restoration-preserve-apn-ims
+        - apn: "ims"
+        # Preserve conversational bearers.
+        # Generated reason: mme-restoration-preserve-qci-1
+        - qci: 1
+        # Preserve sessions with high-priority ARP.
+        # Generated reason: mme-restoration-preserve-arp-1-3
+        - arp:
+            priority_min: 1
+            priority_max: 3
+      delete:
+        # Internet QCI 9 sessions may be released after an MME restart.
+        # Generated reason: mme-restoration-delete-apn-internet-qci-9
+        - apn: "internet"
+          qci: 9
+  ddn:
+    enabled: true
+    rate_limit:
+      per_mme_per_second: 50
+      per_mme_burst: 100
+      # Suppress repeat paging for the same UE during this interval; zero disables suppression.
+      per_ue_suppression_seconds: 10
+    low_priority_throttling:
+      honor_mme_throttling: true
+      throttle_seconds: 30
+      high_priority_bypass: true
+    delayed_queue:
+      max_entries: 1000
+      max_entries_per_mme: 200
+      max_age_seconds: 30
+    stop_paging:
+      enabled: false
+      # Send Stop Paging only after an accepted DDN Ack; requires enabled=true.
+      on_ddn_ack: false
+    policy:
+      high_priority:
+        # Prioritize IMS paging.
+        # Generated reason: ddn-high-priority-apn-ims
+        - apn: "ims"
+        # Prioritize conversational bearer paging.
+        # Generated reason: ddn-high-priority-qci-1
+        - qci: 1
+        # Prioritize paging for high-priority ARP sessions.
+        # Generated reason: ddn-high-priority-arp-1-3
+        - arp: {priority_min: 1, priority_max: 3}
+      low_priority:
+        # Apply low-priority handling to Internet QCI 9 sessions.
+        # Generated reason: ddn-low-priority-apn-internet-qci-9
+        - apn: "internet"
+          qci: 9
+  idle_downlink_notification:
+    # Disabled by default; when enabled, eligible SGW-U idle-downlink reports can trigger DDN.
+    enabled: false
+    actions:
+      trigger_ddn: true
+    conditions:
+      require_release_access_drop: true
+    throttling:
+      report_throttle_seconds: 10
+    policy:
+      high_priority:
+        # Idle downlink IMS traffic may trigger service restoration.
+        # Generated reason: idle-downlink-high-priority-apn-ims
+        - apn: "ims"
+        # Idle downlink conversational traffic may trigger restoration.
+        # Generated reason: idle-downlink-high-priority-qci-1
+        - qci: 1
+        # Idle downlink traffic for high-priority ARP sessions may trigger restoration.
+        # Generated reason: idle-downlink-high-priority-arp-1-3
+        - arp: {priority_min: 1, priority_max: 3}
+      suppress:
+        # Suppress idle-downlink paging for low-priority Internet traffic.
+        # Generated reason: idle-downlink-suppress-apn-internet-qci-9
+        - apn: "internet"
+          qci: 9
+  session_recovery:
+    # Disabled by default; enable to checkpoint and restore SGW-C session state.
+    enabled: false
+    storage:
+      backend: "sqlite"
+      sqlite_path: "/opt/vectorcore/data/sgwc-db"
+    startup:
+      restore: true
+      # Reconciliation requires restore=true and compares restored state with SGW-U state.
+      reconcile: true
+    checkpoint_interval_seconds: 5
+  bearer_inactivity:
+    # Disabled by default; enable to remove bearers only after policy and activity checks pass.
+    enabled: false
+    timers:
+      check_interval_seconds: 30
+      dedicated_bearer_idle_seconds: 300
+      pending_bearer_timeout_seconds: 60
+      # Zero disables default-bearer inactivity cleanup.
+      default_bearer_idle_seconds: 0
+    conditions:
+      require_no_recent_control_activity: true
+    actions:
+      delete_default_bearers: false
+    policy:
+      preserve:
+        # Preserve the IMS signaling default bearer.
+        # Generated reason: bearer-inactivity-preserve-apn-ims-qci-5-default
+        - apn: "ims"
+          qci: 5
+          bearer_type: "default"
+        # Preserve conversational bearers until inactivity is confirmed.
+        # Generated reason: bearer-inactivity-preserve-qci-1
+        - qci: 1
+      cleanup:
+        # Remove dedicated bearers after 300 seconds of inactivity.
+        # Generated reason: bearer-inactivity-cleanup-dedicated-idle-300
+        - bearer_type: "dedicated"
+          idle_seconds: 300
+
 qos:
   outer_marking:
     enabled: true
-    gtpc:
-      enabled: true
-      dscp: 24
-    pfcp:
-      enabled: true
-      dscp: 40
-
+    gtpc: {enabled: true, dscp: 24}
+    pfcp: {enabled: true, dscp: 40}
 logging:
-  level: info
-  file: /var/log/vectorcore/sgw/sgw-c.log
-
+  level: "info"
+  file: "/var/log/vectorcore/sgw/sgw-c.log"
 api:
   listen: "0.0.0.0:8080"
-
 metrics:
   listen: "0.0.0.0:9090"
-
 shutdown:
   timeout_seconds: 5

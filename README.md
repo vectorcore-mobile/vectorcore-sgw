@@ -174,6 +174,52 @@ Validation example:
 
 Default file: `configs/sgw-c.yaml`
 
+### Configuration layout and migration
+
+The canonical SGW-C schema separates transport from optional behavior:
+
+- `gtpc:` contains S11/S5-C bindings, S11 retransmission timers, transaction handling, and GTP peer health.
+- `pfcp:` contains the local endpoint, heartbeat settings, and SGW-U peers.
+- `features:` contains NSA/DCNR, PGW failure handling, MME restoration, DDN control, idle-downlink notification, session recovery, and bearer-inactivity cleanup.
+- `qos:`, `logging:`, `api:`, `metrics:`, and `shutdown:` remain independent top-level concerns.
+
+This is a backward-incompatible schema change. Parsing is strict: the former top-level `s11:` block, feature blocks under `gtpc:`, flat feature settings, and policy `reason:` fields are rejected. Validate migrated files with `sgw-c -validate` or `sgwctl validate` before deployment.
+
+Old:
+
+```yaml
+gtpc:
+  mme_restoration:
+    preserve:
+      - apn: "ims"
+        reason: "preserve IMS PDN for network triggered service restoration"
+
+s11:
+  t3_response_seconds: 3
+  n3_requests: 5
+```
+
+New:
+
+```yaml
+gtpc:
+  s11:
+    bind: "sgwinterface"
+    timers:
+      t3_response_seconds: 3
+      n3_requests: 5
+
+features:
+  mme_restoration:
+    policy:
+      preserve:
+        # Preserve IMS PDNs for network-triggered service restoration.
+        # Generated reason: mme-restoration-preserve-apn-ims
+        - apn: "ims"
+```
+
+Policy reasons are generated internally; operators should put human rationale in YAML comments. Codes use `<feature>-<action>-<matchers>` with matcher fields ordered as APN, QCI, ARP range, bearer type, and idle timeout. Values are lowercased and sanitized. Examples include `ddn-high-priority-apn-ims`, `mme-restoration-delete-apn-internet-qci-9`, and `bearer-inactivity-cleanup-dedicated-idle-300`. Generated codes continue to appear in logs, APIs, session state, and recovery checkpoints. Procedural reasons such as `per-mme-rate-limit` remain unchanged.
+
 Top-level sections:
 
 ```yaml
@@ -193,116 +239,147 @@ interfaces:
 gtpc:
   s11:
     bind: "sgwinterface"
+    timers:
+      t3_response_seconds: 3
+      n3_requests: 5
   s5c:
     bind: "sgwinterface"
-  create_bearer_retry_guard:
-    enabled: true
-  transaction_collision:
-    mode: "strict"
-    active_procedure_timeout_seconds: 120
-  nsa_dcnr:
-    enabled: true
-    forward_secondary_rat_usage_reports: true
+  transactions:
+    create_bearer_retry_guard:
+      enabled: true
+    collision_handling:
+      mode: "strict"
+      active_procedure_timeout_seconds: 120
   peer_health:
     enabled: true
-    echo_interval_seconds: 30
-    echo_timeout_seconds: 3
-    suspect_after_missed: 2
-    down_after_missed: 3
-    degraded_rtt_ms: 500
-    probe_mme_peers: true
-    probe_pgw_peers: true
+    timers:
+      echo_interval_seconds: 30
+      echo_timeout_seconds: 3
+    thresholds:
+      suspect_after_missed: 2
+      down_after_missed: 3
+      degraded_rtt_ms: 500
+    probe:
+      mme: true
+      pgw: true
     warn_on_down_peer_procedure: true
-  pgw_failure:
-    enabled: true
-    mark_sessions_on_path_down: true
-    mark_sessions_on_restart: true
-    block_new_procedures_to_down_pgw: false
-    notify_mme_on_pgw_restart: false
-  mme_restoration:
-    enabled: true
-    mark_sessions_on_path_down: true
-    mark_sessions_on_restart: true
-    enforce_delete_policy: true
-    trigger_ddn: true
-    cleanup_timeout_seconds: 30
-    default_action: preserve
-    preserve:
-      - apn: "ims"
-        reason: "preserve IMS PDN for network triggered service restoration"
-      - qci: 1
-        reason: "preserve conversational bearer"
-      - arp_priority_min: 1
-        arp_priority_max: 3
-        reason: "preserve high-priority ARP sessions"
-    delete:
-      - apn: "internet"
-        qci: 9
-        reason: "low-priority internet PDN can be released after MME restart"
-  ddn_control:
-    enabled: true
-    per_mme_rate_limit_per_second: 50
-    per_mme_burst: 100
-    per_ue_suppression_seconds: 10
-    honor_mme_low_priority_throttling: true
-    low_priority_throttle_seconds: 30
-    high_priority_bypass: true
-    delayed_queue_max: 1000
-    delayed_queue_per_mme: 200
-    delayed_max_age_seconds: 30
-    stop_paging_enabled: false
-    stop_paging_on_ddn_ack: false
-    high_priority:
-      - apn: "ims"
-        reason: "prioritize IMS paging"
-      - qci: 1
-        reason: "prioritize conversational bearer paging"
-      - arp_priority_min: 1
-        arp_priority_max: 3
-        reason: "prioritize high ARP paging"
-    low_priority:
-      - apn: "internet"
-        qci: 9
-        reason: "throttle low-priority internet DDN first"
-  session_recovery:
-    enabled: false
-    backend: "sqlite"
-    sqlite_path: ""
-    restore_on_startup: true
-    reconcile_on_startup: true
-    checkpoint_interval_seconds: 5
-  bearer_inactivity:
-    enabled: false
-    check_interval_seconds: 30
-    dedicated_bearer_idle_seconds: 300
-    pending_bearer_timeout_seconds: 60
-    default_bearer_idle_seconds: 0
-    delete_default_bearers: false
-    require_no_recent_control_activity: true
-    preserve:
-      - apn: "ims"
-        qci: 5
-        bearer_type: "default"
-        reason: "preserve IMS signaling default bearer"
-      - qci: 1
-        reason: "preserve conversational bearer until dataplane confirms idle"
-    cleanup:
-      - bearer_type: "dedicated"
-        idle_seconds: 300
-        reason: "dedicated bearer inactive"
-
-s11:
-  t3_response_seconds: 3
-  n3_requests: 5
 
 pfcp:
   local_addr: "127.0.0.1:8805"
-  heartbeat_interval_seconds: 10
-  heartbeat_timeout_seconds: 30
+  heartbeat:
+    interval_seconds: 10
+    timeout_seconds: 30
   sgwu:
     - name: "sgw-u-1"
       node_id: "sgw-u-1"
       addr: "127.0.0.2:8805"
+
+features:
+  nsa_dcnr:
+    enabled: true
+    forward_secondary_rat_usage_reports: true
+  pgw_failure_handling:
+    enabled: true
+    detection:
+      mark_sessions_on_path_down: true
+      mark_sessions_on_restart: true
+    actions:
+      block_new_procedures_to_down_pgw: false
+      notify_mme_on_pgw_restart: false
+  mme_restoration:
+    enabled: true
+    detection:
+      mark_sessions_on_path_down: true
+      mark_sessions_on_restart: true
+    actions:
+      enforce_delete_policy: true
+      trigger_ddn: true
+      cleanup_timeout_seconds: 30
+      default_action: "preserve"
+    policy:
+      preserve:
+        - apn: "ims"
+        - qci: 1
+        - arp:
+            priority_min: 1
+            priority_max: 3
+      delete:
+        - apn: "internet"
+          qci: 9
+  ddn:
+    enabled: true
+    rate_limit:
+      per_mme_per_second: 50
+      per_mme_burst: 100
+      per_ue_suppression_seconds: 10
+    low_priority_throttling:
+      honor_mme_throttling: true
+      throttle_seconds: 30
+      high_priority_bypass: true
+    delayed_queue:
+      max_entries: 1000
+      max_entries_per_mme: 200
+      max_age_seconds: 30
+    stop_paging:
+      enabled: false
+      on_ddn_ack: false
+    policy:
+      high_priority:
+        - apn: "ims"
+        - qci: 1
+        - arp:
+            priority_min: 1
+            priority_max: 3
+      low_priority:
+        - apn: "internet"
+          qci: 9
+  idle_downlink_notification:
+    enabled: false
+    actions:
+      trigger_ddn: true
+    conditions:
+      require_release_access_drop: true
+    throttling:
+      report_throttle_seconds: 10
+    policy:
+      high_priority:
+        - apn: "ims"
+        - qci: 1
+        - arp:
+            priority_min: 1
+            priority_max: 3
+      suppress:
+        - apn: "internet"
+          qci: 9
+  session_recovery:
+    enabled: false
+    storage:
+      backend: "sqlite"
+      sqlite_path: "/opt/vectorcore/data/sgwc-db"
+    startup:
+      restore: true
+      reconcile: true
+    checkpoint_interval_seconds: 5
+  bearer_inactivity:
+    enabled: false
+    timers:
+      check_interval_seconds: 30
+      dedicated_bearer_idle_seconds: 300
+      pending_bearer_timeout_seconds: 60
+      default_bearer_idle_seconds: 0
+    conditions:
+      require_no_recent_control_activity: true
+    actions:
+      delete_default_bearers: false
+    policy:
+      preserve:
+        - apn: "ims"
+          qci: 5
+          bearer_type: "default"
+        - qci: 1
+      cleanup:
+        - bearer_type: "dedicated"
+          idle_seconds: 300
 
 qos:
   outer_marking:
@@ -339,75 +416,75 @@ SGW-C options:
 | `sgwc.control_plane_ip` | IP advertised in SGW-C control-plane F-TEIDs. |
 | `interfaces.control.<name>.listen` | UDP listen address for a named control interface. |
 | `gtpc.s11.bind` | Named control interface used for S11. |
+| `gtpc.s11.timers.t3_response_seconds` | GTPv2-C retransmission timeout for unanswered S11 requests. |
+| `gtpc.s11.timers.n3_requests` | Maximum S11 retransmission count before transaction failure. |
 | `gtpc.s5c.bind` | Named control interface used for S5/S8-C. |
-| `gtpc.create_bearer_retry_guard.enabled` | Enables repeated Create Bearer retry guard. |
-| `gtpc.transaction_collision.mode` | GTPv2-C transaction collision policy. `strict` rejects unsafe overlaps. `permissive` only relaxes bearer-scoped overlaps when one side has no decoded EBI scope. |
-| `gtpc.transaction_collision.active_procedure_timeout_seconds` | Timeout for stale active GTPv2-C procedure state. Default 120. |
-| `gtpc.nsa_dcnr.enabled` | Enables Release 15 NSA/DCNR awareness in SGW-C. |
-| `gtpc.nsa_dcnr.forward_secondary_rat_usage_reports` | Forwards S11 Secondary RAT Usage Data Report IEs to the owner PGW session on S5/S8-C Modify Bearer. |
+| `gtpc.transactions.create_bearer_retry_guard.enabled` | Enables repeated Create Bearer retry guard. |
+| `gtpc.transactions.collision_handling.mode` | GTPv2-C transaction collision policy. `strict` rejects unsafe overlaps. `permissive` only relaxes bearer-scoped overlaps when one side has no decoded EBI scope. |
+| `gtpc.transactions.collision_handling.active_procedure_timeout_seconds` | Timeout for stale active GTPv2-C procedure state. Default 120. |
 | `gtpc.peer_health.enabled` | Enables SGW-C GTPv2-C peer health tracking and Echo probing. |
-| `gtpc.peer_health.echo_interval_seconds` | GTPv2-C Echo probe interval. Default 30. |
-| `gtpc.peer_health.echo_timeout_seconds` | GTPv2-C Echo response timeout. Default 3. |
-| `gtpc.peer_health.suspect_after_missed` | Consecutive missed Echo threshold for `suspect` state. Default 2. |
-| `gtpc.peer_health.down_after_missed` | Consecutive missed Echo threshold for `down` state. Default 3. |
-| `gtpc.peer_health.degraded_rtt_ms` | RTT threshold for `degraded` state. Default 500. |
-| `gtpc.peer_health.probe_mme_peers` | Enables Echo probing for observed MME GTP-C peers. |
-| `gtpc.peer_health.probe_pgw_peers` | Enables Echo probing for observed PGW GTP-C peers. |
+| `gtpc.peer_health.timers.echo_interval_seconds` | GTPv2-C Echo probe interval. Default 30. |
+| `gtpc.peer_health.timers.echo_timeout_seconds` | GTPv2-C Echo response timeout. Default 3. |
+| `gtpc.peer_health.thresholds.suspect_after_missed` | Consecutive missed Echo threshold for `suspect` state. Default 2. |
+| `gtpc.peer_health.thresholds.down_after_missed` | Consecutive missed Echo threshold for `down` state. Default 3. |
+| `gtpc.peer_health.thresholds.degraded_rtt_ms` | RTT threshold for `degraded` state. Default 500. |
+| `gtpc.peer_health.probe.mme` | Enables Echo probing for observed MME GTP-C peers. |
+| `gtpc.peer_health.probe.pgw` | Enables Echo probing for observed PGW GTP-C peers. |
 | `gtpc.peer_health.warn_on_down_peer_procedure` | Logs a warning when a procedure starts toward a peer currently marked `down`. |
-| `gtpc.pgw_failure.enabled` | Enables PGW restart/path-failure session marking. |
-| `gtpc.pgw_failure.mark_sessions_on_path_down` | Marks sessions indexed to a PGW when that PGW transitions down or back up. |
-| `gtpc.pgw_failure.mark_sessions_on_restart` | Marks sessions indexed to a PGW when that PGW's Recovery IE restart counter changes. |
-| `gtpc.pgw_failure.block_new_procedures_to_down_pgw` | If true, rejects new PGW-owned S5/S8-C procedures toward a PGW currently marked down. Default false, warning-only. |
-| `gtpc.pgw_failure.notify_mme_on_pgw_restart` | Reserved for future TS 29.274 PGW Restart Notification support. Must be false in this release. |
-| `gtpc.mme_restoration.enabled` | Enables MME restoration/NTSR handling. |
-| `gtpc.mme_restoration.mark_sessions_on_path_down` | Marks sessions indexed to an MME when that MME transitions down or back up. |
-| `gtpc.mme_restoration.mark_sessions_on_restart` | Marks sessions indexed to an MME when that MME's Recovery IE restart counter changes. |
-| `gtpc.mme_restoration.enforce_delete_policy` | Enforces delete-policy sessions with S5/S8-C Delete Session and PFCP cleanup. PGW rejection retains local state. |
-| `gtpc.mme_restoration.trigger_ddn` | Sends S11 Downlink Data Notification for preserved sessions during NTSR. |
-| `gtpc.mme_restoration.cleanup_timeout_seconds` | Timeout for restoration cleanup and DDN send operations. Default 30. |
-| `gtpc.mme_restoration.default_action` | Policy action for unmatched sessions. `preserve` or `delete`. Default `preserve`. |
-| `gtpc.mme_restoration.preserve[]` | Preserve rules matched by APN, QCI, and/or ARP priority range. Preserve rules win over delete rules. |
-| `gtpc.mme_restoration.delete[]` | Delete rules matched by APN, QCI, and/or ARP priority range. |
-| `gtpc.ddn_control.enabled` | Enables DDN throttling and priority paging decisions. |
-| `gtpc.ddn_control.per_mme_rate_limit_per_second` | Per-MME DDN token refill rate. Default 50. |
-| `gtpc.ddn_control.per_mme_burst` | Per-MME DDN token bucket burst size. Default 100. |
-| `gtpc.ddn_control.per_ue_suppression_seconds` | Suppresses duplicate non-high-priority DDNs for the same UE within this window. Default 10. |
-| `gtpc.ddn_control.honor_mme_low_priority_throttling` | Applies MME-provided DDN Ack low-priority throttling to future low-priority DDN decisions. |
-| `gtpc.ddn_control.low_priority_throttle_seconds` | Fallback low-priority throttle duration when the MME throttling IE lacks a usable duration. Default 30. |
-| `gtpc.ddn_control.high_priority_bypass` | Allows high-priority DDNs to bypass an empty per-MME token bucket. |
-| `gtpc.ddn_control.delayed_queue_max` | Global bound for delayed DDN queue entries. Default 1000. |
-| `gtpc.ddn_control.delayed_queue_per_mme` | Per-MME bound for delayed DDN queue entries. Default 200. |
-| `gtpc.ddn_control.delayed_max_age_seconds` | Maximum age for queued delayed DDN work. Default 30. |
-| `gtpc.ddn_control.stop_paging_enabled` | Enables Stop Paging support. Default false until ISR lab validation. |
-| `gtpc.ddn_control.stop_paging_on_ddn_ack` | If true, sends Stop Paging after accepted DDN Ack when restoration state proves it is eligible. Requires `stop_paging_enabled`. |
-| `gtpc.ddn_control.high_priority[]` | High-priority DDN rules matched by APN, QCI, and/or ARP priority range. |
-| `gtpc.ddn_control.low_priority[]` | Low-priority DDN rules matched by APN, QCI, and/or ARP priority range. |
-| `gtpc.idle_downlink_notification.enabled` | Enables idle downlink packet reporting/DDN trigger flow. Default false until live lab validation is complete. |
-| `gtpc.idle_downlink_notification.trigger_ddn` | Allows SGW-C to send S11 DDN for accepted idle downlink reports. |
-| `gtpc.idle_downlink_notification.report_throttle_seconds` | Per bearer/session idle downlink report throttle. Default 10. |
-| `gtpc.idle_downlink_notification.require_release_access_drop` | Limits idle downlink reports to DROP state caused by Release Access Bearers. Default true. |
-| `gtpc.idle_downlink_notification.high_priority[]` | Idle downlink report rules eligible for DDN, matched by APN, QCI, and/or ARP priority range. Defaults include IMS, QCI 1, and high ARP. |
-| `gtpc.idle_downlink_notification.suppress[]` | Idle downlink report rules suppressed by policy. Defaults suppress low-priority internet QCI 9. |
-| `gtpc.session_recovery.enabled` | Enables SGW-C session checkpoint/recovery. Default false until restore/reconcile phases are complete. |
-| `gtpc.session_recovery.backend` | Checkpoint backend. `sqlite` is the supported local restart-recovery backend; Redis/etcd are reserved for future HA. |
-| `gtpc.session_recovery.sqlite_path` | SQLite checkpoint DB path. Empty means derive from `sgwc.state_dir` in the SQLite backend phase. |
-| `gtpc.session_recovery.restore_on_startup` | Reload checkpointed SGW-C session state at startup. Restored sessions must reconcile before becoming active. |
-| `gtpc.session_recovery.reconcile_on_startup` | Reconcile restored sessions against SGW-U PFCP/eBPF state at startup. Requires `restore_on_startup`. |
-| `gtpc.session_recovery.checkpoint_interval_seconds` | Minimum periodic checkpoint cadence for dirty sessions. Default 5. |
-| `gtpc.bearer_inactivity.enabled` | Enables bearer inactivity tracking/cleanup. Default false while activity detection and cleanup execution are phased in. |
-| `gtpc.bearer_inactivity.check_interval_seconds` | Periodic inactivity scan interval. Default 30. |
-| `gtpc.bearer_inactivity.dedicated_bearer_idle_seconds` | Default idle threshold for dedicated bearers. Default 300. |
-| `gtpc.bearer_inactivity.pending_bearer_timeout_seconds` | Timeout for pending bearer procedures before they can be considered stale. Default 60. |
-| `gtpc.bearer_inactivity.default_bearer_idle_seconds` | Default-bearer idle threshold. `0` disables default-bearer inactivity cleanup. |
-| `gtpc.bearer_inactivity.delete_default_bearers` | Allows default-bearer inactivity cleanup when explicitly paired with a positive default-bearer idle timeout. Default false. |
-| `gtpc.bearer_inactivity.require_no_recent_control_activity` | Requires no recent bearer/session control activity before cleanup eligibility. Default true. |
-| `gtpc.bearer_inactivity.preserve[]` | Preserve rules matched by APN, QCI, bearer type, and/or ARP priority range. Preserve rules are intended to protect IMS signaling, QCI 1, and high-priority sessions. |
-| `gtpc.bearer_inactivity.cleanup[]` | Cleanup rules matched by bearer type/APN/QCI/ARP. Phase 1 only validates policy; later phases execute cleanup. |
-| `s11.t3_response_seconds` | GTPv2-C retransmission timeout. |
-| `s11.n3_requests` | GTPv2-C retransmission count. |
+| `features.nsa_dcnr.enabled` | Enables Release 15 NSA/DCNR awareness in SGW-C. |
+| `features.nsa_dcnr.forward_secondary_rat_usage_reports` | Forwards S11 Secondary RAT Usage Data Report IEs to the owner PGW session on S5/S8-C Modify Bearer. |
+| `features.pgw_failure_handling.enabled` | Enables PGW restart/path-failure session marking. |
+| `features.pgw_failure_handling.detection.mark_sessions_on_path_down` | Marks sessions indexed to a PGW when that PGW transitions down or back up. |
+| `features.pgw_failure_handling.detection.mark_sessions_on_restart` | Marks sessions indexed to a PGW when that PGW's Recovery IE restart counter changes. |
+| `features.pgw_failure_handling.actions.block_new_procedures_to_down_pgw` | If true, rejects new PGW-owned S5/S8-C procedures toward a PGW currently marked down. Default false, warning-only. |
+| `features.pgw_failure_handling.actions.notify_mme_on_pgw_restart` | Reserved for future TS 29.274 PGW Restart Notification support. Must be false in this release. |
+| `features.mme_restoration.enabled` | Enables MME restoration/NTSR handling. |
+| `features.mme_restoration.detection.mark_sessions_on_path_down` | Marks sessions indexed to an MME when that MME transitions down or back up. |
+| `features.mme_restoration.detection.mark_sessions_on_restart` | Marks sessions indexed to an MME when that MME's Recovery IE restart counter changes. |
+| `features.mme_restoration.actions.enforce_delete_policy` | Enforces delete-policy sessions with S5/S8-C Delete Session and PFCP cleanup. PGW rejection retains local state. |
+| `features.mme_restoration.actions.trigger_ddn` | Sends S11 Downlink Data Notification for preserved sessions during NTSR. |
+| `features.mme_restoration.actions.cleanup_timeout_seconds` | Timeout for restoration cleanup and DDN send operations. Default 30. |
+| `features.mme_restoration.actions.default_action` | Policy action for unmatched sessions. `preserve` or `delete`. Default `preserve`. |
+| `features.mme_restoration.policy.preserve[]` | Preserve rules matched by APN, QCI, and/or ARP priority range. Preserve rules win over delete rules. |
+| `features.mme_restoration.policy.delete[]` | Delete rules matched by APN, QCI, and/or ARP priority range. |
+| `features.ddn.enabled` | Enables DDN throttling and priority paging decisions. |
+| `features.ddn.rate_limit.per_mme_per_second` | Per-MME DDN token refill rate. Default 50. |
+| `features.ddn.rate_limit.per_mme_burst` | Per-MME DDN token bucket burst size. Default 100. |
+| `features.ddn.rate_limit.per_ue_suppression_seconds` | Suppresses duplicate non-high-priority DDNs for the same UE within this window. Default 10. |
+| `features.ddn.low_priority_throttling.honor_mme_throttling` | Applies MME-provided DDN Ack low-priority throttling to future low-priority DDN decisions. |
+| `features.ddn.low_priority_throttling.throttle_seconds` | Fallback low-priority throttle duration when the MME throttling IE lacks a usable duration. Default 30. |
+| `features.ddn.low_priority_throttling.high_priority_bypass` | Allows high-priority DDNs to bypass an empty per-MME token bucket. |
+| `features.ddn.delayed_queue.max_entries` | Global bound for delayed DDN queue entries. Default 1000. |
+| `features.ddn.delayed_queue.max_entries_per_mme` | Per-MME bound for delayed DDN queue entries. Default 200. |
+| `features.ddn.delayed_queue.max_age_seconds` | Maximum age for queued delayed DDN work. Default 30. |
+| `features.ddn.stop_paging.enabled` | Enables Stop Paging support. Default false until ISR lab validation. |
+| `features.ddn.stop_paging.on_ddn_ack` | If true, sends Stop Paging after accepted DDN Ack when restoration state proves it is eligible. Requires `enabled=true`. |
+| `features.ddn.policy.high_priority[]` | High-priority DDN rules matched by APN, QCI, and/or ARP priority range. |
+| `features.ddn.policy.low_priority[]` | Low-priority DDN rules matched by APN, QCI, and/or ARP priority range. |
+| `features.idle_downlink_notification.enabled` | Enables idle downlink packet reporting/DDN trigger flow. Default false until live lab validation is complete. |
+| `features.idle_downlink_notification.actions.trigger_ddn` | Allows SGW-C to send S11 DDN for accepted idle downlink reports. |
+| `features.idle_downlink_notification.throttling.report_throttle_seconds` | Per bearer/session idle downlink report throttle. Default 10. |
+| `features.idle_downlink_notification.conditions.require_release_access_drop` | Limits idle downlink reports to DROP state caused by Release Access Bearers. Default true. |
+| `features.idle_downlink_notification.policy.high_priority[]` | Idle downlink report rules eligible for DDN, matched by APN, QCI, and/or ARP priority range. Defaults include IMS, QCI 1, and high ARP. |
+| `features.idle_downlink_notification.policy.suppress[]` | Idle downlink report rules suppressed by policy. Defaults suppress low-priority internet QCI 9. |
+| `features.session_recovery.enabled` | Enables SGW-C session checkpoint/recovery. Default false until restore/reconcile phases are complete. |
+| `features.session_recovery.storage.backend` | Checkpoint backend. `sqlite` is the supported local restart-recovery backend; Redis/etcd are reserved for future HA. |
+| `features.session_recovery.storage.sqlite_path` | SQLite checkpoint DB path. |
+| `features.session_recovery.startup.restore` | Reload checkpointed SGW-C session state at startup. Restored sessions must reconcile before becoming active. |
+| `features.session_recovery.startup.reconcile` | Reconcile restored sessions against SGW-U PFCP/eBPF state at startup. Requires `restore=true`. |
+| `features.session_recovery.checkpoint_interval_seconds` | Minimum periodic checkpoint cadence for dirty sessions. Default 5. |
+| `features.bearer_inactivity.enabled` | Enables bearer inactivity tracking/cleanup. Default false while activity detection and cleanup execution are phased in. |
+| `features.bearer_inactivity.timers.check_interval_seconds` | Periodic inactivity scan interval. Default 30. |
+| `features.bearer_inactivity.timers.dedicated_bearer_idle_seconds` | Default idle threshold for dedicated bearers. Default 300. |
+| `features.bearer_inactivity.timers.pending_bearer_timeout_seconds` | Timeout for pending bearer procedures before they can be considered stale. Default 60. |
+| `features.bearer_inactivity.timers.default_bearer_idle_seconds` | Default-bearer idle threshold. `0` disables default-bearer inactivity cleanup. |
+| `features.bearer_inactivity.actions.delete_default_bearers` | Allows default-bearer inactivity cleanup when explicitly paired with a positive default-bearer idle timeout. Default false. |
+| `features.bearer_inactivity.conditions.require_no_recent_control_activity` | Requires no recent bearer/session control activity before cleanup eligibility. Default true. |
+| `features.bearer_inactivity.policy.preserve[]` | Preserve rules matched by APN, QCI, bearer type, and/or ARP priority range. Preserve rules are intended to protect IMS signaling, QCI 1, and high-priority sessions. |
+| `features.bearer_inactivity.policy.cleanup[]` | Cleanup rules matched by bearer type/APN/QCI/ARP. Phase 1 only validates policy; later phases execute cleanup. |
 | `pfcp.local_addr` | SGW-C PFCP local address. |
-| `pfcp.heartbeat_interval_seconds` | PFCP heartbeat interval. |
-| `pfcp.heartbeat_timeout_seconds` | PFCP heartbeat timeout. |
+| `pfcp.heartbeat.interval_seconds` | PFCP heartbeat interval. |
+| `pfcp.heartbeat.timeout_seconds` | PFCP heartbeat timeout. |
 | `pfcp.sgwu[].name` | SGW-U peer name. |
 | `pfcp.sgwu[].node_id` | SGW-U peer node ID. |
 | `pfcp.sgwu[].addr` | SGW-U PFCP address. |

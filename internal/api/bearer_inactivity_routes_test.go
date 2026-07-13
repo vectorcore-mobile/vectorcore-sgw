@@ -34,7 +34,6 @@ func TestBearerInactivityRouteExposesDecisionsAndRuntime(t *testing.T) {
 	cfg.Cleanup = []sgwcconfig.BearerInactivityRuleConfig{{
 		BearerType:  "dedicated",
 		IdleSeconds: 300,
-		Reason:      "dedicated-idle",
 	}}
 	status := bearerinactivity.NewStatus()
 	status.RecordScan(now, bearerinactivity.CleanupResult{Planned: 1, Cleaned: 1}, nil)
@@ -65,7 +64,7 @@ func TestBearerInactivityRouteExposesDecisionsAndRuntime(t *testing.T) {
 		if decision.EBI == 7 {
 			found = true
 			if decision.Action != string(bearerinactivity.DecisionCleanupDedicatedBearer) ||
-				decision.Reason != "dedicated-idle" ||
+				decision.Reason != "bearer-inactivity-cleanup-dedicated-idle-300" ||
 				decision.IdleThresholdSeconds != 300 ||
 				decision.IdleForSeconds != 600 {
 				t.Fatalf("decision for EBI 7 = %+v", decision)
